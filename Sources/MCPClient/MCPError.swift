@@ -32,4 +32,12 @@ public enum MCPError: Error, Sendable, Equatable {
 
     /// The response could not be decoded as valid JSON-RPC.
     case invalidResponse
+
+    /// The subprocess could not be spawned (StdioTransport).
+    ///
+    /// - Parameter reason: A human-readable description of the spawn failure.
+    case processSpawnFailed(reason: String)
+
+    /// The transport connection was closed unexpectedly (e.g., subprocess exited).
+    case transportClosed
 }
