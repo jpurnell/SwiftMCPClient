@@ -45,6 +45,39 @@ public struct JSONRPCRequest: Codable, Sendable {
     }
 }
 
+/// A JSON-RPC 2.0 notification message (no `id`, no response expected).
+///
+/// Notifications are one-way messages. The MCP protocol uses them for
+/// signals like `notifications/initialized` (sent after handshake)
+/// and `notifications/progress` (sent during long-running operations).
+///
+/// ## MCP Schema
+///
+/// ```json
+/// {"jsonrpc": "2.0", "method": "notifications/initialized"}
+/// ```
+public struct JSONRPCNotification: Codable, Sendable {
+    /// The JSON-RPC protocol version. Always `"2.0"`.
+    public let jsonrpc: String
+
+    /// The notification method name.
+    public let method: String
+
+    /// Optional parameters for the notification.
+    public let params: AnyCodableValue?
+
+    /// Creates a new JSON-RPC notification.
+    ///
+    /// - Parameters:
+    ///   - method: The notification method name.
+    ///   - params: Optional parameters. Defaults to `nil`.
+    public init(method: String, params: AnyCodableValue? = nil) {
+        self.jsonrpc = "2.0"
+        self.method = method
+        self.params = params
+    }
+}
+
 /// A JSON-RPC 2.0 response message received from an MCP server.
 ///
 /// A response contains either a ``result`` (on success) or an ``error`` (on failure),

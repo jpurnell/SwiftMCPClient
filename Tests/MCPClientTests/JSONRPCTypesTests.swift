@@ -119,6 +119,43 @@ struct JSONRPCTypesTests {
         #expect(a != c)
     }
 
+    // MARK: - JSONRPCNotification
+
+    @Test("Notification serializes with jsonrpc 2.0 and method")
+    func notificationBasic() throws {
+        let notification = JSONRPCNotification(method: "notifications/initialized")
+        let data = try JSONEncoder().encode(notification)
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: data)
+        #expect(json["jsonrpc"] == .string("2.0"))
+        #expect(json["method"] == .string("notifications/initialized"))
+    }
+
+    @Test("Notification has no id field")
+    func notificationNoId() throws {
+        let notification = JSONRPCNotification(method: "notifications/initialized")
+        let data = try JSONEncoder().encode(notification)
+        let jsonString = String(data: data, encoding: .utf8) ?? ""
+        // The key "id" should not appear at all
+        #expect(!jsonString.contains("\"id\""))
+    }
+
+    @Test("Notification omits params when nil")
+    func notificationNoParams() throws {
+        let notification = JSONRPCNotification(method: "notifications/initialized")
+        let data = try JSONEncoder().encode(notification)
+        let jsonString = String(data: data, encoding: .utf8) ?? ""
+        #expect(!jsonString.contains("\"params\""))
+    }
+
+    @Test("Notification includes params when provided")
+    func notificationWithParams() throws {
+        let params = AnyCodableValue.object(["key": .string("value")])
+        let notification = JSONRPCNotification(method: "notifications/progress", params: params)
+        let data = try JSONEncoder().encode(notification)
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: data)
+        #expect(json["params"] == params)
+    }
+
     // MARK: - Edge Cases
 
     @Test("Response with error containing data object")

@@ -11,13 +11,13 @@ import Foundation
 ///
 /// ```swift
 /// let transport = HTTPSSETransport(
-///     url: URL(string: "https://mcp.roseclub.org/sse")!
+///     url: URL(string: "https://my-mcp-server.example.com/sse")!
 /// )
 /// let client = MCPClientConnection(transport: transport)
 ///
 /// // 1. Initialize the connection
 /// let info = try await client.initialize(
-///     clientName: "geo-audit",
+///     clientName: "my-app",
 ///     clientVersion: "1.0.0"
 /// )
 /// print("Connected to \(info.serverInfo.name)")
@@ -30,11 +30,8 @@ import Foundation
 ///
 /// // 3. Call a tool
 /// let result = try await client.callTool(
-///     name: "score_technical_seo",
-///     arguments: [
-///         "ssr_score": .number(95),
-///         "meta_tags_score": .number(75)
-///     ]
+///     name: "analyze_data",
+///     arguments: ["input": .string("Hello, world!")]
 /// )
 /// print(result.content.first?.text ?? "No output")
 /// ```
@@ -61,26 +58,31 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// Initialize the MCP connection, performing the protocol handshake.
     ///
     /// This method connects the transport (if not already connected), sends the
-    /// MCP `initialize` request with the client's identity, and returns the
-    /// server's capabilities and version information.
+    /// MCP `initialize` request with the client's identity, waits for the server's
+    /// response, then sends the required `notifications/initialized` notification.
     ///
     /// This must be called before ``listTools()`` or ``callTool(name:arguments:)``.
     ///
     /// - Parameters:
     ///   - clientName: The name of this client application.
     ///   - clientVersion: The version of this client application.
+    ///   - protocolVersion: The MCP protocol version to request. Defaults to `"2024-11-05"`.
     /// - Returns: The server's initialization result including capabilities.
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport cannot connect.
     /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server rejects the handshake.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
-    public func initialize(clientName: String, clientVersion: String) async throws -> InitializeResult {
+    public func initialize(
+        clientName: String,
+        clientVersion: String,
+        protocolVersion: String = "2024-11-05"
+    ) async throws -> InitializeResult {
         if !isConnected {
             try await transport.connect()
             isConnected = true
         }
 
         let params = AnyCodableValue.object([
-            "protocolVersion": .string("2024-11-05"),
+            "protocolVersion": .string(protocolVersion),
             "capabilities": .object([:]),
             "clientInfo": .object([
                 "name": .string(clientName),
@@ -91,29 +93,63 @@ public actor MCPClientConnection: MCPClientProtocol {
         let response = try await sendRequest(method: "initialize", params: params)
         let resultData = try JSONEncoder().encode(response)
         let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
+
+        // Send notifications/initialized per MCP spec (fire-and-forget, no response)
+        let notification = JSONRPCNotification(method: "notifications/initialized")
+        let notificationData = try JSONEncoder().encode(notification)
+        try await transport.send(notificationData)
+
         return initResult
     }
 
     /// Discover available tools on the MCP server.
     ///
     /// Sends a `tools/list` request and decodes the response into an array
-    /// of ``MCPTool`` definitions. Returns an empty array if the server
-    /// reports no tools.
+    /// of ``MCPTool`` definitions. Automatically paginates if the server
+    /// returns a `nextCursor`. Returns an empty array if the server reports no tools.
     ///
-    /// - Returns: An array of tool definitions available on the server.
+    /// - Returns: An array of all tool definitions available on the server.
     /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func listTools() async throws -> [MCPTool] {
-        let response = try await sendRequest(method: "tools/list", params: nil)
+        var allTools: [MCPTool] = []
+        var cursor: String? = nil
 
-        guard case .object(let resultObj) = response,
-              case .array(let toolValues) = resultObj["tools"] else {
-            return []
-        }
+        repeat {
+            let params: AnyCodableValue? = cursor.map { .object(["cursor": .string($0)]) }
+            let response = try await sendRequest(method: "tools/list", params: params)
 
-        let toolsData = try JSONEncoder().encode(AnyCodableValue.array(toolValues))
-        let tools = try JSONDecoder().decode([MCPTool].self, from: toolsData)
-        return tools
+            guard case .object(let resultObj) = response,
+                  case .array(let toolValues) = resultObj["tools"] else {
+                break
+            }
+
+            let toolsData = try JSONEncoder().encode(AnyCodableValue.array(toolValues))
+            let tools = try JSONDecoder().decode([MCPTool].self, from: toolsData)
+            allTools.append(contentsOf: tools)
+
+            // Check for next page
+            if case .string(let nextCursor) = resultObj["nextCursor"] {
+                cursor = nextCursor
+            } else {
+                cursor = nil
+            }
+        } while cursor != nil
+
+        return allTools
+    }
+
+    /// Send a ping to the MCP server and await the response.
+    ///
+    /// Sends a `ping` request per the MCP specification. The server must
+    /// respond with an empty result object `{}`.
+    ///
+    /// - Returns: `true` if the server responded successfully.
+    /// - Throws: ``MCPError/timeout`` if no response within the transport timeout.
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport is disconnected.
+    public func ping() async throws -> Bool {
+        _ = try await sendRequest(method: "ping", params: nil)
+        return true
     }
 
     /// Call a tool on the MCP server.

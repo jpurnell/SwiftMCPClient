@@ -35,9 +35,9 @@ struct MCPClientConnectionTests {
         #expect(result.serverInfo.version == "1.0.0")
         #expect(result.capabilities.tools?.listChanged == true)
 
-        // Verify the sent request
+        // Verify the sent messages: initialize request + notifications/initialized
         let sent = await transport.sentMessages()
-        #expect(sent.count == 1)
+        #expect(sent.count == 2)
         let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[0])
         #expect(request.method == "initialize")
         #expect(request.id == 1)
@@ -167,8 +167,9 @@ struct MCPClientConnectionTests {
         _ = try await client.listTools()
 
         let sent = await transport.sentMessages()
-        #expect(sent.count == 2)
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[1])
+        // initialize request + notification + listTools = 3
+        #expect(sent.count == 3)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2])
         #expect(request.method == "tools/list")
         #expect(request.id == 2)
     }
@@ -258,7 +259,8 @@ struct MCPClientConnectionTests {
         )
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[1])
+        // init request + notification + callTool = index 2
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2])
         #expect(request.method == "tools/call")
 
         // Verify params contain name and arguments
@@ -332,6 +334,178 @@ struct MCPClientConnectionTests {
         #expect(result.content[0].text == "Tool failed: invalid input")
     }
 
+    // MARK: - notifications/initialized
+
+    @Test("initialize sends notifications/initialized after handshake")
+    func initializeSendsNotification() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+
+        let sent = await transport.sentMessages()
+        // Should have 2 messages: initialize request + notifications/initialized
+        #expect(sent.count == 2)
+
+        // Second message should be a notification (no id)
+        let notificationJSON = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent[1])
+        #expect(notificationJSON["method"] == .string("notifications/initialized"))
+        #expect(notificationJSON["jsonrpc"] == .string("2.0"))
+        // Must NOT have an id field
+        #expect(notificationJSON["id"] == nil)
+    }
+
+    // MARK: - ping
+
+    @Test("ping sends ping request and returns true on success")
+    func pingGoldenPath() async throws {
+        let transport = MockTransport()
+        // Initialize response
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+        // Ping response — empty result object
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{}}
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        let alive = try await client.ping()
+
+        #expect(alive == true)
+
+        // Verify the ping request was sent correctly
+        let sent = await transport.sentMessages()
+        // initialize request + notification + ping = 3
+        let pingData = sent.last!
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: pingData)
+        #expect(request.method == "ping")
+    }
+
+    // MARK: - Configurable Protocol Version
+
+    @Test("initialize uses default protocol version 2024-11-05")
+    func initializeDefaultVersion() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[0])
+        if case .object(let params) = request.params {
+            #expect(params["protocolVersion"] == .string("2024-11-05"))
+        } else {
+            Issue.record("Expected params to be an object")
+        }
+    }
+
+    @Test("initialize uses custom protocol version when specified")
+    func initializeCustomVersion() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-01-01","capabilities":{},"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(
+            clientName: "test",
+            clientVersion: "0.1",
+            protocolVersion: "2025-01-01"
+        )
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[0])
+        if case .object(let params) = request.params {
+            #expect(params["protocolVersion"] == .string("2025-01-01"))
+        } else {
+            Issue.record("Expected params to be an object")
+        }
+    }
+
+    // MARK: - Pagination
+
+    @Test("listTools returns all tools across multiple pages")
+    func listToolsPaginated() async throws {
+        let transport = MockTransport()
+        // Initialize
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+        // First page with cursor
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [{"name": "tool_a", "description": "A"}],
+                "nextCursor": "page2"
+            }
+        }
+        """)
+        // Second page, no cursor (last page)
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "tools": [{"name": "tool_b", "description": "B"}]
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        let tools = try await client.listTools()
+
+        #expect(tools.count == 2)
+        #expect(tools[0].name == "tool_a")
+        #expect(tools[1].name == "tool_b")
+    }
+
+    @Test("listTools sends cursor in subsequent page requests")
+    func listToolsSendsCursor() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"a"}],"nextCursor":"cursor123"}}
+        """)
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"b"}]}}
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        _ = try await client.listTools()
+
+        let sent = await transport.sentMessages()
+        // initialize request + notification + first listTools + second listTools = 4
+        let secondListRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[3])
+        #expect(secondListRequest.method == "tools/list")
+        if case .object(let params) = secondListRequest.params {
+            #expect(params["cursor"] == .string("cursor123"))
+        } else {
+            Issue.record("Expected params with cursor")
+        }
+    }
+
     // MARK: - Request ID Incrementing
 
     @Test("Request IDs auto-increment across calls")
@@ -354,11 +528,13 @@ struct MCPClientConnectionTests {
         _ = try await client.callTool(name: "test")
 
         let sent = await transport.sentMessages()
-        #expect(sent.count == 3)
+        // init request + notification + listTools + callTool = 4
+        #expect(sent.count == 4)
 
+        // Requests are at indices 0, 2, 3 (index 1 is the notification)
         let id1 = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[0]).id
-        let id2 = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[1]).id
-        let id3 = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2]).id
+        let id2 = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2]).id
+        let id3 = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[3]).id
 
         #expect(id1 == 1)
         #expect(id2 == 2)

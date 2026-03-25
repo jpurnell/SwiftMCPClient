@@ -58,4 +58,27 @@ struct MCPErrorTests {
         let error: any Error = MCPError.timeout
         #expect(error is MCPError)
     }
+
+    @Test("processSpawnFailed stores reason")
+    func processSpawnFailedReason() {
+        let error = MCPError.processSpawnFailed(reason: "command not found")
+        if case .processSpawnFailed(let reason) = error {
+            #expect(reason == "command not found")
+        } else {
+            Issue.record("Expected processSpawnFailed")
+        }
+    }
+
+    @Test("transportClosed case exists")
+    func transportClosedCase() {
+        let error = MCPError.transportClosed
+        #expect(error == MCPError.transportClosed)
+    }
+
+    @Test("New error cases are not equal to existing cases")
+    func newCasesNotEqualToExisting() {
+        #expect(MCPError.transportClosed != MCPError.timeout)
+        #expect(MCPError.transportClosed != MCPError.invalidResponse)
+        #expect(MCPError.processSpawnFailed(reason: "x") != MCPError.connectionFailed(reason: "x"))
+    }
 }

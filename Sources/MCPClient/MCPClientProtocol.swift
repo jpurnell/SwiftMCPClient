@@ -31,4 +31,10 @@ public protocol MCPClientProtocol: Sendable {
     /// - Returns: The tool's result containing one or more content blocks.
     /// - Throws: ``MCPError`` if the call fails.
     func callTool(name: String, arguments: [String: AnyCodableValue]) async throws -> MCPToolResult
+
+    /// Send a ping to the MCP server and await the response.
+    ///
+    /// - Returns: `true` if the server responded successfully.
+    /// - Throws: ``MCPError`` if the ping fails.
+    func ping() async throws -> Bool
 }
