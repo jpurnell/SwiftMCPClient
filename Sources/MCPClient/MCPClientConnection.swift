@@ -36,6 +36,24 @@ import Foundation
 /// print(result.content.first?.text ?? "No output")
 /// ```
 ///
+/// ## Notifications
+///
+/// After initialization, server-to-client notifications (progress updates,
+/// log messages, list changes) are available via the ``notifications`` stream:
+///
+/// ```swift
+/// for await notification in client.notifications {
+///     switch notification {
+///     case .progress(let p):
+///         print("Progress: \(p.progress)/\(p.total ?? 0)")
+///     case .logMessage(let msg):
+///         print("[\(msg.level)] \(msg.data)")
+///     default:
+///         break
+///     }
+/// }
+/// ```
+///
 /// ## Thread Safety
 ///
 /// `MCPClientConnection` is an `actor`, so all method calls are serialized.
@@ -44,6 +62,20 @@ public actor MCPClientConnection: MCPClientProtocol {
     private let transport: MCPTransport
     private var nextRequestID: Int = 1
     private var isConnected: Bool = false
+    private var dispatcher: MCPMessageDispatcher?
+
+    /// Stream of server-to-client notifications.
+    ///
+    /// This stream becomes active after ``initialize(clientName:clientVersion:)``
+    /// is called and the message dispatcher starts. It yields notifications for
+    /// progress updates, log messages, and list changes from the server.
+    public var notifications: AsyncStream<MCPNotification> {
+        if let dispatcher {
+            return dispatcher.notificationStream
+        }
+        // Return an empty stream if not initialized yet
+        return AsyncStream { $0.finish() }
+    }
 
     /// Creates a new MCP client connection with the given transport.
     ///
@@ -60,6 +92,8 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// This method connects the transport (if not already connected), sends the
     /// MCP `initialize` request with the client's identity, waits for the server's
     /// response, then sends the required `notifications/initialized` notification.
+    /// After the handshake, it starts the message dispatcher for bidirectional
+    /// communication.
     ///
     /// This must be called before ``listTools()`` or ``callTool(name:arguments:)``.
     ///
@@ -90,7 +124,9 @@ public actor MCPClientConnection: MCPClientProtocol {
             ])
         ])
 
-        let response = try await sendRequest(method: "initialize", params: params)
+        // Initialize uses direct transport.receive() since the dispatcher
+        // isn't running yet and no notifications can arrive before handshake.
+        let response = try await sendRequestDirect(method: "initialize", params: params)
         let resultData = try JSONEncoder().encode(response)
         let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
 
@@ -98,6 +134,11 @@ public actor MCPClientConnection: MCPClientProtocol {
         let notification = JSONRPCNotification(method: "notifications/initialized")
         let notificationData = try JSONEncoder().encode(notification)
         try await transport.send(notificationData)
+
+        // Start the message dispatcher for all subsequent communication
+        let newDispatcher = MCPMessageDispatcher(transport: transport)
+        await newDispatcher.start()
+        self.dispatcher = newDispatcher
 
         return initResult
     }
@@ -256,12 +297,128 @@ public actor MCPClientConnection: MCPClientProtocol {
         return try JSONDecoder().decode(MCPPromptResult.self, from: resultData)
     }
 
+    // MARK: - Logging
+
+    /// Set the minimum log level for server log messages.
+    ///
+    /// Sends a `logging/setLevel` request. After this call, the server should
+    /// only send `notifications/message` at or above the specified severity.
+    ///
+    /// - Parameter level: The minimum log level to receive.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func setLogLevel(_ level: MCPLogLevel) async throws {
+        let params = AnyCodableValue.object(["level": .string(level.rawValue)])
+        _ = try await sendRequest(method: "logging/setLevel", params: params)
+    }
+
+    // MARK: - Cancellation
+
+    /// Cancel an in-flight request by ID.
+    ///
+    /// Sends a `notifications/cancelled` notification to the server. The server
+    /// SHOULD stop processing the request and NOT send a response.
+    ///
+    /// - Parameters:
+    ///   - id: The request ID to cancel.
+    ///   - reason: Optional human-readable reason for cancellation.
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport is not connected.
+    public func cancelRequest(id: Int, reason: String? = nil) async throws {
+        var paramsDict: [String: AnyCodableValue] = ["requestId": .integer(id)]
+        if let reason {
+            paramsDict["reason"] = .string(reason)
+        }
+        let notification = JSONRPCNotification(
+            method: "notifications/cancelled",
+            params: .object(paramsDict)
+        )
+        let data = try JSONEncoder().encode(notification)
+        try await transport.send(data)
+    }
+
+    // MARK: - Completion
+
+    /// Request autocompletion suggestions for a prompt or resource argument.
+    ///
+    /// Sends a `completion/complete` request to the server with a reference
+    /// to what is being completed and the current argument value.
+    ///
+    /// - Parameters:
+    ///   - ref: The prompt or resource being completed against.
+    ///   - argumentName: The name of the argument being completed.
+    ///   - argumentValue: The current partial value to match against.
+    /// - Returns: The completion result with suggested values.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func complete(
+        ref: MCPCompletionRef,
+        argumentName: String,
+        argumentValue: String
+    ) async throws -> MCPCompletionResult {
+        let refValue: AnyCodableValue
+        switch ref {
+        case .prompt(let name):
+            refValue = .object(["type": .string("ref/prompt"), "name": .string(name)])
+        case .resource(let uri):
+            refValue = .object(["type": .string("ref/resource"), "uri": .string(uri)])
+        }
+
+        let params = AnyCodableValue.object([
+            "ref": refValue,
+            "argument": .object([
+                "name": .string(argumentName),
+                "value": .string(argumentValue)
+            ])
+        ])
+
+        let response = try await sendRequest(method: "completion/complete", params: params)
+
+        guard case .object(let resultObj) = response,
+              let completionValue = resultObj["completion"] else {
+            throw MCPError.invalidResponse
+        }
+
+        let completionData = try JSONEncoder().encode(completionValue)
+        return try JSONDecoder().decode(MCPCompletionResult.self, from: completionData)
+    }
+
+    // MARK: - Roots
+
+    /// Register a handler that responds to `roots/list` requests from the server.
+    ///
+    /// When the server sends a `roots/list` request, the handler is called and
+    /// its return value is sent back as the response.
+    ///
+    /// - Parameter handler: A closure that returns the current list of roots.
+    public func setRootsHandler(_ handler: @Sendable @escaping () async -> [MCPRoot]) async {
+        guard let dispatcher else { return }
+        await dispatcher.setIncomingRequestHandler { _, method, _ in
+            guard method == "roots/list" else { return nil }
+            let roots = await handler()
+            let rootValues = roots.map { root -> AnyCodableValue in
+                var obj: [String: AnyCodableValue] = ["uri": .string(root.uri)]
+                if let name = root.name {
+                    obj["name"] = .string(name)
+                }
+                return .object(obj)
+            }
+            return .object(["roots": .array(rootValues)])
+        }
+    }
+
+    /// Notify the server that the client's roots have changed.
+    ///
+    /// Sends a `notifications/roots/list_changed` notification. The server
+    /// should then re-request `roots/list`.
+    ///
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport is not connected.
+    public func notifyRootsChanged() async throws {
+        let notification = JSONRPCNotification(method: "notifications/roots/list_changed")
+        let data = try JSONEncoder().encode(notification)
+        try await transport.send(data)
+    }
+
     // MARK: - Private
 
     /// Generic paginated list request.
-    ///
-    /// Sends repeated requests with cursor support, collecting items from the
-    /// specified key in each response until no `nextCursor` is returned.
     private func paginatedList<T: Decodable>(method: String, key: String) async throws -> [T] {
         var allItems: [T] = []
         var cursor: String? = nil
@@ -289,10 +446,42 @@ public actor MCPClientConnection: MCPClientProtocol {
         return allItems
     }
 
-    /// Sends a JSON-RPC request and returns the result value.
-    ///
-    /// Handles request ID allocation, JSON encoding/decoding, and error extraction.
+    /// Sends a JSON-RPC request using the dispatcher (post-initialization).
     private func sendRequest(method: String, params: AnyCodableValue?) async throws -> AnyCodableValue {
+        let requestID = nextRequestID
+        nextRequestID += 1
+
+        let request = JSONRPCRequest(id: requestID, method: method, params: params)
+        let requestData = try JSONEncoder().encode(request)
+
+        try await transport.send(requestData)
+
+        let response: JSONRPCResponse
+        if let dispatcher {
+            response = try await dispatcher.waitForResponse(id: requestID)
+        } else {
+            // Fallback for pre-initialization calls (shouldn't happen in normal use)
+            let responseData = try await transport.receive()
+            do {
+                response = try JSONDecoder().decode(JSONRPCResponse.self, from: responseData)
+            } catch {
+                throw MCPError.invalidResponse
+            }
+        }
+
+        if let rpcError = response.error {
+            throw MCPError.requestFailed(code: rpcError.code, message: rpcError.message)
+        }
+
+        guard let result = response.result else {
+            throw MCPError.invalidResponse
+        }
+
+        return result
+    }
+
+    /// Sends a JSON-RPC request using direct transport.receive() (for initialization).
+    private func sendRequestDirect(method: String, params: AnyCodableValue?) async throws -> AnyCodableValue {
         let requestID = nextRequestID
         nextRequestID += 1
 

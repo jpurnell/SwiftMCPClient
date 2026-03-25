@@ -1035,4 +1035,142 @@ struct MCPClientConnectionTests {
             Issue.record("Expected resource content")
         }
     }
+
+    // MARK: - Set Log Level
+
+    @Test("setLogLevel sends correct request")
+    func setLogLevelSendsRequest() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{}}
+        """)
+
+        try await client.setLogLevel(.warning)
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "logging/setLevel")
+        if case .object(let params) = request.params {
+            #expect(params["level"] == .string("warning"))
+        } else {
+            Issue.record("Expected params with level")
+        }
+    }
+
+    // MARK: - Cancel Request
+
+    @Test("cancelRequest sends correct notification")
+    func cancelRequestSendsNotification() async throws {
+        let (client, transport) = try await makeInitializedClient()
+
+        try await client.cancelRequest(id: 5, reason: "User cancelled")
+
+        let sent = await transport.sentMessages()
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        #expect(json["method"] == .string("notifications/cancelled"))
+        #expect(json["id"] == nil) // Notifications have no id
+        if case .object(let params) = json["params"] {
+            #expect(params["requestId"] == .integer(5))
+            #expect(params["reason"] == .string("User cancelled"))
+        } else {
+            Issue.record("Expected params")
+        }
+    }
+
+    @Test("cancelRequest without reason")
+    func cancelRequestNoReason() async throws {
+        let (client, transport) = try await makeInitializedClient()
+
+        try await client.cancelRequest(id: 3)
+
+        let sent = await transport.sentMessages()
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        if case .object(let params) = json["params"] {
+            #expect(params["requestId"] == .integer(3))
+            #expect(params["reason"] == nil)
+        } else {
+            Issue.record("Expected params")
+        }
+    }
+
+    // MARK: - Completion
+
+    @Test("complete with prompt ref sends correct request")
+    func completePromptRef() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"completion":{"values":["python","pytorch"],"total":5,"hasMore":true}}}
+        """)
+
+        let result = try await client.complete(
+            ref: .prompt(name: "code_review"),
+            argumentName: "language",
+            argumentValue: "py"
+        )
+
+        #expect(result.values == ["python", "pytorch"])
+        #expect(result.total == 5)
+        #expect(result.hasMore == true)
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "completion/complete")
+        if case .object(let params) = request.params,
+           case .object(let ref) = params["ref"] {
+            #expect(ref["type"] == .string("ref/prompt"))
+            #expect(ref["name"] == .string("code_review"))
+        } else {
+            Issue.record("Expected params with ref")
+        }
+    }
+
+    @Test("complete with resource ref")
+    func completeResourceRef() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"completion":{"values":["users","uploads"]}}}
+        """)
+
+        let result = try await client.complete(
+            ref: .resource(uri: "file:///{path}"),
+            argumentName: "path",
+            argumentValue: "u"
+        )
+
+        #expect(result.values == ["users", "uploads"])
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        if case .object(let params) = request.params,
+           case .object(let ref) = params["ref"] {
+            #expect(ref["type"] == .string("ref/resource"))
+            #expect(ref["uri"] == .string("file:///{path}"))
+        } else {
+            Issue.record("Expected params with ref")
+        }
+    }
+
+    // MARK: - Roots
+
+    @Test("notifyRootsChanged sends correct notification")
+    func notifyRootsChangedSendsNotification() async throws {
+        let (client, transport) = try await makeInitializedClient()
+
+        try await client.notifyRootsChanged()
+
+        let sent = await transport.sentMessages()
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        #expect(json["method"] == .string("notifications/roots/list_changed"))
+        #expect(json["id"] == nil)
+    }
+
+    // MARK: - Notifications Stream
+
+    @Test("notifications property returns stream")
+    func notificationsStream() async throws {
+        let (client, _) = try await makeInitializedClient()
+        // Just verify we can access the stream without error
+        let stream = await client.notifications
+        _ = stream
+    }
 }

@@ -217,19 +217,25 @@ SwiftMCPClient/
 - [x] TransportGuide DocC article
 - [x] 132 tests
 
-### Phase 3: Resources + Prompts (v0.3.0)
+### Phase 3: Resources + Prompts — COMPLETE (v0.3.0)
 
-- [ ] `resources/list` and `resources/read`
-- [ ] `resources/subscribe` and `resources/unsubscribe`
-- [ ] `prompts/list` and `prompts/get`
-- [ ] Resource templates
+- [x] `resources/list` and `resources/read`
+- [x] `resources/subscribe` and `resources/unsubscribe`
+- [x] `prompts/list` and `prompts/get`
+- [x] Resource templates
+- [x] MCPAnnotations (audience/priority)
+- [x] ResourcesGuide + PromptsGuide DocC articles
+- [x] 207 tests
 
 ### Phase 4: Advanced Features (v0.4.0)
 
+- [ ] Notification listener architecture (AsyncStream-based)
 - [ ] Progress notifications (`notifications/progress`)
 - [ ] Request cancellation (`notifications/cancelled`)
-- [ ] Roots capability
-- [ ] Logging support (`notifications/message`)
+- [ ] Logging support (`logging/setLevel` + `notifications/message`)
+- [ ] Completion support (`completion/complete`)
+- [ ] Roots capability (`roots/list` — server-to-client request)
+- [ ] Client capability declaration in initialize
 
 ### Phase 5: Production Hardening (v1.0.0)
 
