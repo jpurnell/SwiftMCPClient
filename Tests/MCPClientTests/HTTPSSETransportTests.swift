@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import MCPClient
 
+// MockURLProtocol requires URLProtocol.client (Apple only)
+#if !canImport(FoundationNetworking)
+
 @Suite("HTTPSSETransport", .serialized)
 struct HTTPSSETransportTests {
 
@@ -440,3 +443,5 @@ struct HTTPSSETransportTests {
         return config
     }
 }
+
+#endif
