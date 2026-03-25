@@ -111,35 +111,40 @@ SwiftMCPClient/
 - [x] AnyCodableValue for arbitrary JSON
 - [x] MCPError with descriptive associated values
 - [x] DocC documentation with Getting Started guide
-- [x] 108 tests passing, zero warnings
+- [x] 132 tests passing, zero warnings
+- [x] StdioTransport actor (macOS/Linux) — subprocess via stdin/stdout
+- [x] `notifications/initialized` post-handshake notification
+- [x] `ping` request/response
+- [x] Configurable protocol version
+- [x] Cursor-based pagination for `tools/list`
+- [x] JSONRPCNotification type
+- [x] MCPClientProtocol for testability
+- [x] TransportGuide DocC article
 
 ### What's Not Working / Missing
 
-- [ ] StdioTransport (stub — `fatalError` on all methods)
 - [ ] MCP Resources capability (`resources/list`, `resources/read`)
 - [ ] MCP Prompts capability (`prompts/list`, `prompts/get`)
 - [ ] MCP Sampling capability
-- [ ] `notifications/initialized` post-handshake notification
-- [ ] `ping` / keepalive support
+- [ ] Resource templates
+- [ ] Resource subscriptions
 - [ ] Progress notifications (`notifications/progress`)
 - [ ] Request cancellation (`notifications/cancelled`)
-- [ ] Configurable protocol version (hardcoded `"2024-11-05"`)
-- [ ] Pagination for `tools/list` (cursor-based)
+- [ ] Logging support (`notifications/message`)
+- [ ] Roots capability
 
 ### Known Issues
 
-- StdioTransport crashes at runtime (`fatalError`) — must not be used
-- Protocol version is hardcoded; no negotiation fallback
 - No timeout on individual `receive()` calls beyond transport-level timeout
+- No version negotiation fallback
 
 ### Current Priorities
 
-1. **StdioTransport implementation** — enables local MCP server pattern
-2. **`notifications/initialized`** — spec compliance
-3. **Resources support** — second MCP capability
-4. **Prompts support** — third MCP capability
-5. **Ping/keepalive** — connection health
-6. **Pagination** — large tool lists
+1. **Resources support** — `resources/list`, `resources/read`, templates, subscriptions
+2. **Prompts support** — `prompts/list`, `prompts/get`
+3. **Progress notifications** — streaming progress for long-running tools
+4. **Request cancellation** — cancel in-flight requests
+5. **Production hardening** — spec audit, benchmarks, Linux CI
 
 ---
 
@@ -176,6 +181,8 @@ SwiftMCPClient/
 | `MCPError` | `.requestFailed(code:message:)` | Server returns JSON-RPC error response | MCPClient |
 | `MCPError` | `.timeout` | Request exceeds deadline | MCPClient |
 | `MCPError` | `.invalidResponse` | Response cannot be decoded as valid JSON-RPC | MCPClient |
+| `MCPError` | `.processSpawnFailed(reason:)` | StdioTransport failed to launch subprocess | MCPClient |
+| `MCPError` | `.transportClosed` | Transport connection closed unexpectedly | MCPClient |
 
 ### Error Design Principles
 
@@ -199,13 +206,16 @@ SwiftMCPClient/
 - [x] DocC documentation
 - [x] 108 tests
 
-### Phase 2: Spec Compliance + StdioTransport (v0.2.0)
+### Phase 2: Spec Compliance + StdioTransport — COMPLETE (v0.2.0)
 
-- [ ] StdioTransport — spawn local MCP server subprocess
-- [ ] `notifications/initialized` — post-handshake notification
-- [ ] `ping` request/response
-- [ ] Configurable protocol version
-- [ ] Pagination for `tools/list` (cursor support)
+- [x] StdioTransport — spawn local MCP server subprocess
+- [x] `notifications/initialized` — post-handshake notification
+- [x] `ping` request/response
+- [x] Configurable protocol version
+- [x] Pagination for `tools/list` (cursor support)
+- [x] JSONRPCNotification type
+- [x] TransportGuide DocC article
+- [x] 132 tests
 
 ### Phase 3: Resources + Prompts (v0.3.0)
 

@@ -112,31 +112,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func listTools() async throws -> [MCPTool] {
-        var allTools: [MCPTool] = []
-        var cursor: String? = nil
-
-        repeat {
-            let params: AnyCodableValue? = cursor.map { .object(["cursor": .string($0)]) }
-            let response = try await sendRequest(method: "tools/list", params: params)
-
-            guard case .object(let resultObj) = response,
-                  case .array(let toolValues) = resultObj["tools"] else {
-                break
-            }
-
-            let toolsData = try JSONEncoder().encode(AnyCodableValue.array(toolValues))
-            let tools = try JSONDecoder().decode([MCPTool].self, from: toolsData)
-            allTools.append(contentsOf: tools)
-
-            // Check for next page
-            if case .string(let nextCursor) = resultObj["nextCursor"] {
-                cursor = nextCursor
-            } else {
-                cursor = nil
-            }
-        } while cursor != nil
-
-        return allTools
+        try await paginatedList(method: "tools/list", key: "tools")
     }
 
     /// Send a ping to the MCP server and await the response.
@@ -177,7 +153,141 @@ public actor MCPClientConnection: MCPClientProtocol {
         return toolResult
     }
 
+    // MARK: - Resources
+
+    /// Discover available resources on the MCP server.
+    ///
+    /// Sends a `resources/list` request and auto-paginates if the server
+    /// returns a `nextCursor`. Returns an empty array if no resources are available.
+    ///
+    /// - Returns: An array of all resource definitions.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
+    public func listResources() async throws -> [MCPResource] {
+        try await paginatedList(method: "resources/list", key: "resources")
+    }
+
+    /// Discover available resource templates on the MCP server.
+    ///
+    /// Sends a `resources/templates/list` request and auto-paginates.
+    ///
+    /// - Returns: An array of all resource template definitions.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func listResourceTemplates() async throws -> [MCPResourceTemplate] {
+        try await paginatedList(method: "resources/templates/list", key: "resourceTemplates")
+    }
+
+    /// Read the contents of a resource by URI.
+    ///
+    /// Sends a `resources/read` request. A single URI may return multiple
+    /// sub-resources (e.g., a directory listing).
+    ///
+    /// - Parameter uri: The resource URI to read.
+    /// - Returns: An array of resource contents (text or blob).
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the resource is not found.
+    public func readResource(uri: String) async throws -> [MCPResourceContents] {
+        let params = AnyCodableValue.object(["uri": .string(uri)])
+        let response = try await sendRequest(method: "resources/read", params: params)
+
+        guard case .object(let resultObj) = response,
+              case .array(let contentValues) = resultObj["contents"] else {
+            return []
+        }
+
+        let contentsData = try JSONEncoder().encode(AnyCodableValue.array(contentValues))
+        return try JSONDecoder().decode([MCPResourceContents].self, from: contentsData)
+    }
+
+    /// Subscribe to updates for a specific resource.
+    ///
+    /// Sends a `resources/subscribe` request. After subscribing, the server
+    /// may send `notifications/resources/updated` when the resource changes.
+    ///
+    /// - Parameter uri: The resource URI to subscribe to.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func subscribeResource(uri: String) async throws {
+        let params = AnyCodableValue.object(["uri": .string(uri)])
+        _ = try await sendRequest(method: "resources/subscribe", params: params)
+    }
+
+    /// Unsubscribe from updates for a specific resource.
+    ///
+    /// - Parameter uri: The resource URI to unsubscribe from.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func unsubscribeResource(uri: String) async throws {
+        let params = AnyCodableValue.object(["uri": .string(uri)])
+        _ = try await sendRequest(method: "resources/unsubscribe", params: params)
+    }
+
+    // MARK: - Prompts
+
+    /// Discover available prompts on the MCP server.
+    ///
+    /// Sends a `prompts/list` request and auto-paginates if the server
+    /// returns a `nextCursor`.
+    ///
+    /// - Returns: An array of all prompt definitions.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func listPrompts() async throws -> [MCPPrompt] {
+        try await paginatedList(method: "prompts/list", key: "prompts")
+    }
+
+    /// Get an expanded prompt by name with optional arguments.
+    ///
+    /// Sends a `prompts/get` request with the given name and string-valued
+    /// arguments. Returns the prompt expanded into a sequence of messages.
+    ///
+    /// - Parameters:
+    ///   - name: The prompt name (must match a name from ``listPrompts()``).
+    ///   - arguments: String-valued arguments to fill prompt template placeholders.
+    /// - Returns: The prompt result containing messages.
+    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    public func getPrompt(name: String, arguments: [String: String] = [:]) async throws -> MCPPromptResult {
+        var paramsDict: [String: AnyCodableValue] = ["name": .string(name)]
+        if !arguments.isEmpty {
+            let argsObject = AnyCodableValue.object(
+                arguments.mapValues { AnyCodableValue.string($0) }
+            )
+            paramsDict["arguments"] = argsObject
+        }
+
+        let response = try await sendRequest(method: "prompts/get", params: .object(paramsDict))
+        let resultData = try JSONEncoder().encode(response)
+        return try JSONDecoder().decode(MCPPromptResult.self, from: resultData)
+    }
+
     // MARK: - Private
+
+    /// Generic paginated list request.
+    ///
+    /// Sends repeated requests with cursor support, collecting items from the
+    /// specified key in each response until no `nextCursor` is returned.
+    private func paginatedList<T: Decodable>(method: String, key: String) async throws -> [T] {
+        var allItems: [T] = []
+        var cursor: String? = nil
+
+        repeat {
+            let params: AnyCodableValue? = cursor.map { .object(["cursor": .string($0)]) }
+            let response = try await sendRequest(method: method, params: params)
+
+            guard case .object(let resultObj) = response,
+                  case .array(let itemValues) = resultObj[key] else {
+                break
+            }
+
+            let itemsData = try JSONEncoder().encode(AnyCodableValue.array(itemValues))
+            let items = try JSONDecoder().decode([T].self, from: itemsData)
+            allItems.append(contentsOf: items)
+
+            if case .string(let nextCursor) = resultObj["nextCursor"] {
+                cursor = nextCursor
+            } else {
+                cursor = nil
+            }
+        } while cursor != nil
+
+        return allItems
+    }
 
     /// Sends a JSON-RPC request and returns the result value.
     ///

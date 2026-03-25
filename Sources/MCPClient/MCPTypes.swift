@@ -106,17 +106,33 @@ public struct MCPContent: Codable, Sendable, Equatable {
 
 /// Server capabilities returned during MCP initialization.
 ///
-/// Capabilities declare which MCP features the server supports. Currently,
-/// only tool support is relevant for ``MCPClientConnection``.
+/// Capabilities declare which MCP features the server supports: tools,
+/// resources, prompts, and more. Each capability is optional — its presence
+/// indicates the server supports that feature.
 public struct ServerCapabilities: Codable, Sendable, Equatable {
     /// The server's tools capability, if it supports tool invocation.
     public let tools: ToolsCapability?
 
+    /// The server's resources capability, if it exposes resources.
+    public let resources: ResourcesCapability?
+
+    /// The server's prompts capability, if it offers prompt templates.
+    public let prompts: PromptsCapability?
+
     /// Creates a new capabilities declaration.
     ///
-    /// - Parameter tools: Optional tools capability.
-    public init(tools: ToolsCapability? = nil) {
+    /// - Parameters:
+    ///   - tools: Optional tools capability.
+    ///   - resources: Optional resources capability.
+    ///   - prompts: Optional prompts capability.
+    public init(
+        tools: ToolsCapability? = nil,
+        resources: ResourcesCapability? = nil,
+        prompts: PromptsCapability? = nil
+    ) {
         self.tools = tools
+        self.resources = resources
+        self.prompts = prompts
     }
 }
 
@@ -130,6 +146,43 @@ public struct ToolsCapability: Codable, Sendable, Equatable {
     /// Creates a new tools capability.
     ///
     /// - Parameter listChanged: Whether dynamic tool list updates are supported.
+    public init(listChanged: Bool? = nil) {
+        self.listChanged = listChanged
+    }
+}
+
+/// Capability declaration for MCP resources support.
+///
+/// Indicates whether the server supports resource subscriptions and
+/// dynamic resource list updates.
+public struct ResourcesCapability: Codable, Sendable, Equatable {
+    /// Whether the server supports per-resource subscriptions.
+    public let subscribe: Bool?
+
+    /// Whether the server can notify clients when the resource list changes.
+    public let listChanged: Bool?
+
+    /// Creates a new resources capability.
+    ///
+    /// - Parameters:
+    ///   - subscribe: Whether subscriptions are supported.
+    ///   - listChanged: Whether dynamic resource list updates are supported.
+    public init(subscribe: Bool? = nil, listChanged: Bool? = nil) {
+        self.subscribe = subscribe
+        self.listChanged = listChanged
+    }
+}
+
+/// Capability declaration for MCP prompts support.
+///
+/// Indicates whether the server supports dynamic prompt list updates.
+public struct PromptsCapability: Codable, Sendable, Equatable {
+    /// Whether the server can notify clients when the prompt list changes.
+    public let listChanged: Bool?
+
+    /// Creates a new prompts capability.
+    ///
+    /// - Parameter listChanged: Whether dynamic prompt list updates are supported.
     public init(listChanged: Bool? = nil) {
         self.listChanged = listChanged
     }

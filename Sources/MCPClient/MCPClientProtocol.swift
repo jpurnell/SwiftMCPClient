@@ -37,4 +37,32 @@ public protocol MCPClientProtocol: Sendable {
     /// - Returns: `true` if the server responded successfully.
     /// - Throws: ``MCPError`` if the ping fails.
     func ping() async throws -> Bool
+
+    /// Discover available resources on the MCP server.
+    ///
+    /// - Returns: An array of resource definitions.
+    /// - Throws: ``MCPError`` if the request fails.
+    func listResources() async throws -> [MCPResource]
+
+    /// Read the contents of a resource by URI.
+    ///
+    /// - Parameter uri: The resource URI to read.
+    /// - Returns: An array of resource contents (text or blob).
+    /// - Throws: ``MCPError`` if the resource cannot be read.
+    func readResource(uri: String) async throws -> [MCPResourceContents]
+
+    /// Discover available prompts on the MCP server.
+    ///
+    /// - Returns: An array of prompt definitions.
+    /// - Throws: ``MCPError`` if the request fails.
+    func listPrompts() async throws -> [MCPPrompt]
+
+    /// Get an expanded prompt by name with optional arguments.
+    ///
+    /// - Parameters:
+    ///   - name: The prompt name.
+    ///   - arguments: String-valued arguments for the prompt.
+    /// - Returns: The prompt result with messages.
+    /// - Throws: ``MCPError`` if the request fails.
+    func getPrompt(name: String, arguments: [String: String]) async throws -> MCPPromptResult
 }

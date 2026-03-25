@@ -599,4 +599,440 @@ struct MCPClientConnectionTests {
             _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
         }
     }
+
+    // MARK: - Helpers
+
+    /// Creates an initialized client with mock transport, ready for method calls.
+    private func makeInitializedClient(capabilities: String = "{}") async throws -> (MCPClientConnection, MockTransport) {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":\(capabilities),"serverInfo":{"name":"test","version":"0.1"}}}
+        """)
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        return (client, transport)
+    }
+
+    // MARK: - List Resources
+
+    @Test("listResources returns array of resource definitions")
+    func listResourcesGoldenPath() async throws {
+        let (client, transport) = try await makeInitializedClient(
+            capabilities: "{\"resources\":{\"subscribe\":true}}"
+        )
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "resources": [
+                    {"uri": "file:///logs/app.log", "name": "App Logs", "mimeType": "text/plain"},
+                    {"uri": "file:///config.json", "name": "Config", "description": "App configuration"}
+                ]
+            }
+        }
+        """)
+
+        let resources = try await client.listResources()
+        #expect(resources.count == 2)
+        #expect(resources[0].uri == "file:///logs/app.log")
+        #expect(resources[0].name == "App Logs")
+        #expect(resources[0].mimeType == "text/plain")
+        #expect(resources[1].description == "App configuration")
+    }
+
+    @Test("listResources returns empty array when no resources")
+    func listResourcesEmpty() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"resources":[]}}
+        """)
+
+        let resources = try await client.listResources()
+        #expect(resources.isEmpty)
+    }
+
+    @Test("listResources paginates with cursor")
+    func listResourcesPaginated() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"a://1","name":"A"}],"nextCursor":"pg2"}}
+        """)
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"b://2","name":"B"}]}}
+        """)
+
+        let resources = try await client.listResources()
+        #expect(resources.count == 2)
+        #expect(resources[0].uri == "a://1")
+        #expect(resources[1].uri == "b://2")
+    }
+
+    @Test("listResources sends correct method")
+    func listResourcesSendsMethod() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"resources":[]}}
+        """)
+
+        _ = try await client.listResources()
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "resources/list")
+    }
+
+    // MARK: - List Resource Templates
+
+    @Test("listResourceTemplates returns templates")
+    func listResourceTemplatesGoldenPath() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "resourceTemplates": [
+                    {"uriTemplate": "file:///users/{id}/profile", "name": "User Profile", "mimeType": "application/json"}
+                ]
+            }
+        }
+        """)
+
+        let templates = try await client.listResourceTemplates()
+        #expect(templates.count == 1)
+        #expect(templates[0].uriTemplate == "file:///users/{id}/profile")
+        #expect(templates[0].name == "User Profile")
+    }
+
+    @Test("listResourceTemplates returns empty array")
+    func listResourceTemplatesEmpty() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[]}}
+        """)
+
+        let templates = try await client.listResourceTemplates()
+        #expect(templates.isEmpty)
+    }
+
+    @Test("listResourceTemplates paginates")
+    func listResourceTemplatesPaginated() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[{"uriTemplate":"a:///{x}","name":"A"}],"nextCursor":"pg2"}}
+        """)
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[{"uriTemplate":"b:///{y}","name":"B"}]}}
+        """)
+
+        let templates = try await client.listResourceTemplates()
+        #expect(templates.count == 2)
+    }
+
+    // MARK: - Read Resource
+
+    @Test("readResource returns text contents")
+    func readResourceText() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "contents": [
+                    {"uri": "file:///readme.md", "mimeType": "text/markdown", "text": "# Hello"}
+                ]
+            }
+        }
+        """)
+
+        let contents = try await client.readResource(uri: "file:///readme.md")
+        #expect(contents.count == 1)
+        if case .text(let uri, let mime, let text) = contents[0] {
+            #expect(uri == "file:///readme.md")
+            #expect(mime == "text/markdown")
+            #expect(text == "# Hello")
+        } else {
+            Issue.record("Expected text contents")
+        }
+    }
+
+    @Test("readResource returns blob contents")
+    func readResourceBlob() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "contents": [
+                    {"uri": "file:///image.png", "mimeType": "image/png", "blob": "iVBOR..."}
+                ]
+            }
+        }
+        """)
+
+        let contents = try await client.readResource(uri: "file:///image.png")
+        #expect(contents.count == 1)
+        if case .blob(_, let mime, let blob) = contents[0] {
+            #expect(mime == "image/png")
+            #expect(blob == "iVBOR...")
+        } else {
+            Issue.record("Expected blob contents")
+        }
+    }
+
+    @Test("readResource returns multiple contents")
+    func readResourceMultiple() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "contents": [
+                    {"uri": "file:///a.txt", "text": "A"},
+                    {"uri": "file:///b.txt", "text": "B"}
+                ]
+            }
+        }
+        """)
+
+        let contents = try await client.readResource(uri: "file:///dir")
+        #expect(contents.count == 2)
+    }
+
+    @Test("readResource sends correct request with uri")
+    func readResourceSendsURI() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"file:///a.txt","text":"x"}]}}
+        """)
+
+        _ = try await client.readResource(uri: "file:///a.txt")
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "resources/read")
+        if case .object(let params) = request.params {
+            #expect(params["uri"] == .string("file:///a.txt"))
+        } else {
+            Issue.record("Expected params with uri")
+        }
+    }
+
+    // MARK: - Subscribe / Unsubscribe Resource
+
+    @Test("subscribeResource sends correct request")
+    func subscribeResourceSendsRequest() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{}}
+        """)
+
+        try await client.subscribeResource(uri: "file:///watched.log")
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "resources/subscribe")
+        if case .object(let params) = request.params {
+            #expect(params["uri"] == .string("file:///watched.log"))
+        } else {
+            Issue.record("Expected params with uri")
+        }
+    }
+
+    @Test("unsubscribeResource sends correct request")
+    func unsubscribeResourceSendsRequest() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{}}
+        """)
+
+        try await client.unsubscribeResource(uri: "file:///watched.log")
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "resources/unsubscribe")
+        if case .object(let params) = request.params {
+            #expect(params["uri"] == .string("file:///watched.log"))
+        } else {
+            Issue.record("Expected params with uri")
+        }
+    }
+
+    // MARK: - List Prompts
+
+    @Test("listPrompts returns array of prompt definitions")
+    func listPromptsGoldenPath() async throws {
+        let (client, transport) = try await makeInitializedClient(
+            capabilities: "{\"prompts\":{\"listChanged\":true}}"
+        )
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "prompts": [
+                    {
+                        "name": "code_review",
+                        "description": "Review code for issues",
+                        "arguments": [{"name": "code", "required": true}]
+                    },
+                    {"name": "summarize"}
+                ]
+            }
+        }
+        """)
+
+        let prompts = try await client.listPrompts()
+        #expect(prompts.count == 2)
+        #expect(prompts[0].name == "code_review")
+        #expect(prompts[0].description == "Review code for issues")
+        #expect(prompts[0].arguments?.count == 1)
+        #expect(prompts[0].arguments?[0].required == true)
+        #expect(prompts[1].name == "summarize")
+    }
+
+    @Test("listPrompts returns empty array")
+    func listPromptsEmpty() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"prompts":[]}}
+        """)
+
+        let prompts = try await client.listPrompts()
+        #expect(prompts.isEmpty)
+    }
+
+    @Test("listPrompts paginates with cursor")
+    func listPromptsPaginated() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"a"}],"nextCursor":"pg2"}}
+        """)
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":3,"result":{"prompts":[{"name":"b"}]}}
+        """)
+
+        let prompts = try await client.listPrompts()
+        #expect(prompts.count == 2)
+        #expect(prompts[0].name == "a")
+        #expect(prompts[1].name == "b")
+    }
+
+    @Test("listPrompts sends correct method")
+    func listPromptsSendsMethod() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"prompts":[]}}
+        """)
+
+        _ = try await client.listPrompts()
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "prompts/list")
+    }
+
+    // MARK: - Get Prompt
+
+    @Test("getPrompt returns messages")
+    func getPromptGoldenPath() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "description": "Code review prompt",
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": "Review this code: print('hello')"}},
+                    {"role": "assistant", "content": {"type": "text", "text": "I'll review the code."}}
+                ]
+            }
+        }
+        """)
+
+        let result = try await client.getPrompt(name: "code_review", arguments: ["code": "print('hello')"])
+        #expect(result.description == "Code review prompt")
+        #expect(result.messages.count == 2)
+        #expect(result.messages[0].role == .user)
+        #expect(result.messages[1].role == .assistant)
+    }
+
+    @Test("getPrompt sends correct request with arguments")
+    func getPromptSendsArguments() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"messages":[{"role":"user","content":{"type":"text","text":"Hi"}}]}}
+        """)
+
+        _ = try await client.getPrompt(name: "greet", arguments: ["name": "Alice"])
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        #expect(request.method == "prompts/get")
+        if case .object(let params) = request.params {
+            #expect(params["name"] == .string("greet"))
+            #expect(params["arguments"] == .object(["name": .string("Alice")]))
+        } else {
+            Issue.record("Expected params object")
+        }
+    }
+
+    @Test("getPrompt with empty arguments")
+    func getPromptEmptyArgs() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {"jsonrpc":"2.0","id":2,"result":{"messages":[{"role":"user","content":{"type":"text","text":"Default"}}]}}
+        """)
+
+        let result = try await client.getPrompt(name: "default_prompt")
+        #expect(result.messages.count == 1)
+    }
+
+    @Test("getPrompt with image content")
+    func getPromptImageContent() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "messages": [
+                    {"role": "user", "content": {"type": "image", "data": "iVBOR...", "mimeType": "image/png"}}
+                ]
+            }
+        }
+        """)
+
+        let result = try await client.getPrompt(name: "analyze_image")
+        if case .image(let data, let mimeType, _) = result.messages[0].content {
+            #expect(data == "iVBOR...")
+            #expect(mimeType == "image/png")
+        } else {
+            Issue.record("Expected image content")
+        }
+    }
+
+    @Test("getPrompt with embedded resource content")
+    func getPromptResourceContent() async throws {
+        let (client, transport) = try await makeInitializedClient()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "messages": [
+                    {"role": "user", "content": {"type": "resource", "resource": {"uri": "file:///data.csv", "text": "a,b,c"}}}
+                ]
+            }
+        }
+        """)
+
+        let result = try await client.getPrompt(name: "analyze_data")
+        if case .resource(let contents, _) = result.messages[0].content {
+            if case .text(let uri, _, let text) = contents {
+                #expect(uri == "file:///data.csv")
+                #expect(text == "a,b,c")
+            } else {
+                Issue.record("Expected text resource")
+            }
+        } else {
+            Issue.record("Expected resource content")
+        }
+    }
 }

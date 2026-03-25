@@ -144,6 +144,51 @@ struct MCPTypesTests {
         let data = json.data(using: .utf8)!
         let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
         #expect(caps.tools?.listChanged == false)
+        #expect(caps.resources == nil)
+        #expect(caps.prompts == nil)
+    }
+
+    @Test("ServerCapabilities with resources")
+    func capabilitiesWithResources() {
+        let caps = ServerCapabilities(resources: ResourcesCapability(subscribe: true, listChanged: true))
+        #expect(caps.resources?.subscribe == true)
+        #expect(caps.resources?.listChanged == true)
+    }
+
+    @Test("ServerCapabilities with prompts")
+    func capabilitiesWithPrompts() {
+        let caps = ServerCapabilities(prompts: PromptsCapability(listChanged: true))
+        #expect(caps.prompts?.listChanged == true)
+    }
+
+    @Test("ServerCapabilities decodes all capabilities from JSON")
+    func capabilitiesDecodesAll() throws {
+        let json = """
+        {
+            "tools": {"listChanged": true},
+            "resources": {"subscribe": true, "listChanged": false},
+            "prompts": {"listChanged": true}
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
+        #expect(caps.tools?.listChanged == true)
+        #expect(caps.resources?.subscribe == true)
+        #expect(caps.resources?.listChanged == false)
+        #expect(caps.prompts?.listChanged == true)
+    }
+
+    @Test("ResourcesCapability with subscribe only")
+    func resourcesCapabilitySubscribe() {
+        let cap = ResourcesCapability(subscribe: true)
+        #expect(cap.subscribe == true)
+        #expect(cap.listChanged == nil)
+    }
+
+    @Test("PromptsCapability with no options")
+    func promptsCapabilityEmpty() {
+        let cap = PromptsCapability()
+        #expect(cap.listChanged == nil)
     }
 
     // MARK: - InitializeResult
