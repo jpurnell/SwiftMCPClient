@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "swift-mcp-client",
+    name: "SwiftMCPClient",
     platforms: [
         .macOS(.v14),
         .iOS(.v17),
