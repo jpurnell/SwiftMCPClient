@@ -96,6 +96,10 @@ do {
         print("Request timed out")
     case .invalidResponse:
         print("Could not decode server response")
+    case .transportClosed:
+        print("Transport connection was closed")
+    case .processSpawnFailed(let reason):
+        print("Failed to spawn subprocess: \(reason)")
     }
 }
 ```

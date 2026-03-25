@@ -19,11 +19,13 @@ Swift project that needs MCP integration.
 
 - <doc:MCPClientGuide>
 - ``MCPClientConnection``
+- ``MCPClientProtocol``
 - ``MCPTool``
 - ``MCPToolResult``
 
 ### Transport
 
+- <doc:TransportGuide>
 - ``MCPTransport``
 - ``HTTPSSETransport``
 - ``StdioTransport``
@@ -32,6 +34,7 @@ Swift project that needs MCP integration.
 
 - ``JSONRPCRequest``
 - ``JSONRPCResponse``
+- ``JSONRPCNotification``
 - ``JSONRPCError``
 
 ### Supporting Types
