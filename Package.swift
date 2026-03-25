@@ -6,6 +6,7 @@ var targets: [Target] = [
         name: "MCPClient",
         dependencies: [
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            .product(name: "WebSocketKit", package: "websocket-kit"),
         ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
@@ -42,6 +43,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+        .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
     ],
     targets: targets
 )
