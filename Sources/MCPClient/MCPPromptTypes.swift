@@ -1,0 +1,181 @@
+import Foundation
+
+/// A prompt template exposed by an MCP server.
+///
+/// Prompts are pre-defined templates that servers offer for common interactions.
+/// They may accept arguments that customize the generated messages.
+///
+/// ## MCP Schema
+///
+/// ```json
+/// {
+///     "name": "code_review",
+///     "description": "Review code for issues",
+///     "arguments": [
+///         {"name": "code", "required": true},
+///         {"name": "language"}
+///     ]
+/// }
+/// ```
+public struct MCPPrompt: Codable, Sendable, Equatable {
+    /// The unique name identifying this prompt.
+    public let name: String
+
+    /// Optional description of what this prompt does.
+    public let description: String?
+
+    /// Optional list of arguments this prompt accepts.
+    public let arguments: [MCPPromptArgument]?
+
+    /// Creates a new prompt definition.
+    ///
+    /// - Parameters:
+    ///   - name: The prompt name.
+    ///   - description: Optional description.
+    ///   - arguments: Optional argument definitions.
+    public init(name: String, description: String? = nil, arguments: [MCPPromptArgument]? = nil) {
+        self.name = name
+        self.description = description
+        self.arguments = arguments
+    }
+}
+
+/// An argument accepted by a prompt template.
+public struct MCPPromptArgument: Codable, Sendable, Equatable {
+    /// The argument name.
+    public let name: String
+
+    /// Optional description of the argument.
+    public let description: String?
+
+    /// Whether this argument is required.
+    public let required: Bool?
+
+    /// Creates a new prompt argument definition.
+    ///
+    /// - Parameters:
+    ///   - name: The argument name.
+    ///   - description: Optional description.
+    ///   - required: Whether the argument is required.
+    public init(name: String, description: String? = nil, required: Bool? = nil) {
+        self.name = name
+        self.description = description
+        self.required = required
+    }
+}
+
+/// A message in a prompt response, with a role and content.
+///
+/// Prompt messages form a conversation template that clients can present
+/// to an LLM. Each message has a role (user or assistant) and a single
+/// content block.
+public struct MCPPromptMessage: Codable, Sendable, Equatable {
+    /// The role of this message's author.
+    public let role: MCPRole
+
+    /// The content of this message.
+    public let content: MCPPromptContent
+
+    /// Creates a new prompt message.
+    ///
+    /// - Parameters:
+    ///   - role: The message role.
+    ///   - content: The message content.
+    public init(role: MCPRole, content: MCPPromptContent) {
+        self.role = role
+        self.content = content
+    }
+}
+
+/// Content within a prompt message — text, image, or embedded resource.
+///
+/// Each variant can optionally carry ``MCPAnnotations`` for audience and priority hints.
+///
+/// ## Variants
+///
+/// - ``text(_:annotations:)`` — Plain text content
+/// - ``image(data:mimeType:annotations:)`` — Base64-encoded image
+/// - ``resource(_:annotations:)`` — Embedded resource contents
+public enum MCPPromptContent: Sendable, Equatable {
+    /// Text content.
+    case text(String, annotations: MCPAnnotations? = nil)
+
+    /// Base64-encoded image with MIME type.
+    case image(data: String, mimeType: String, annotations: MCPAnnotations? = nil)
+
+    /// Embedded resource contents.
+    case resource(MCPResourceContents, annotations: MCPAnnotations? = nil)
+}
+
+extension MCPPromptContent: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, data, mimeType, resource, annotations
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        let annotations = try container.decodeIfPresent(MCPAnnotations.self, forKey: .annotations)
+
+        switch type {
+        case "text":
+            let text = try container.decode(String.self, forKey: .text)
+            self = .text(text, annotations: annotations)
+        case "image":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .image(data: data, mimeType: mimeType, annotations: annotations)
+        case "resource":
+            let resource = try container.decode(MCPResourceContents.self, forKey: .resource)
+            self = .resource(resource, annotations: annotations)
+        default:
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Unknown MCPPromptContent type: \(type)"
+                )
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let text, let annotations):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .image(let data, let mimeType, let annotations):
+            try container.encode("image", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .resource(let resource, let annotations):
+            try container.encode("resource", forKey: .type)
+            try container.encode(resource, forKey: .resource)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        }
+    }
+}
+
+/// The result of a `prompts/get` request.
+///
+/// Contains the expanded prompt as a sequence of messages, optionally
+/// with a description.
+public struct MCPPromptResult: Codable, Sendable {
+    /// Optional description of the prompt.
+    public let description: String?
+
+    /// The prompt messages forming the conversation template.
+    public let messages: [MCPPromptMessage]
+
+    /// Creates a new prompt result.
+    ///
+    /// - Parameters:
+    ///   - description: Optional description.
+    ///   - messages: The prompt messages.
+    public init(description: String? = nil, messages: [MCPPromptMessage]) {
+        self.description = description
+        self.messages = messages
+    }
+}

@@ -49,5 +49,5 @@
 
 ### 9. Release
 - [x] All tests passing, zero warnings (132 tests)
-- [ ] Tag v0.2.0
-- [ ] Push to GitHub
+- [x] Tag v0.2.0
+- [x] Push to GitHub
