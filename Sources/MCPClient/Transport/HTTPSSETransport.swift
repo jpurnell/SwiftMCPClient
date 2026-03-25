@@ -1,7 +1,10 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
+import AsyncHTTPClient
+import NIOCore
+import NIOHTTP1
+import NIOFoundationCompat
+import NIOSSL
+import Logging
 
 /// Connects to a remote MCP server via HTTP POST (requests) and Server-Sent Events (responses).
 ///
@@ -21,23 +24,25 @@ import FoundationNetworking
 /// If the SSE stream drops during ``connect()``, the transport automatically
 /// retries up to ``maxReconnectAttempts`` times with exponential backoff
 /// starting from ``reconnectBaseDelay``.
+///
+/// ## Cross-Platform
+///
+/// Uses `AsyncHTTPClient` (Swift NIO) for HTTP and TLS, providing identical
+/// behavior on macOS and Linux. Self-signed certificate support works on
+/// all platforms via NIO SSL.
 public actor HTTPSSETransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]
     private let connectionTimeout: TimeInterval
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
-    private let sessionConfiguration: URLSessionConfiguration
     private let trustSelfSignedCertificates: Bool
 
     /// The endpoint URL extracted from the SSE `endpoint` event during connect.
     private var endpointURL: URL?
 
-    /// The URL session used for SSE streaming (delegate-based).
-    private var sseSession: URLSession?
-
-    /// A separate session for POST requests (no delegate needed).
-    private var postSession: URLSession?
+    /// The HTTP client used for all requests.
+    private var httpClient: HTTPClient?
 
     /// Queue of received JSON-RPC messages from SSE `message` events.
     private var messageQueue: [Data] = []
@@ -51,11 +56,6 @@ public actor HTTPSSETransport: MCPTransport {
     /// Whether the transport is currently connected.
     private var isConnected: Bool = false
 
-    /// The SSE delegate that processes streaming data chunks (Apple only).
-    #if !canImport(FoundationNetworking)
-    private var sseDelegate: SSEStreamDelegate?
-    #endif
-
     /// Creates a new HTTP/SSE transport.
     ///
     /// - Parameters:
@@ -66,16 +66,14 @@ public actor HTTPSSETransport: MCPTransport {
     ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds. Default 1.0.
     ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
     ///     **Use only for development/testing** — this disables certificate validation.
-    ///   - urlSessionConfiguration: URL session configuration. Defaults to `.default`.
-    ///     Override for testing with mock URL protocols.
+    ///     Works on both macOS and Linux.
     public init(
         url: URL,
         headers: [String: String] = [:],
         connectionTimeout: TimeInterval = 30.0,
         maxReconnectAttempts: Int = 3,
         reconnectBaseDelay: TimeInterval = 1.0,
-        trustSelfSignedCertificates: Bool = false,
-        urlSessionConfiguration: URLSessionConfiguration = .default
+        trustSelfSignedCertificates: Bool = false
     ) {
         self.url = url
         self.headers = headers
@@ -83,40 +81,38 @@ public actor HTTPSSETransport: MCPTransport {
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
-        self.sessionConfiguration = urlSessionConfiguration
     }
 
     public func connect() async throws {
-        #if canImport(FoundationNetworking)
-        // Linux: URLSession delegate-based streaming is unreliable on
-        // swift-corelibs-foundation. Use the data-request path instead.
-        try await connectWithDataRequest()
-        #else
-        // Check if we're using a mock session configuration (for tests)
-        // Mock protocols return complete responses, so use the simple path
-        let isMockSession = sessionConfiguration.protocolClasses?.contains(where: {
-            String(describing: $0).contains("Mock")
-        }) ?? false
+        var lastError: (any Error)?
 
-        if isMockSession {
-            try await connectWithDataRequest()
-        } else {
-            try await connectWithStreaming()
+        for attempt in 0...maxReconnectAttempts {
+            if attempt > 0 {
+                let delay = reconnectBaseDelay * pow(2.0, Double(attempt - 1))
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+
+            do {
+                try await performConnect()
+                return
+            } catch {
+                lastError = error
+                // Clean up the HTTP client on failure so it doesn't leak
+                if let client = httpClient {
+                    httpClient = nil
+                    try? await client.shutdown()
+                }
+            }
         }
-        #endif
+
+        throw lastError ?? MCPError.connectionFailed(
+            reason: "Failed to connect after \(maxReconnectAttempts) retries"
+        )
     }
 
     public func disconnect() async throws {
         streamTask?.cancel()
         streamTask = nil
-        #if !canImport(FoundationNetworking)
-        sseDelegate?.cancel()
-        sseDelegate = nil
-        #endif
-        sseSession?.invalidateAndCancel()
-        sseSession = nil
-        postSession?.invalidateAndCancel()
-        postSession = nil
         endpointURL = nil
         isConnected = false
         messageQueue.removeAll()
@@ -124,53 +120,48 @@ public actor HTTPSSETransport: MCPTransport {
         // Fail any waiting receive() call
         messageContinuation?.resume(throwing: MCPError.connectionFailed(reason: "Disconnected"))
         messageContinuation = nil
+
+        // Shut down the HTTP client
+        if let client = httpClient {
+            httpClient = nil
+            try? await client.shutdown()
+        }
     }
 
     public func send(_ data: Data) async throws {
-        guard let endpointURL = endpointURL else {
+        guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
         }
 
-        // Use the post session (no delegate) for POST requests.
-        // The SSE session has a delegate that intercepts responses, so POST
-        // requests must go through a separate, delegate-free session.
-        guard let session = postSession else {
-            throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
-        }
-
-        var request = URLRequest(url: endpointURL)
-        request.httpMethod = "POST"
-        request.httpBody = data
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = HTTPClientRequest(url: endpointURL.absoluteString)
+        request.method = .POST
+        request.headers.add(name: "Content-Type", value: "application/json")
         for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+            request.headers.replaceOrAdd(name: key, value: value)
         }
+        request.body = .bytes(data)
 
-        let responseBody: Data
-        let sendResponse: URLResponse
+        let response: HTTPClientResponse
         do {
-            (responseBody, sendResponse) = try await session.data(for: request)
+            response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
         } catch {
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
 
-        guard let httpResponse = sendResponse as? HTTPURLResponse else {
-            throw MCPError.connectionFailed(reason: "Invalid HTTP response from POST")
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
+        guard (200...299).contains(response.status.code) else {
             throw MCPError.requestFailed(
-                code: httpResponse.statusCode,
-                message: "HTTP \(httpResponse.statusCode) from POST to \(endpointURL.absoluteString)",
+                code: Int(response.status.code),
+                message: "HTTP \(response.status.code) from POST to \(endpointURL.absoluteString)",
                 data: nil
             )
         }
 
         // Some MCP servers return the JSON-RPC response directly in the POST
-        // response body rather than via the SSE stream. If there's a response
-        // body, enqueue it so receive() can pick it up.
-        if !responseBody.isEmpty {
-            enqueueMessage(responseBody)
+        // response body rather than via the SSE stream.
+        let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB limit
+        let responseData = Data(buffer: body)
+        if !responseData.isEmpty {
+            enqueueMessage(responseData)
         }
     }
 
@@ -190,172 +181,116 @@ public actor HTTPSSETransport: MCPTransport {
         }
     }
 
-    // MARK: - Streaming Connection (Apple platforms)
+    // MARK: - Connection
 
-    #if !canImport(FoundationNetworking)
-    /// Connect using URLSessionDataDelegate for streaming SSE data.
-    /// This is the production path on Apple platforms — it processes data
-    /// as it arrives rather than waiting for the entire response.
-    /// Not available on Linux where delegate-based URLSession is unreliable.
-    private func connectWithStreaming() async throws {
-        var lastError: (any Error)?
+    private func performConnect() async throws {
+        let client = makeHTTPClient()
+        self.httpClient = client
 
-        for attempt in 0...maxReconnectAttempts {
-            if attempt > 0 {
-                let delay = reconnectBaseDelay * pow(2.0, Double(attempt - 1))
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            }
-
-            do {
-                try await performStreamingConnect()
-                return
-            } catch {
-                lastError = error
-            }
-        }
-
-        throw lastError ?? MCPError.connectionFailed(reason: "Failed to connect after \(maxReconnectAttempts) retries")
-    }
-
-    private func performStreamingConnect() async throws {
-        let delegate = SSEStreamDelegate(trustSelfSignedCertificates: trustSelfSignedCertificates)
-        self.sseDelegate = delegate
-
-        let sseURLSession = URLSession(configuration: sessionConfiguration, delegate: delegate, delegateQueue: nil)
-        self.sseSession = sseURLSession
-
-        // POST requests use a separate session WITHOUT the SSE data delegate.
-        // If both share the same delegate-based session, POST responses
-        // get swallowed by the delegate and the call hangs.
-        // When trusting self-signed certs, the POST session also needs a delegate
-        // to handle TLS challenges.
-        if trustSelfSignedCertificates {
-            let postDelegate = TLSBypassDelegate()
-            self.postSession = URLSession(configuration: sessionConfiguration, delegate: postDelegate, delegateQueue: nil)
-        } else {
-            self.postSession = URLSession(configuration: sessionConfiguration)
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = .GET
+        request.headers.add(name: "Accept", value: "text/event-stream")
+        request.headers.add(name: "Cache-Control", value: "no-cache")
         for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+            request.headers.replaceOrAdd(name: key, value: value)
         }
 
-        let task = sseURLSession.dataTask(with: request)
-        delegate.task = task
-
-        // Wait for the endpoint event with a timeout.
-        // IMPORTANT: task.resume() is called AFTER setting callbacks to avoid
-        // a race where data arrives before onEndpoint is wired up (especially
-        // on fast localhost connections via FoundationNetworking on Linux).
-        let endpointData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, any Error>) in
-            delegate.onEndpoint = { endpointPath in
-                continuation.resume(returning: endpointPath)
-            }
-            delegate.onError = { error in
-                continuation.resume(throwing: error)
-            }
-
-            // Timeout
-            DispatchQueue.global().asyncAfter(deadline: .now() + connectionTimeout) { [weak delegate] in
-                delegate?.timeoutIfNeeded(continuation: continuation)
-            }
-
-            task.resume()
-        }
-
-        guard let resolvedEndpoint = URL(string: endpointData, relativeTo: url)?.absoluteURL else {
-            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(endpointData)")
-        }
-
-        self.endpointURL = resolvedEndpoint
-        self.isConnected = true
-
-        // Set up ongoing message handling
-        delegate.onMessage = { [weak self] data in
-            guard let self = self else { return }
-            Task { await self.enqueueMessage(data) }
-        }
-        delegate.onStreamEnd = { [weak self] in
-            guard let self = self else { return }
-            Task { await self.handleStreamEnd() }
-        }
-    }
-    #endif
-
-    // MARK: - Simple Connection (mock/test sessions)
-
-    /// Connect using session.data() — works only for mock URL protocols
-    /// that return complete responses immediately.
-    private func connectWithDataRequest() async throws {
-        let urlSession = URLSession(configuration: sessionConfiguration)
-        self.sseSession = urlSession
-        self.postSession = urlSession
-
-        var lastError: (any Error)?
-
-        for attempt in 0...maxReconnectAttempts {
-            if attempt > 0 {
-                let delay = reconnectBaseDelay * pow(2.0, Double(attempt - 1))
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            }
-
-            do {
-                try await performDataConnect(session: urlSession)
-                return
-            } catch {
-                lastError = error
-            }
-        }
-
-        throw lastError ?? MCPError.connectionFailed(reason: "Failed to connect after \(maxReconnectAttempts) retries")
-    }
-
-    private func performDataConnect(session: URLSession) async throws {
-        var request = URLRequest(url: url)
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        let responseData: Data
-        let response: URLResponse
+        let response: HTTPClientResponse
         do {
-            (responseData, response) = try await session.data(for: request)
+            response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
         } catch {
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw MCPError.connectionFailed(reason: "SSE endpoint returned non-200 status")
+        guard (200...299).contains(response.status.code) else {
+            throw MCPError.connectionFailed(
+                reason: "SSE endpoint returned HTTP \(response.status.code)"
+            )
         }
 
-        guard let responseText = String(data: responseData, encoding: .utf8) else {
-            throw MCPError.connectionFailed(reason: "SSE response is not valid UTF-8")
-        }
-
+        // Read the streaming SSE response, looking for the endpoint event.
+        // We parse chunks as they arrive — no need to buffer the entire response.
         var parser = SSEParser()
-        let events = parser.append(responseText)
+        var foundEndpoint = false
 
-        guard let endpointEvent = events.first(where: { $0.event == "endpoint" }) else {
-            throw MCPError.connectionFailed(reason: "No endpoint event received from SSE stream")
-        }
+        for try await buffer in response.body {
+            guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
+            let events = parser.append(text)
 
-        guard let resolvedEndpoint = URL(string: endpointEvent.data, relativeTo: url)?.absoluteURL else {
-            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(endpointEvent.data)")
-        }
+            for event in events {
+                if event.event == "endpoint" && !foundEndpoint {
+                    guard let resolvedEndpoint = URL(
+                        string: event.data, relativeTo: url
+                    )?.absoluteURL else {
+                        throw MCPError.connectionFailed(
+                            reason: "Invalid endpoint URL: \(event.data)"
+                        )
+                    }
 
-        self.endpointURL = resolvedEndpoint
-        self.isConnected = true
+                    self.endpointURL = resolvedEndpoint
+                    self.isConnected = true
+                    foundEndpoint = true
 
-        for event in events where event.event == "message" || (event.event == nil && events.first(where: { $0.event == "endpoint" }) != nil) {
-            if event.event == "endpoint" { continue }
-            if let data = event.data.data(using: .utf8) {
-                messageQueue.append(data)
+                } else if foundEndpoint && (event.event == "message" || event.event == nil) {
+                    if let data = event.data.data(using: .utf8) {
+                        messageQueue.append(data)
+                    }
+                }
+            }
+
+            // Once we have the endpoint, start background streaming for ongoing messages
+            if foundEndpoint {
+                startBackgroundStream(response: response, parser: parser)
+                return
             }
         }
+
+        // If we get here, the stream ended without an endpoint event
+        throw MCPError.connectionFailed(reason: "No endpoint event received from SSE stream")
+    }
+
+    /// Start a background task to continue reading SSE messages after connect.
+    private func startBackgroundStream(response: HTTPClientResponse, parser: SSEParser) {
+        var parser = parser
+        streamTask = Task { [weak self] in
+            do {
+                for try await buffer in response.body {
+                    guard let self = self else { return }
+                    guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
+                    let events = parser.append(text)
+
+                    for event in events {
+                        if event.event == "message" || event.event == nil {
+                            if let data = event.data.data(using: .utf8) {
+                                await self.enqueueMessage(data)
+                            }
+                        }
+                    }
+                }
+            } catch {
+                // Stream ended or errored
+            }
+
+            // Stream has ended
+            guard let self = self else { return }
+            await self.handleStreamEnd()
+        }
+    }
+
+    // MARK: - HTTP Client Factory
+
+    private func makeHTTPClient() -> HTTPClient {
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        if trustSelfSignedCertificates {
+            tlsConfig.certificateVerification = .none
+        }
+
+        var config = HTTPClient.Configuration(
+            tlsConfiguration: tlsConfig
+        )
+        config.timeout.connect = .seconds(Int64(connectionTimeout))
+
+        return HTTPClient(configuration: config)
     }
 
     // MARK: - Message Handling
@@ -380,134 +315,12 @@ public actor HTTPSSETransport: MCPTransport {
     }
 }
 
-// MARK: - SSE Stream Delegate (Apple platforms only)
+// MARK: - NIO ByteBuffer String Extension
 
-#if !canImport(FoundationNetworking)
-/// URLSession delegate that processes SSE data as it streams in.
-private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    var task: URLSessionDataTask?
-    var onEndpoint: ((String) -> Void)?
-    var onMessage: ((Data) -> Void)?
-    var onError: ((any Error) -> Void)?
-    var onStreamEnd: (() -> Void)?
-
-    private let trustSelfSignedCertificates: Bool
-    private var parser = SSEParser()
-    private var endpointReceived = false
-    private var timedOut = false
-    private let lock = NSLock()
-
-    init(trustSelfSignedCertificates: Bool = false) {
-        self.trustSelfSignedCertificates = trustSelfSignedCertificates
-        super.init()
-    }
-
-    func cancel() {
-        task?.cancel()
-        task = nil
-    }
-
-    func timeoutIfNeeded(continuation: CheckedContinuation<String, any Error>) {
-        lock.lock()
-        let shouldTimeout = !endpointReceived && !timedOut
-        if shouldTimeout {
-            timedOut = true
-            onEndpoint = nil
-            onError = nil
-        }
-        lock.unlock()
-
-        if shouldTimeout {
-            continuation.resume(throwing: MCPError.connectionFailed(reason: "Timed out waiting for endpoint event"))
-        }
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200...299).contains(httpResponse.statusCode) {
-            let error = MCPError.connectionFailed(reason: "SSE endpoint returned HTTP \(httpResponse.statusCode)")
-            lock.lock()
-            let handler = onError
-            timedOut = true // prevent timeout from also firing
-            onError = nil
-            onEndpoint = nil
-            lock.unlock()
-            handler?(error)
-            completionHandler(.cancel)
-            return
-        }
-        completionHandler(.allow)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let text = String(data: data, encoding: .utf8) else { return }
-
-        let events = parser.append(text)
-
-        for event in events {
-            if event.event == "endpoint" {
-                lock.lock()
-                let alreadyReceived = endpointReceived
-                endpointReceived = true
-                let handler = onEndpoint
-                onEndpoint = nil
-                onError = nil
-                lock.unlock()
-
-                if !alreadyReceived {
-                    handler?(event.data)
-                }
-            } else if event.event == "message" || event.event == nil {
-                if let messageData = event.data.data(using: .utf8) {
-                    onMessage?(messageData)
-                }
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
-        lock.lock()
-        let hadEndpoint = endpointReceived
-        let alreadyHandled = timedOut
-        if !hadEndpoint {
-            timedOut = true  // Prevent timeout from also resuming the continuation
-        }
-        let errorHandler = onError
-        onError = nil
-        onEndpoint = nil
-        lock.unlock()
-
-        if !hadEndpoint && !alreadyHandled {
-            let mcpError = error.map { MCPError.connectionFailed(reason: $0.localizedDescription) }
-                ?? MCPError.connectionFailed(reason: "SSE stream ended before endpoint event")
-            errorHandler?(mcpError)
-        } else if hadEndpoint {
-            onStreamEnd?()
-        }
-    }
-
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if trustSelfSignedCertificates,
-           challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           let serverTrust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
-            completionHandler(.performDefaultHandling, nil)
-        }
+private extension String {
+    init?(buffer: NIOCore.ByteBuffer, encoding: String.Encoding = .utf8) {
+        var buf = buffer
+        guard let string = buf.readString(length: buf.readableBytes) else { return nil }
+        self = string
     }
 }
-
-// MARK: - TLS Bypass Delegate
-
-/// Minimal delegate that accepts self-signed certificates for POST sessions.
-private final class TLSBypassDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           let serverTrust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
-            completionHandler(.performDefaultHandling, nil)
-        }
-    }
-}
-#endif

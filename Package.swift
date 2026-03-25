@@ -4,7 +4,9 @@ import PackageDescription
 var targets: [Target] = [
     .target(
         name: "MCPClient",
-        dependencies: [],
+        dependencies: [
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+        ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]
@@ -37,6 +39,9 @@ let package = Package(
     ],
     products: [
         .library(name: "MCPClient", targets: ["MCPClient"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
     ],
     targets: targets
 )
