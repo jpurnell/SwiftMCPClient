@@ -1,5 +1,9 @@
 import Foundation
 
+// URLProtocol.client is not available on swift-corelibs-foundation (Linux).
+// Mock URL protocol tests are Apple-platforms only.
+#if !canImport(FoundationNetworking)
+
 /// A mock URL protocol that intercepts URLSession requests for deterministic testing.
 ///
 /// Register canned responses before making requests. Supports both regular HTTP
@@ -121,3 +125,5 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
         // Nothing to clean up
     }
 }
+
+#endif
