@@ -51,8 +51,10 @@ public actor HTTPSSETransport: MCPTransport {
     /// Whether the transport is currently connected.
     private var isConnected: Bool = false
 
-    /// The SSE delegate that processes streaming data chunks.
+    /// The SSE delegate that processes streaming data chunks (Apple only).
+    #if !canImport(FoundationNetworking)
     private var sseDelegate: SSEStreamDelegate?
+    #endif
 
     /// Creates a new HTTP/SSE transport.
     ///
@@ -85,6 +87,11 @@ public actor HTTPSSETransport: MCPTransport {
     }
 
     public func connect() async throws {
+        #if canImport(FoundationNetworking)
+        // Linux: URLSession delegate-based streaming is unreliable on
+        // swift-corelibs-foundation. Use the data-request path instead.
+        try await connectWithDataRequest()
+        #else
         // Check if we're using a mock session configuration (for tests)
         // Mock protocols return complete responses, so use the simple path
         let isMockSession = sessionConfiguration.protocolClasses?.contains(where: {
@@ -96,13 +103,16 @@ public actor HTTPSSETransport: MCPTransport {
         } else {
             try await connectWithStreaming()
         }
+        #endif
     }
 
     public func disconnect() async throws {
         streamTask?.cancel()
         streamTask = nil
+        #if !canImport(FoundationNetworking)
         sseDelegate?.cancel()
         sseDelegate = nil
+        #endif
         sseSession?.invalidateAndCancel()
         sseSession = nil
         postSession?.invalidateAndCancel()
@@ -180,11 +190,13 @@ public actor HTTPSSETransport: MCPTransport {
         }
     }
 
-    // MARK: - Streaming Connection (real servers)
+    // MARK: - Streaming Connection (Apple platforms)
 
+    #if !canImport(FoundationNetworking)
     /// Connect using URLSessionDataDelegate for streaming SSE data.
-    /// This is the production path — it processes data as it arrives
-    /// rather than waiting for the entire response.
+    /// This is the production path on Apple platforms — it processes data
+    /// as it arrives rather than waiting for the entire response.
+    /// Not available on Linux where delegate-based URLSession is unreliable.
     private func connectWithStreaming() async throws {
         var lastError: (any Error)?
 
@@ -270,6 +282,7 @@ public actor HTTPSSETransport: MCPTransport {
             Task { await self.handleStreamEnd() }
         }
     }
+    #endif
 
     // MARK: - Simple Connection (mock/test sessions)
 
@@ -367,8 +380,9 @@ public actor HTTPSSETransport: MCPTransport {
     }
 }
 
-// MARK: - SSE Stream Delegate
+// MARK: - SSE Stream Delegate (Apple platforms only)
 
+#if !canImport(FoundationNetworking)
 /// URLSession delegate that processes SSE data as it streams in.
 private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     var task: URLSessionDataTask?
@@ -496,3 +510,4 @@ private final class TLSBypassDelegate: NSObject, URLSessionDelegate, @unchecked 
         }
     }
 }
+#endif

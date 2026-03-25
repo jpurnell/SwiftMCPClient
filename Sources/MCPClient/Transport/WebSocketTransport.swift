@@ -1,10 +1,17 @@
 import Foundation
 
+// URLSessionWebSocketTask is not available on Linux (swift-corelibs-foundation).
+// WebSocketTransport is Apple-platforms only.
+#if !canImport(FoundationNetworking)
+
 /// A transport that communicates with an MCP server over WebSocket.
 ///
 /// `WebSocketTransport` uses `URLSessionWebSocketTask` (Foundation) to
 /// send and receive JSON-RPC messages as WebSocket text frames. No external
 /// dependencies are required.
+///
+/// > Note: This transport is only available on Apple platforms.
+/// > Linux does not support `URLSessionWebSocketTask`.
 ///
 /// ## Usage
 ///
@@ -91,3 +98,5 @@ public actor WebSocketTransport: MCPTransport {
         }
     }
 }
+
+#endif

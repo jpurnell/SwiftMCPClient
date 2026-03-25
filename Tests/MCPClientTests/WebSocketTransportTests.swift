@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import MCPClient
 
+// WebSocketTransport is Apple-only (URLSessionWebSocketTask)
+#if !canImport(FoundationNetworking)
+
 @Suite("WebSocketTransport")
 struct WebSocketTransportTests {
 
@@ -47,3 +50,5 @@ struct WebSocketTransportTests {
         try await transport.disconnect()
     }
 }
+
+#endif
