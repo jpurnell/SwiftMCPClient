@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import MCPClient
 
-// WebSocketTransport is Apple-only (URLSessionWebSocketTask)
-#if !canImport(FoundationNetworking)
-
 @Suite("WebSocketTransport")
 struct WebSocketTransportTests {
 
@@ -12,7 +9,6 @@ struct WebSocketTransportTests {
     func initWithURL() {
         let url = URL(string: "ws://localhost:8080/mcp")!
         let transport = WebSocketTransport(url: url)
-        // Should not crash — transport created but not connected
         _ = transport
     }
 
@@ -20,6 +16,13 @@ struct WebSocketTransportTests {
     func initWithHeaders() {
         let url = URL(string: "wss://mcp.example.com/ws")!
         let transport = WebSocketTransport(url: url, headers: ["Authorization": "Bearer token"])
+        _ = transport
+    }
+
+    @Test("WebSocketTransport initializes with self-signed certificate trust")
+    func initWithSelfSignedTrust() {
+        let url = URL(string: "wss://mcp.example.com/ws")!
+        let transport = WebSocketTransport(url: url, trustSelfSignedCertificates: true)
         _ = transport
     }
 
@@ -50,5 +53,3 @@ struct WebSocketTransportTests {
         try await transport.disconnect()
     }
 }
-
-#endif

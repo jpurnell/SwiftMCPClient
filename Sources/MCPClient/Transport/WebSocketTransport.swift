@@ -1,17 +1,15 @@
 import Foundation
-
-// URLSessionWebSocketTask is not available on Linux (swift-corelibs-foundation).
-// WebSocketTransport is Apple-platforms only.
-#if !canImport(FoundationNetworking)
+import WebSocketKit
+import NIOCore
+import NIOSSL
+import NIOFoundationCompat
+import NIOPosix
 
 /// A transport that communicates with an MCP server over WebSocket.
 ///
-/// `WebSocketTransport` uses `URLSessionWebSocketTask` (Foundation) to
-/// send and receive JSON-RPC messages as WebSocket text frames. No external
-/// dependencies are required.
-///
-/// > Note: This transport is only available on Apple platforms.
-/// > Linux does not support `URLSessionWebSocketTask`.
+/// `WebSocketTransport` uses `WebSocketKit` (Swift NIO) to send and
+/// receive JSON-RPC messages as WebSocket text frames. Works identically
+/// on macOS and Linux.
 ///
 /// ## Usage
 ///
@@ -30,73 +28,154 @@ import Foundation
 public actor WebSocketTransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var session: URLSession?
+    private let trustSelfSignedCertificates: Bool
+    private var eventLoopGroup: (any EventLoopGroup)?
+    private var webSocket: WebSocket?
     private var isConnected: Bool = false
+
+    /// Queue of received messages from WebSocket frames.
+    private var messageQueue: [Data] = []
+
+    /// Continuation for waiting `receive()` calls when no messages are queued.
+    private var messageContinuation: CheckedContinuation<Data, any Error>?
 
     /// Creates a new WebSocket transport.
     ///
     /// - Parameters:
     ///   - url: The WebSocket URL to connect to (ws:// or wss://).
     ///   - headers: Optional HTTP headers to include in the upgrade request.
-    public init(url: URL, headers: [String: String] = [:]) {
+    ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
+    ///     Works on both macOS and Linux.
+    public init(
+        url: URL,
+        headers: [String: String] = [:],
+        trustSelfSignedCertificates: Bool = false
+    ) {
         self.url = url
         self.headers = headers
+        self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
 
     public func connect() async throws {
-        var request = URLRequest(url: url)
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.eventLoopGroup = group
+
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        if trustSelfSignedCertificates {
+            tlsConfig.certificateVerification = .none
         }
 
-        let session = URLSession(configuration: .default)
-        let task = session.webSocketTask(with: request)
-        task.resume()
+        var upgradeHeaders = HTTPHeaders()
+        for (key, value) in headers {
+            upgradeHeaders.add(name: key, value: value)
+        }
 
-        self.session = session
-        self.webSocketTask = task
-        self.isConnected = true
+        let scheme = url.scheme ?? "ws"
+        let useTLS = scheme == "wss"
+
+        do {
+            let ws = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebSocket, any Error>) in
+                WebSocket.connect(
+                    to: url.absoluteString,
+                    headers: upgradeHeaders,
+                    configuration: .init(
+                        tlsConfiguration: useTLS ? tlsConfig : nil
+                    ),
+                    on: group
+                ) { ws in
+                    continuation.resume(returning: ws)
+                }.whenFailure { error in
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            self.webSocket = ws
+            self.isConnected = true
+            setupHandlers(ws)
+        } catch {
+            try? await group.shutdownGracefully()
+            eventLoopGroup = nil
+            throw MCPError.connectionFailed(reason: error.localizedDescription)
+        }
     }
 
     public func disconnect() async throws {
-        guard let task = webSocketTask else { return }
-        task.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        session?.invalidateAndCancel()
-        session = nil
+        if let ws = webSocket {
+            try? await ws.close()
+            webSocket = nil
+        }
+
         isConnected = false
+        messageQueue.removeAll()
+
+        messageContinuation?.resume(throwing: MCPError.connectionFailed(reason: "Disconnected"))
+        messageContinuation = nil
+
+        if let group = eventLoopGroup {
+            eventLoopGroup = nil
+            try? await group.shutdownGracefully()
+        }
     }
 
     public func send(_ data: Data) async throws {
-        guard let task = webSocketTask, isConnected else {
+        guard let ws = webSocket, isConnected else {
             throw MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
         }
 
-        let message = URLSessionWebSocketTask.Message.string(
-            String(data: data, encoding: .utf8) ?? ""
-        )
-        try await task.send(message)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        try await ws.send(text)
     }
 
     public func receive() async throws -> Data {
-        guard let task = webSocketTask, isConnected else {
+        guard isConnected else {
             throw MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
         }
 
-        let message = try await task.receive()
-        switch message {
-        case .string(let text):
-            guard let data = text.data(using: .utf8) else {
-                throw MCPError.invalidResponse
+        if !messageQueue.isEmpty {
+            return messageQueue.removeFirst()
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.messageContinuation = continuation
+        }
+    }
+
+    // MARK: - Private
+
+    private func setupHandlers(_ ws: WebSocket) {
+        ws.onText { [weak self] _, text in
+            guard let self = self else { return }
+            if let data = text.data(using: .utf8) {
+                Task { await self.enqueueMessage(data) }
             }
-            return data
-        case .data(let data):
-            return data
-        @unknown default:
-            throw MCPError.invalidResponse
+        }
+
+        ws.onBinary { [weak self] _, buffer in
+            guard let self = self else { return }
+            let data = Data(buffer: buffer)
+            Task { await self.enqueueMessage(data) }
+        }
+
+        ws.onClose.whenComplete { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.handleClose() }
+        }
+    }
+
+    private func enqueueMessage(_ data: Data) {
+        if let continuation = messageContinuation {
+            messageContinuation = nil
+            continuation.resume(returning: data)
+        } else {
+            messageQueue.append(data)
+        }
+    }
+
+    private func handleClose() {
+        isConnected = false
+        if let continuation = messageContinuation {
+            messageContinuation = nil
+            continuation.resume(throwing: MCPError.connectionFailed(reason: "WebSocket closed"))
         }
     }
 }
-
-#endif
