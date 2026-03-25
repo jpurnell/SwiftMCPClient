@@ -65,4 +65,20 @@ public protocol MCPClientProtocol: Sendable {
     /// - Returns: The prompt result with messages.
     /// - Throws: ``MCPError`` if the request fails.
     func getPrompt(name: String, arguments: [String: String]) async throws -> MCPPromptResult
+
+    /// Set the minimum log level for server log messages.
+    ///
+    /// - Parameter level: The minimum log level to receive.
+    /// - Throws: ``MCPError`` if the request fails.
+    func setLogLevel(_ level: MCPLogLevel) async throws
+
+    /// Request autocompletion suggestions for a prompt or resource argument.
+    ///
+    /// - Parameters:
+    ///   - ref: The prompt or resource being completed against.
+    ///   - argumentName: The name of the argument being completed.
+    ///   - argumentValue: The current partial value to match against.
+    /// - Returns: The completion result with suggested values.
+    /// - Throws: ``MCPError`` if the request fails.
+    func complete(ref: MCPCompletionRef, argumentName: String, argumentValue: String) async throws -> MCPCompletionResult
 }
