@@ -25,7 +25,8 @@ public enum MCPError: Error, Sendable, Equatable {
     /// - Parameters:
     ///   - code: The JSON-RPC error code.
     ///   - message: The error message from the server.
-    case requestFailed(code: Int, message: String)
+    ///   - data: Optional additional error context from the server.
+    case requestFailed(code: Int, message: String, data: AnyCodableValue?)
 
     /// The request exceeded the configured timeout.
     case timeout

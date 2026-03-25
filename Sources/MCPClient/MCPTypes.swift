@@ -76,32 +76,134 @@ public struct MCPToolResult: Codable, Sendable, Equatable {
     }
 }
 
-/// A content block within an MCP tool result.
+/// A content block within an MCP message or tool result.
 ///
-/// Content blocks carry the actual output from a tool invocation. The most
-/// common type is `"text"`, but the MCP protocol also supports `"image"`
-/// and `"resource"` types.
-public struct MCPContent: Codable, Sendable, Equatable {
-    /// The content type: `"text"`, `"image"`, or `"resource"`.
-    public let type: String
+/// Content blocks carry the actual output from a tool invocation or the body
+/// of a prompt message. The MCP protocol defines three content types:
+/// text, image (base64-encoded), and embedded resource.
+///
+/// `MCPContent` uses a discriminated union (Swift enum) that matches the
+/// MCP specification's `TextContent | ImageContent | EmbeddedResource` type.
+/// Each case carries optional ``MCPAnnotations`` for audience targeting and
+/// priority hints.
+///
+/// ## Usage
+///
+/// ```swift
+/// let result = try await client.callTool(name: "analyze", arguments: [:])
+/// for block in result.content {
+///     switch block {
+///     case .text(let str, _):
+///         print(str)
+///     case .image(let data, let mimeType, _):
+///         print("Image: \(mimeType)")
+///     case .resource(let contents, _):
+///         print("Resource: \(contents)")
+///     }
+/// }
+/// ```
+public enum MCPContent: Sendable, Equatable {
+    /// Text content.
+    case text(String, annotations: MCPAnnotations? = nil)
 
-    /// The text content, when ``type`` is `"text"`.
-    public let text: String?
+    /// Base64-encoded image with MIME type.
+    case image(data: String, mimeType: String, annotations: MCPAnnotations? = nil)
 
-    /// The MIME type of the content, when applicable.
-    public let mimeType: String?
+    /// Embedded resource contents.
+    case resource(MCPResourceContents, annotations: MCPAnnotations? = nil)
+}
 
-    /// Creates a new content block.
-    ///
-    /// - Parameters:
-    ///   - type: The content type identifier.
-    ///   - text: Optional text content.
-    ///   - mimeType: Optional MIME type.
-    public init(type: String, text: String? = nil, mimeType: String? = nil) {
-        self.type = type
-        self.text = text
-        self.mimeType = mimeType
+extension MCPContent: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, data, mimeType, resource, annotations
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        let annotations = try container.decodeIfPresent(MCPAnnotations.self, forKey: .annotations)
+
+        switch type {
+        case "text":
+            let text = try container.decode(String.self, forKey: .text)
+            self = .text(text, annotations: annotations)
+        case "image":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .image(data: data, mimeType: mimeType, annotations: annotations)
+        case "resource":
+            let resource = try container.decode(MCPResourceContents.self, forKey: .resource)
+            self = .resource(resource, annotations: annotations)
+        default:
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Unknown MCPContent type: \(type)"
+                )
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let text, let annotations):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .image(let data, let mimeType, let annotations):
+            try container.encode("image", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .resource(let resource, let annotations):
+            try container.encode("resource", forKey: .type)
+            try container.encode(resource, forKey: .resource)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        }
+    }
+}
+
+/// Client capabilities declared during MCP initialization.
+///
+/// Declares which client-side features are available, such as roots
+/// and sampling. Pass to ``MCPClientConnection/initialize(clientName:clientVersion:capabilities:protocolVersion:)``
+/// to inform the server of client capabilities.
+public struct ClientCapabilities: Codable, Sendable, Equatable {
+    /// The client's roots capability, if it supports `roots/list` requests.
+    public var roots: RootsCapability?
+
+    /// The client's sampling capability, if it can fulfill `sampling/createMessage`.
+    public var sampling: SamplingCapability?
+
+    /// Creates a new client capabilities declaration.
+    public init(roots: RootsCapability? = nil, sampling: SamplingCapability? = nil) {
+        self.roots = roots
+        self.sampling = sampling
+    }
+}
+
+/// Capability declaration for MCP roots support.
+public struct RootsCapability: Codable, Sendable, Equatable {
+    /// Whether the client can notify the server when roots change.
+    public var listChanged: Bool?
+
+    /// Creates a new roots capability.
+    public init(listChanged: Bool? = nil) {
+        self.listChanged = listChanged
+    }
+}
+
+/// Capability declaration for MCP sampling support.
+public struct SamplingCapability: Codable, Sendable, Equatable {
+    /// Creates a new sampling capability.
+    public init() {}
+}
+
+/// Capability declaration for MCP logging support.
+public struct LoggingCapability: Codable, Sendable, Equatable {
+    /// Creates a new logging capability.
+    public init() {}
 }
 
 /// Server capabilities returned during MCP initialization.
@@ -119,20 +221,26 @@ public struct ServerCapabilities: Codable, Sendable, Equatable {
     /// The server's prompts capability, if it offers prompt templates.
     public let prompts: PromptsCapability?
 
+    /// The server's logging capability, if it supports log level control.
+    public let logging: LoggingCapability?
+
     /// Creates a new capabilities declaration.
     ///
     /// - Parameters:
     ///   - tools: Optional tools capability.
     ///   - resources: Optional resources capability.
     ///   - prompts: Optional prompts capability.
+    ///   - logging: Optional logging capability.
     public init(
         tools: ToolsCapability? = nil,
         resources: ResourcesCapability? = nil,
-        prompts: PromptsCapability? = nil
+        prompts: PromptsCapability? = nil,
+        logging: LoggingCapability? = nil
     ) {
         self.tools = tools
         self.resources = resources
         self.prompts = prompts
+        self.logging = logging
     }
 }
 

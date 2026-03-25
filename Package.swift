@@ -20,6 +20,13 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
+        .executableTarget(
+            name: "MCPExplorer",
+            dependencies: ["MCPClient"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
         .testTarget(
             name: "MCPClientTests",
             dependencies: ["MCPClient"]

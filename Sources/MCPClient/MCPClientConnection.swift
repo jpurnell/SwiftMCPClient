@@ -60,9 +60,12 @@ import Foundation
 /// Request IDs are auto-incremented and guaranteed unique within a connection.
 public actor MCPClientConnection: MCPClientProtocol {
     private let transport: MCPTransport
+    private let requestTimeout: Duration
     private var nextRequestID: Int = 1
     private var isConnected: Bool = false
     private var dispatcher: MCPMessageDispatcher?
+    private var rootsHandler: (@Sendable () async -> [MCPRoot])?
+    private var samplingHandler: SamplingHandler?
 
     /// Stream of server-to-client notifications.
     ///
@@ -82,9 +85,12 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// The transport is not connected until ``initialize(clientName:clientVersion:)``
     /// is called.
     ///
-    /// - Parameter transport: The transport to use for communication.
-    public init(transport: MCPTransport) {
+    /// - Parameters:
+    ///   - transport: The transport to use for communication.
+    ///   - requestTimeout: Maximum time to wait for a response. Defaults to 30 seconds.
+    public init(transport: MCPTransport, requestTimeout: Duration = .seconds(30)) {
         self.transport = transport
+        self.requestTimeout = requestTimeout
     }
 
     /// Initialize the MCP connection, performing the protocol handshake.
@@ -108,6 +114,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     public func initialize(
         clientName: String,
         clientVersion: String,
+        capabilities: ClientCapabilities = ClientCapabilities(),
         protocolVersion: String = "2024-11-05"
     ) async throws -> InitializeResult {
         if !isConnected {
@@ -115,9 +122,13 @@ public actor MCPClientConnection: MCPClientProtocol {
             isConnected = true
         }
 
+        // Encode client capabilities to AnyCodableValue
+        let capsData = try JSONEncoder().encode(capabilities)
+        let capsValue = try JSONDecoder().decode(AnyCodableValue.self, from: capsData)
+
         let params = AnyCodableValue.object([
             "protocolVersion": .string(protocolVersion),
-            "capabilities": .object([:]),
+            "capabilities": capsValue,
             "clientInfo": .object([
                 "name": .string(clientName),
                 "version": .string(clientVersion)
@@ -129,6 +140,10 @@ public actor MCPClientConnection: MCPClientProtocol {
         let response = try await sendRequestDirect(method: "initialize", params: params)
         let resultData = try JSONEncoder().encode(response)
         let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
+
+        // The MCP spec says the server responds with the version it supports.
+        // We accept any version — the protocol is designed to be forward-compatible
+        // at the JSON-RPC level. Log but don't reject newer versions.
 
         // Send notifications/initialized per MCP spec (fire-and-forget, no response)
         let notification = JSONRPCNotification(method: "notifications/initialized")
@@ -183,15 +198,134 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func callTool(name: String, arguments: [String: AnyCodableValue] = [:]) async throws -> MCPToolResult {
-        let params = AnyCodableValue.object([
+        try await callTool(name: name, arguments: arguments, progressToken: nil)
+    }
+
+    /// Call a tool on the MCP server with an optional progress token.
+    ///
+    /// When `progressToken` is provided, it is included as `_meta.progressToken`
+    /// in the request, enabling the server to send progress notifications for
+    /// this specific request.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the tool to call (must match a name from ``listTools()``).
+    ///   - arguments: The arguments to pass to the tool. Defaults to empty.
+    ///   - progressToken: Optional token for receiving progress notifications.
+    /// - Returns: The tool's result containing one or more content blocks.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
+    /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
+    public func callTool(
+        name: String,
+        arguments: [String: AnyCodableValue] = [:],
+        progressToken: AnyCodableValue?
+    ) async throws -> MCPToolResult {
+        var paramsDict: [String: AnyCodableValue] = [
             "name": .string(name),
             "arguments": .object(arguments)
-        ])
+        ]
+        if let progressToken {
+            paramsDict["_meta"] = .object(["progressToken": progressToken])
+        }
+        let params = AnyCodableValue.object(paramsDict)
 
         let response = try await sendRequest(method: "tools/call", params: params)
         let resultData = try JSONEncoder().encode(response)
         let toolResult = try JSONDecoder().decode(MCPToolResult.self, from: resultData)
         return toolResult
+    }
+
+    // MARK: - Typed Notification Streams
+
+    /// Stream of progress notifications only.
+    ///
+    /// Filters the underlying ``notifications`` stream, yielding only
+    /// ``MCPProgressNotification`` values. The stream ends when the
+    /// connection is disconnected.
+    public var progressUpdates: AsyncStream<MCPProgressNotification> {
+        let source = notifications
+        return AsyncStream { continuation in
+            Task {
+                for await notification in source {
+                    if case .progress(let p) = notification {
+                        continuation.yield(p)
+                    }
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    /// Stream of log messages only.
+    ///
+    /// Filters the underlying ``notifications`` stream, yielding only
+    /// ``MCPLogMessage`` values.
+    public var logMessages: AsyncStream<MCPLogMessage> {
+        let source = notifications
+        return AsyncStream { continuation in
+            Task {
+                for await notification in source {
+                    if case .logMessage(let msg) = notification {
+                        continuation.yield(msg)
+                    }
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    /// Stream of tool list change events.
+    ///
+    /// Yields `Void` each time the server notifies that its tool list has changed.
+    public var toolListChanges: AsyncStream<Void> {
+        let source = notifications
+        return AsyncStream { continuation in
+            Task {
+                for await notification in source {
+                    if case .toolsListChanged = notification {
+                        continuation.yield(())
+                    }
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    /// Stream of resource update events.
+    ///
+    /// Yields the URI string of each resource that the server notifies has been updated.
+    public var resourceUpdates: AsyncStream<String> {
+        let source = notifications
+        return AsyncStream { continuation in
+            Task {
+                for await notification in source {
+                    if case .resourceUpdated(let uri) = notification {
+                        continuation.yield(uri)
+                    }
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    /// Gracefully shut down the connection.
+    ///
+    /// Stops the message dispatcher (cancels the background read loop, fails
+    /// any pending requests with ``MCPError/transportClosed``, finishes the
+    /// notification stream), then disconnects the transport.
+    ///
+    /// After calling `disconnect()`, all subsequent method calls will throw.
+    /// To reconnect, create a new ``MCPClientConnection`` instance.
+    public func disconnect() async throws {
+        if let dispatcher {
+            await dispatcher.stop()
+            self.dispatcher = nil
+        }
+        if isConnected {
+            try await transport.disconnect()
+            isConnected = false
+        }
     }
 
     // MARK: - Resources
@@ -389,19 +523,23 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///
     /// - Parameter handler: A closure that returns the current list of roots.
     public func setRootsHandler(_ handler: @Sendable @escaping () async -> [MCPRoot]) async {
-        guard let dispatcher else { return }
-        await dispatcher.setIncomingRequestHandler { _, method, _ in
-            guard method == "roots/list" else { return nil }
-            let roots = await handler()
-            let rootValues = roots.map { root -> AnyCodableValue in
-                var obj: [String: AnyCodableValue] = ["uri": .string(root.uri)]
-                if let name = root.name {
-                    obj["name"] = .string(name)
-                }
-                return .object(obj)
-            }
-            return .object(["roots": .array(rootValues)])
-        }
+        self.rootsHandler = handler
+        await updateIncomingRequestHandler()
+    }
+
+    // MARK: - Sampling
+
+    /// Register a handler that responds to `sampling/createMessage` requests from the server.
+    ///
+    /// When the server sends a `sampling/createMessage` request, the handler is called
+    /// with the decoded ``MCPSamplingRequest``. The handler should invoke an LLM and return
+    /// the result. For human-in-the-loop workflows, the handler can present the request
+    /// to the user for review before proceeding.
+    ///
+    /// - Parameter handler: A closure that fulfills sampling requests.
+    public func setSamplingHandler(_ handler: @escaping SamplingHandler) async {
+        self.samplingHandler = handler
+        await updateIncomingRequestHandler()
     }
 
     /// Notify the server that the client's roots have changed.
@@ -417,6 +555,44 @@ public actor MCPClientConnection: MCPClientProtocol {
     }
 
     // MARK: - Private
+
+    /// Updates the dispatcher's incoming request handler to route to both roots and sampling handlers.
+    private func updateIncomingRequestHandler() async {
+        guard let dispatcher else { return }
+        let rootsHandler = self.rootsHandler
+        let samplingHandler = self.samplingHandler
+
+        await dispatcher.setIncomingRequestHandler { _, method, params in
+            switch method {
+            case "roots/list":
+                guard let rootsHandler else { return nil }
+                let roots = await rootsHandler()
+                let rootValues = roots.map { root -> AnyCodableValue in
+                    var obj: [String: AnyCodableValue] = ["uri": .string(root.uri)]
+                    if let name = root.name {
+                        obj["name"] = .string(name)
+                    }
+                    return .object(obj)
+                }
+                return .object(["roots": .array(rootValues)])
+
+            case "sampling/createMessage":
+                guard let samplingHandler, let params else { return nil }
+                do {
+                    let paramsData = try JSONEncoder().encode(params)
+                    let request = try JSONDecoder().decode(MCPSamplingRequest.self, from: paramsData)
+                    let result = try await samplingHandler(request)
+                    let resultData = try JSONEncoder().encode(result)
+                    return try JSONDecoder().decode(AnyCodableValue.self, from: resultData)
+                } catch {
+                    return nil
+                }
+
+            default:
+                return nil
+            }
+        }
+    }
 
     /// Generic paginated list request.
     private func paginatedList<T: Decodable>(method: String, key: String) async throws -> [T] {
@@ -458,7 +634,9 @@ public actor MCPClientConnection: MCPClientProtocol {
 
         let response: JSONRPCResponse
         if let dispatcher {
-            response = try await dispatcher.waitForResponse(id: requestID)
+            response = try await withThrowingTimeout(duration: requestTimeout) {
+                try await dispatcher.waitForResponse(id: requestID)
+            }
         } else {
             // Fallback for pre-initialization calls (shouldn't happen in normal use)
             let responseData = try await transport.receive()
@@ -470,7 +648,7 @@ public actor MCPClientConnection: MCPClientProtocol {
         }
 
         if let rpcError = response.error {
-            throw MCPError.requestFailed(code: rpcError.code, message: rpcError.message)
+            throw MCPError.requestFailed(code: rpcError.code, message: rpcError.message, data: rpcError.data)
         }
 
         guard let result = response.result else {
@@ -478,6 +656,27 @@ public actor MCPClientConnection: MCPClientProtocol {
         }
 
         return result
+    }
+
+    /// Races an async operation against a timeout.
+    private func withThrowingTimeout<T: Sendable>(
+        duration: Duration,
+        operation: @Sendable @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(for: duration)
+                throw MCPError.timeout
+            }
+            guard let result = try await group.next() else {
+                throw MCPError.timeout
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Sends a JSON-RPC request using direct transport.receive() (for initialization).
@@ -499,7 +698,7 @@ public actor MCPClientConnection: MCPClientProtocol {
         }
 
         if let rpcError = response.error {
-            throw MCPError.requestFailed(code: rpcError.code, message: rpcError.message)
+            throw MCPError.requestFailed(code: rpcError.code, message: rpcError.message, data: rpcError.data)
         }
 
         guard let result = response.result else {
