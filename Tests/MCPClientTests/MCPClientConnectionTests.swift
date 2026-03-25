@@ -1457,17 +1457,18 @@ struct MCPClientConnectionTests {
             )
         }
 
-        // Give the dispatcher time to process the incoming request
-        try await Task.sleep(for: .milliseconds(100))
-
-        // Verify a response was sent back
-        let sent = await transport.sentMessages()
-        // Find the response to request id 99
-        let responseSent = sent.compactMap { data -> [String: AnyCodableValue]? in
-            try? JSONDecoder().decode([String: AnyCodableValue].self, from: data)
-        }.first { obj in
-            if case .integer(99) = obj["id"] { return true }
-            return false
+        // Poll for the response — Linux CI can be slower than 100ms
+        var responseSent: [String: AnyCodableValue]?
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(50))
+            let sent = await transport.sentMessages()
+            responseSent = sent.compactMap { data -> [String: AnyCodableValue]? in
+                try? JSONDecoder().decode([String: AnyCodableValue].self, from: data)
+            }.first { obj in
+                if case .integer(99) = obj["id"] { return true }
+                return false
+            }
+            if responseSent != nil { break }
         }
         #expect(responseSent != nil)
     }
