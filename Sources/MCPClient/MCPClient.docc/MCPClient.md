@@ -6,9 +6,10 @@ A lightweight, reusable Swift client for the Model Context Protocol (MCP).
 
 MCPClient provides a type-safe interface for communicating with MCP servers
 using the JSON-RPC 2.0 protocol. It supports tool discovery and invocation,
-resource reading, prompt expansion, autocompletion, logging, and bidirectional
-communication over pluggable transports — ``HTTPSSETransport`` for remote
-servers and ``StdioTransport`` for local development.
+resource reading, prompt expansion, autocompletion, logging, sampling, and
+bidirectional communication over pluggable transports — ``HTTPSSETransport``
+for remote servers, ``WebSocketTransport`` for WebSocket connections, and
+``StdioTransport`` for local development.
 
 The library has zero external dependencies (Foundation only), uses Swift 6
 strict concurrency throughout, and is designed for extraction into any
@@ -19,6 +20,7 @@ Swift project that needs MCP integration.
 ### Essentials
 
 - <doc:MCPClientGuide>
+- <doc:MigrationGuide>
 - ``MCPClientConnection``
 - ``MCPClientProtocol``
 - ``MCPTool``
@@ -51,11 +53,21 @@ Swift project that needs MCP integration.
 - ``MCPCompletionResult``
 - ``MCPRoot``
 
+### Sampling
+
+- ``MCPSamplingRequest``
+- ``MCPSamplingMessage``
+- ``MCPSamplingResult``
+- ``MCPModelPreferences``
+- ``MCPModelHint``
+- ``SamplingHandler``
+
 ### Transport
 
 - <doc:TransportGuide>
 - ``MCPTransport``
 - ``HTTPSSETransport``
+- ``WebSocketTransport``
 - ``StdioTransport``
 
 ### JSON-RPC Protocol
@@ -72,12 +84,17 @@ Swift project that needs MCP integration.
 - ``MCPRole``
 - ``MCPContent``
 - ``InitializeResult``
+- ``ClientCapabilities``
+- ``RootsCapability``
+- ``SamplingCapability``
 - ``ServerCapabilities``
 - ``ToolsCapability``
 - ``ResourcesCapability``
 - ``PromptsCapability``
+- ``LoggingCapability``
 - ``ServerInfo``
 
 ### Error Handling
 
+- <doc:ErrorHandlingGuide>
 - ``MCPError``

@@ -28,6 +28,7 @@ public actor HTTPSSETransport: MCPTransport {
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
     private let sessionConfiguration: URLSessionConfiguration
+    private let trustSelfSignedCertificates: Bool
 
     /// The endpoint URL extracted from the SSE `endpoint` event during connect.
     private var endpointURL: URL?
@@ -61,6 +62,8 @@ public actor HTTPSSETransport: MCPTransport {
     ///   - connectionTimeout: Maximum time to wait for the initial endpoint event. Default 30s.
     ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop. Default 3.
     ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds. Default 1.0.
+    ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
+    ///     **Use only for development/testing** — this disables certificate validation.
     ///   - urlSessionConfiguration: URL session configuration. Defaults to `.default`.
     ///     Override for testing with mock URL protocols.
     public init(
@@ -69,6 +72,7 @@ public actor HTTPSSETransport: MCPTransport {
         connectionTimeout: TimeInterval = 30.0,
         maxReconnectAttempts: Int = 3,
         reconnectBaseDelay: TimeInterval = 1.0,
+        trustSelfSignedCertificates: Bool = false,
         urlSessionConfiguration: URLSessionConfiguration = .default
     ) {
         self.url = url
@@ -76,6 +80,7 @@ public actor HTTPSSETransport: MCPTransport {
         self.connectionTimeout = connectionTimeout
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
+        self.trustSelfSignedCertificates = trustSelfSignedCertificates
         self.sessionConfiguration = urlSessionConfiguration
     }
 
@@ -146,7 +151,8 @@ public actor HTTPSSETransport: MCPTransport {
         guard (200...299).contains(httpResponse.statusCode) else {
             throw MCPError.requestFailed(
                 code: httpResponse.statusCode,
-                message: "HTTP \(httpResponse.statusCode) from POST to \(endpointURL.absoluteString)"
+                message: "HTTP \(httpResponse.statusCode) from POST to \(endpointURL.absoluteString)",
+                data: nil
             )
         }
 
@@ -200,16 +206,23 @@ public actor HTTPSSETransport: MCPTransport {
     }
 
     private func performStreamingConnect() async throws {
-        let delegate = SSEStreamDelegate()
+        let delegate = SSEStreamDelegate(trustSelfSignedCertificates: trustSelfSignedCertificates)
         self.sseDelegate = delegate
 
         let sseURLSession = URLSession(configuration: sessionConfiguration, delegate: delegate, delegateQueue: nil)
         self.sseSession = sseURLSession
 
-        // POST requests use a separate session WITHOUT a delegate.
+        // POST requests use a separate session WITHOUT the SSE data delegate.
         // If both share the same delegate-based session, POST responses
         // get swallowed by the delegate and the call hangs.
-        self.postSession = URLSession(configuration: sessionConfiguration)
+        // When trusting self-signed certs, the POST session also needs a delegate
+        // to handle TLS challenges.
+        if trustSelfSignedCertificates {
+            let postDelegate = TLSBypassDelegate()
+            self.postSession = URLSession(configuration: sessionConfiguration, delegate: postDelegate, delegateQueue: nil)
+        } else {
+            self.postSession = URLSession(configuration: sessionConfiguration)
+        }
 
         var request = URLRequest(url: url)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -364,10 +377,16 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
     var onError: ((any Error) -> Void)?
     var onStreamEnd: (() -> Void)?
 
+    private let trustSelfSignedCertificates: Bool
     private var parser = SSEParser()
     private var endpointReceived = false
     private var timedOut = false
     private let lock = NSLock()
+
+    init(trustSelfSignedCertificates: Bool = false) {
+        self.trustSelfSignedCertificates = trustSelfSignedCertificates
+        super.init()
+    }
 
     func cancel() {
         task?.cancel()
@@ -377,12 +396,14 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
     func timeoutIfNeeded(continuation: CheckedContinuation<String, any Error>) {
         lock.lock()
         let shouldTimeout = !endpointReceived && !timedOut
-        if shouldTimeout { timedOut = true }
+        if shouldTimeout {
+            timedOut = true
+            onEndpoint = nil
+            onError = nil
+        }
         lock.unlock()
 
         if shouldTimeout {
-            onEndpoint = nil
-            onError = nil
             continuation.resume(throwing: MCPError.connectionFailed(reason: "Timed out waiting for endpoint event"))
         }
     }
@@ -394,6 +415,8 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
             lock.lock()
             let handler = onError
             timedOut = true // prevent timeout from also firing
+            onError = nil
+            onEndpoint = nil
             lock.unlock()
             handler?(error)
             completionHandler(.cancel)
@@ -413,6 +436,8 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
                 let alreadyReceived = endpointReceived
                 endpointReceived = true
                 let handler = onEndpoint
+                onEndpoint = nil
+                onError = nil
                 lock.unlock()
 
                 if !alreadyReceived {
@@ -429,14 +454,45 @@ private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchec
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         lock.lock()
         let hadEndpoint = endpointReceived
+        let alreadyHandled = timedOut
+        if !hadEndpoint {
+            timedOut = true  // Prevent timeout from also resuming the continuation
+        }
+        let errorHandler = onError
+        onError = nil
+        onEndpoint = nil
         lock.unlock()
 
-        if !hadEndpoint {
+        if !hadEndpoint && !alreadyHandled {
             let mcpError = error.map { MCPError.connectionFailed(reason: $0.localizedDescription) }
                 ?? MCPError.connectionFailed(reason: "SSE stream ended before endpoint event")
-            onError?(mcpError)
-        } else {
+            errorHandler?(mcpError)
+        } else if hadEndpoint {
             onStreamEnd?()
+        }
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if trustSelfSignedCertificates,
+           challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let serverTrust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
+// MARK: - TLS Bypass Delegate
+
+/// Minimal delegate that accepts self-signed certificates for POST sessions.
+private final class TLSBypassDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let serverTrust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
         }
     }
 }

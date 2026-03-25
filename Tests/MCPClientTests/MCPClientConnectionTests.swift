@@ -43,6 +43,123 @@ struct MCPClientConnectionTests {
         #expect(request.id == 1)
     }
 
+    @Test("initialize sends client capabilities in request")
+    func initializeSendsCapabilities() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let caps = ClientCapabilities(roots: RootsCapability(listChanged: true))
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(
+            clientName: "test",
+            clientVersion: "0.1",
+            capabilities: caps
+        )
+
+        let sent = await transport.sentMessages()
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[0])
+        // Verify capabilities are in the params
+        guard case .object(let params) = request.params,
+              case .object(let capObj) = params["capabilities"],
+              case .object(let rootsObj) = capObj["roots"],
+              case .bool(let listChanged) = rootsObj["listChanged"] else {
+            Issue.record("Expected roots capability in request params")
+            return
+        }
+        #expect(listChanged == true)
+    }
+
+    @Test("callTool includes progressToken in _meta when provided")
+    func callToolWithProgressToken() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [{"type": "text", "text": "done"}]
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        _ = try await client.callTool(
+            name: "slow_tool",
+            arguments: [:],
+            progressToken: .string("token-123")
+        )
+
+        let sent = await transport.sentMessages()
+        // sent[0] = initialize, sent[1] = notifications/initialized, sent[2] = tools/call
+        let callRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2])
+        guard case .object(let params) = callRequest.params,
+              case .object(let meta) = params["_meta"],
+              case .string(let token) = meta["progressToken"] else {
+            Issue.record("Expected _meta.progressToken in request params")
+            return
+        }
+        #expect(token == "token-123")
+    }
+
+    @Test("callTool omits _meta when no progressToken")
+    func callToolWithoutProgressToken() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [{"type": "text", "text": "done"}]
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        _ = try await client.callTool(name: "fast_tool")
+
+        let sent = await transport.sentMessages()
+        let callRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: sent[2])
+        guard case .object(let params) = callRequest.params else {
+            Issue.record("Expected object params")
+            return
+        }
+        #expect(params["_meta"] == nil)
+    }
+
     @Test("initialize connects transport before sending")
     func initializeConnects() async throws {
         let transport = MockTransport()
@@ -224,8 +341,11 @@ struct MCPClientConnectionTests {
         )
 
         #expect(result.content.count == 1)
-        #expect(result.content[0].type == "text")
-        #expect(result.content[0].text?.contains("74.8") == true)
+        if case .text(let str, _) = result.content[0] {
+            #expect(str.contains("74.8"))
+        } else {
+            Issue.record("Expected text content")
+        }
         #expect(result.isError == nil)
     }
 
@@ -331,7 +451,11 @@ struct MCPClientConnectionTests {
         let result = try await client.callTool(name: "failing_tool")
 
         #expect(result.isError == true)
-        #expect(result.content[0].text == "Tool failed: invalid input")
+        if case .text(let str, _) = result.content[0] {
+            #expect(str == "Tool failed: invalid input")
+        } else {
+            Issue.record("Expected text content")
+        }
     }
 
     // MARK: - notifications/initialized
@@ -539,6 +663,49 @@ struct MCPClientConnectionTests {
         #expect(id1 == 1)
         #expect(id2 == 2)
         #expect(id3 == 3)
+    }
+
+    // MARK: - Protocol Version Validation
+
+    @Test("initialize accepts server with different protocol version")
+    func initializeAcceptsDifferentVersion() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        let result = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        #expect(result.protocolVersion == "2025-03-26")
+        #expect(result.serverInfo.name == "test")
+    }
+
+    @Test("initialize succeeds when protocol version matches")
+    func initializeSucceedsOnVersionMatch() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        let result = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        #expect(result.protocolVersion == "2024-11-05")
     }
 
     // MARK: - Error Handling
@@ -1150,6 +1317,89 @@ struct MCPClientConnectionTests {
         }
     }
 
+    // MARK: - Disconnect
+
+    @Test("disconnect stops dispatcher and disconnects transport")
+    func disconnectCleansUp() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        #expect(await transport.state.isConnected())
+
+        try await client.disconnect()
+        #expect(await !transport.state.isConnected())
+    }
+
+    @Test("disconnect can be called before initialize without error")
+    func disconnectBeforeInitialize() async throws {
+        let transport = MockTransport()
+        let client = MCPClientConnection(transport: transport)
+        try await client.disconnect()
+        // Should not throw
+    }
+
+    // MARK: - Request Timeouts
+
+    @Test("Request times out when server does not respond")
+    func requestTimeout() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+        // No response enqueued for the ping — it will hang
+
+        let client = MCPClientConnection(transport: transport, requestTimeout: .milliseconds(50))
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+
+        await #expect(throws: MCPError.self) {
+            _ = try await client.ping()
+        }
+    }
+
+    @Test("Methods throw after disconnect")
+    func methodsThrowAfterDisconnect() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+        try await client.disconnect()
+
+        await #expect(throws: Error.self) {
+            _ = try await client.ping()
+        }
+    }
+
     // MARK: - Roots
 
     @Test("notifyRootsChanged sends correct notification")
@@ -1162,6 +1412,64 @@ struct MCPClientConnectionTests {
         let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
         #expect(json["method"] == .string("notifications/roots/list_changed"))
         #expect(json["id"] == nil)
+    }
+
+    // MARK: - Sampling
+
+    @Test("setSamplingHandler routes sampling/createMessage to handler")
+    func samplingHandler() async throws {
+        let transport = MockTransport()
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "0.1"}
+            }
+        }
+        """)
+        // Enqueue a sampling/createMessage incoming request
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "sampling/createMessage",
+            "params": {
+                "messages": [{"role": "user", "content": {"type": "text", "text": "What is 2+2?"}}],
+                "maxTokens": 50
+            }
+        }
+        """)
+
+        let client = MCPClientConnection(transport: transport)
+        _ = try await client.initialize(clientName: "test", clientVersion: "0.1")
+
+        await client.setSamplingHandler { request in
+            #expect(request.maxTokens == 50)
+            #expect(request.messages.count == 1)
+            return MCPSamplingResult(
+                role: .assistant,
+                content: .text("4"),
+                model: "test-model",
+                stopReason: "endTurn"
+            )
+        }
+
+        // Give the dispatcher time to process the incoming request
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Verify a response was sent back
+        let sent = await transport.sentMessages()
+        // Find the response to request id 99
+        let responseSent = sent.compactMap { data -> [String: AnyCodableValue]? in
+            try? JSONDecoder().decode([String: AnyCodableValue].self, from: data)
+        }.first { obj in
+            if case .integer(99) = obj["id"] { return true }
+            return false
+        }
+        #expect(responseSent != nil)
     }
 
     // MARK: - Notifications Stream

@@ -15,12 +15,26 @@ struct MCPErrorTests {
         }
     }
 
-    @Test("requestFailed stores code and message")
-    func requestFailedCodeMessage() {
-        let error = MCPError.requestFailed(code: -32601, message: "Method not found")
-        if case .requestFailed(let code, let message) = error {
+    @Test("requestFailed stores code, message, and data")
+    func requestFailedCodeMessageData() {
+        let data = AnyCodableValue.object(["detail": .string("extra info")])
+        let error = MCPError.requestFailed(code: -32601, message: "Method not found", data: data)
+        if case .requestFailed(let code, let message, let errorData) = error {
             #expect(code == -32601)
             #expect(message == "Method not found")
+            #expect(errorData == data)
+        } else {
+            Issue.record("Expected requestFailed")
+        }
+    }
+
+    @Test("requestFailed with nil data")
+    func requestFailedNilData() {
+        let error = MCPError.requestFailed(code: -32600, message: "Invalid request", data: nil)
+        if case .requestFailed(let code, let message, let data) = error {
+            #expect(code == -32600)
+            #expect(message == "Invalid request")
+            #expect(data == nil)
         } else {
             Issue.record("Expected requestFailed")
         }
@@ -42,7 +56,7 @@ struct MCPErrorTests {
     func errorsNotEqual() {
         #expect(MCPError.timeout != MCPError.invalidResponse)
         #expect(MCPError.connectionFailed(reason: "a") != MCPError.connectionFailed(reason: "b"))
-        #expect(MCPError.requestFailed(code: 1, message: "a") != MCPError.requestFailed(code: 2, message: "a"))
+        #expect(MCPError.requestFailed(code: 1, message: "a", data: nil) != MCPError.requestFailed(code: 2, message: "a", data: nil))
     }
 
     @Test("Same errors are equal")
@@ -50,7 +64,7 @@ struct MCPErrorTests {
         #expect(MCPError.timeout == MCPError.timeout)
         #expect(MCPError.invalidResponse == MCPError.invalidResponse)
         #expect(MCPError.connectionFailed(reason: "x") == MCPError.connectionFailed(reason: "x"))
-        #expect(MCPError.requestFailed(code: -1, message: "y") == MCPError.requestFailed(code: -1, message: "y"))
+        #expect(MCPError.requestFailed(code: -1, message: "y", data: nil) == MCPError.requestFailed(code: -1, message: "y", data: nil))
     }
 
     @Test("MCPError conforms to Error protocol")

@@ -96,67 +96,13 @@ public struct MCPPromptMessage: Codable, Sendable, Equatable {
 /// - ``text(_:annotations:)`` — Plain text content
 /// - ``image(data:mimeType:annotations:)`` — Base64-encoded image
 /// - ``resource(_:annotations:)`` — Embedded resource contents
-public enum MCPPromptContent: Sendable, Equatable {
-    /// Text content.
-    case text(String, annotations: MCPAnnotations? = nil)
-
-    /// Base64-encoded image with MIME type.
-    case image(data: String, mimeType: String, annotations: MCPAnnotations? = nil)
-
-    /// Embedded resource contents.
-    case resource(MCPResourceContents, annotations: MCPAnnotations? = nil)
-}
-
-extension MCPPromptContent: Codable {
-    private enum CodingKeys: String, CodingKey {
-        case type, text, data, mimeType, resource, annotations
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(String.self, forKey: .type)
-        let annotations = try container.decodeIfPresent(MCPAnnotations.self, forKey: .annotations)
-
-        switch type {
-        case "text":
-            let text = try container.decode(String.self, forKey: .text)
-            self = .text(text, annotations: annotations)
-        case "image":
-            let data = try container.decode(String.self, forKey: .data)
-            let mimeType = try container.decode(String.self, forKey: .mimeType)
-            self = .image(data: data, mimeType: mimeType, annotations: annotations)
-        case "resource":
-            let resource = try container.decode(MCPResourceContents.self, forKey: .resource)
-            self = .resource(resource, annotations: annotations)
-        default:
-            throw DecodingError.dataCorrupted(
-                DecodingError.Context(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Unknown MCPPromptContent type: \(type)"
-                )
-            )
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .text(let text, let annotations):
-            try container.encode("text", forKey: .type)
-            try container.encode(text, forKey: .text)
-            try container.encodeIfPresent(annotations, forKey: .annotations)
-        case .image(let data, let mimeType, let annotations):
-            try container.encode("image", forKey: .type)
-            try container.encode(data, forKey: .data)
-            try container.encode(mimeType, forKey: .mimeType)
-            try container.encodeIfPresent(annotations, forKey: .annotations)
-        case .resource(let resource, let annotations):
-            try container.encode("resource", forKey: .type)
-            try container.encode(resource, forKey: .resource)
-            try container.encodeIfPresent(annotations, forKey: .annotations)
-        }
-    }
-}
+/// Backward-compatible alias for ``MCPContent``.
+///
+/// In MCP specification 2024-11-05, prompt message content and tool result
+/// content share the same `TextContent | ImageContent | EmbeddedResource`
+/// union type. `MCPPromptContent` is retained as a typealias so existing
+/// code that references it continues to compile.
+public typealias MCPPromptContent = MCPContent
 
 /// The result of a `prompts/get` request.
 ///
