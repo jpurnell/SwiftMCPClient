@@ -8,46 +8,46 @@
 ## Delivery Order
 
 ### 1. JSONRPCNotification type
-- [ ] RED: Tests for encoding, no `id` field, `params` optional
-- [ ] GREEN: Implement JSONRPCNotification
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for encoding, no `id` field, `params` optional
+- [x] GREEN: Implement JSONRPCNotification
+- [x] REFACTOR: Clean up
 
 ### 2. MCPError new cases
-- [ ] RED: Tests for `.processSpawnFailed`, `.transportClosed`
-- [ ] GREEN: Add cases to MCPError enum
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for `.processSpawnFailed`, `.transportClosed`
+- [x] GREEN: Add cases to MCPError enum
+- [x] REFACTOR: Clean up
 
 ### 3. notifications/initialized
-- [ ] RED: Test that initialize() sends notification after handshake
-- [ ] GREEN: Add notification send to MCPClientConnection.initialize()
-- [ ] REFACTOR: Clean up
+- [x] RED: Test that initialize() sends notification after handshake
+- [x] GREEN: Add notification send to MCPClientConnection.initialize()
+- [x] REFACTOR: Clean up
 
 ### 4. ping()
-- [ ] RED: Tests for ping success, ping error
-- [ ] GREEN: Implement ping() on MCPClientConnection + MCPClientProtocol
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for ping success, ping error
+- [x] GREEN: Implement ping() on MCPClientConnection + MCPClientProtocol
+- [x] REFACTOR: Clean up
 
 ### 5. Configurable protocolVersion
-- [ ] RED: Tests for default version, custom version
-- [ ] GREEN: Add parameter to initialize()
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for default version, custom version
+- [x] GREEN: Add parameter to initialize()
+- [x] REFACTOR: Clean up
 
 ### 6. Pagination for tools/list
-- [ ] RED: Tests for single page, multi-page, empty
-- [ ] GREEN: Add cursor loop to listTools()
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for single page, multi-page, empty
+- [x] GREEN: Add cursor loop to listTools()
+- [x] REFACTOR: Clean up
 
 ### 7. StdioTransport
-- [ ] RED: Tests for connect/send/receive/disconnect, spawn failure, process exit
-- [ ] GREEN: Implement StdioTransport actor
-- [ ] REFACTOR: Clean up
+- [x] RED: Tests for connect/send/receive/disconnect, spawn failure, process exit
+- [x] GREEN: Implement StdioTransport actor
+- [x] REFACTOR: Clean up
 
 ### 8. Documentation
-- [ ] TransportGuide.md DocC article
-- [ ] Update MCPClient.md overview
-- [ ] DocC comments on all new public API
+- [x] TransportGuide.md DocC article
+- [x] Update MCPClient.md overview
+- [x] DocC comments on all new public API
 
 ### 9. Release
-- [ ] All tests passing, zero warnings
+- [x] All tests passing, zero warnings (132 tests)
 - [ ] Tag v0.2.0
 - [ ] Push to GitHub
