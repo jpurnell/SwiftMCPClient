@@ -9,7 +9,7 @@ import Logging
 /// Connects to a remote MCP server via HTTP POST (requests) and Server-Sent Events (responses).
 ///
 /// This is the primary transport for production use, connecting to a hosted MCP server
-/// (e.g., GeoSEO MCP on roseclub.org).
+/// (e.g., a GeoSEO MCP server at `https://mcp.example.com`).
 ///
 /// ## MCP SSE Protocol
 ///
@@ -59,7 +59,7 @@ public actor HTTPSSETransport: MCPTransport {
     /// Creates a new HTTP/SSE transport.
     ///
     /// - Parameters:
-    ///   - url: The SSE endpoint URL (e.g., `https://mcp.roseclub.org/sse`).
+    ///   - url: The SSE endpoint URL (e.g., `https://mcp.example.com/sse`).
     ///   - headers: Custom HTTP headers sent with all requests (e.g., authentication).
     ///   - connectionTimeout: Maximum time to wait for the initial endpoint event. Default 30s.
     ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop. Default 3.
@@ -208,17 +208,18 @@ public actor HTTPSSETransport: MCPTransport {
             )
         }
 
-        // Read the streaming SSE response, looking for the endpoint event.
-        // We parse chunks as they arrive — no need to buffer the entire response.
+        // Create a single iterator — NIO async sequences only allow one.
+        // We read until we find the endpoint event, then hand the iterator
+        // off to a background task for ongoing SSE messages.
+        var iterator = response.body.makeAsyncIterator()
         var parser = SSEParser()
-        var foundEndpoint = false
 
-        for try await buffer in response.body {
+        while let buffer = try await iterator.next() {
             guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
             let events = parser.append(text)
 
             for event in events {
-                if event.event == "endpoint" && !foundEndpoint {
+                if event.event == "endpoint" {
                     guard let resolvedEndpoint = URL(
                         string: event.data, relativeTo: url
                     )?.absoluteURL else {
@@ -229,19 +230,25 @@ public actor HTTPSSETransport: MCPTransport {
 
                     self.endpointURL = resolvedEndpoint
                     self.isConnected = true
-                    foundEndpoint = true
 
-                } else if foundEndpoint && (event.event == "message" || event.event == nil) {
+                    // Queue any messages that arrived in the same chunk
+                    for laterEvent in events where laterEvent.event == "message" || laterEvent.event == nil {
+                        if laterEvent.data != event.data,
+                           let data = laterEvent.data.data(using: .utf8) {
+                            messageQueue.append(data)
+                        }
+                    }
+
+                    // Hand off the iterator to a background task
+                    startBackgroundStream(iterator: iterator, parser: parser)
+                    return
+
+                } else if event.event == "message" || event.event == nil {
+                    // Messages before endpoint — queue them
                     if let data = event.data.data(using: .utf8) {
                         messageQueue.append(data)
                     }
                 }
-            }
-
-            // Once we have the endpoint, start background streaming for ongoing messages
-            if foundEndpoint {
-                startBackgroundStream(response: response, parser: parser)
-                return
             }
         }
 
@@ -249,12 +256,16 @@ public actor HTTPSSETransport: MCPTransport {
         throw MCPError.connectionFailed(reason: "No endpoint event received from SSE stream")
     }
 
-    /// Start a background task to continue reading SSE messages after connect.
-    private func startBackgroundStream(response: HTTPClientResponse, parser: SSEParser) {
-        var parser = parser
+    /// Continue reading SSE messages in the background using the same iterator.
+    private func startBackgroundStream(
+        iterator: sending HTTPClientResponse.Body.AsyncIterator,
+        parser: sending SSEParser
+    ) {
+        nonisolated(unsafe) var iterator = iterator
+        nonisolated(unsafe) var parser = parser
         streamTask = Task { [weak self] in
             do {
-                for try await buffer in response.body {
+                while let buffer = try await iterator.next() {
                     guard let self = self else { return }
                     guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
                     let events = parser.append(text)
