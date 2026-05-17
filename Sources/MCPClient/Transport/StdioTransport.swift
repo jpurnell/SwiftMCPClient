@@ -60,6 +60,7 @@ public actor StdioTransport: MCPTransport {
     ///
     /// - Throws: ``MCPError/processSpawnFailed(reason:)`` if the process cannot be launched.
     public func connect() async throws {
+        // SECURITY: command path and arguments are caller-controlled configuration, not user input
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: command)
         proc.arguments = arguments
@@ -179,7 +180,7 @@ public actor StdioTransport: MCPTransport {
 
         // Read from stdout until we get a complete line
         let handle = pipe.fileHandleForReading
-        while true {
+        while !Task.isCancelled {
             let chunk = handle.availableData
 
             if chunk.isEmpty {
@@ -216,6 +217,9 @@ public actor StdioTransport: MCPTransport {
                 }
             }
         }
+
+        // Task was cancelled while reading
+        throw MCPError.transportClosed
     }
 }
 

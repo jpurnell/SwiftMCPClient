@@ -50,9 +50,9 @@ for message in result.messages {
 
 Prompt messages can contain three types of content:
 
-- **Text** — Plain text (``MCPPromptContent/text(_:annotations:)``)
-- **Image** — Base64-encoded image with MIME type (``MCPPromptContent/image(data:mimeType:annotations:)``)
-- **Resource** — An embedded ``MCPResourceContents`` (``MCPPromptContent/resource(_:annotations:)``)
+- **Text** — Plain text (``MCPContent/text(_:annotations:)``)
+- **Image** — Base64-encoded image with MIME type (``MCPContent/image(data:mimeType:annotations:)``)
+- **Resource** — An embedded ``MCPResourceContents`` (``MCPContent/resource(_:annotations:)``)
 
 Each content type can carry optional ``MCPAnnotations`` with audience and
 priority hints.

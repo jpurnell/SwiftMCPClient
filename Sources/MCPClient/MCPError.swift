@@ -8,7 +8,7 @@ import Foundation
 ///
 /// ## MCP Schema
 ///
-/// JSON-RPC 2.0 error codes map to ``requestFailed(code:message:)``:
+/// JSON-RPC 2.0 error codes map to ``requestFailed(code:message:data:)``:
 /// - `-32700`: Parse error
 /// - `-32600`: Invalid request
 /// - `-32601`: Method not found

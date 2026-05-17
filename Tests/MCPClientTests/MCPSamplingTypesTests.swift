@@ -38,10 +38,10 @@ struct MCPSamplingTypesTests {
         )
         #expect(request.systemPrompt == "Be helpful")
         #expect(request.includeContext == "thisServer")
-        #expect(request.temperature == 0.7)
+        #expect(abs((request.temperature ?? 0) - 0.7) < 1e-4)
         #expect(request.stopSequences == ["END"])
         #expect(request.modelPreferences?.hints?.first?.name == "claude")
-        #expect(request.modelPreferences?.intelligencePriority == 0.9)
+        #expect(abs((request.modelPreferences?.intelligencePriority ?? 0) - 0.9) < 1e-4)
     }
 
     @Test("SamplingRequest decodes from JSON")
@@ -117,7 +117,7 @@ struct MCPSamplingTypesTests {
         let prefs = try JSONDecoder().decode(MCPModelPreferences.self, from: data)
         #expect(prefs.hints?.count == 2)
         #expect(prefs.hints?[1].name == "claude")
-        #expect(prefs.costPriority == 0.2)
+        #expect(abs((prefs.costPriority ?? 0) - 0.2) < 1e-4)
     }
 
     // MARK: - MCPSamplingResult

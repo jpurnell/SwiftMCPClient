@@ -29,6 +29,7 @@ extension MCPLogLevel: Comparable {
         }
     }
 
+    /// Compares notification levels by severity.
     public static func < (lhs: MCPLogLevel, rhs: MCPLogLevel) -> Bool {
         lhs.severity < rhs.severity
     }

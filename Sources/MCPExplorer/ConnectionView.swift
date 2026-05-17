@@ -132,6 +132,7 @@ struct ConnectionView: View {
     private func capabilityRow(_ name: String, available: Bool, detail: String?) -> some View {
         HStack {
             Image(systemName: available ? "checkmark.circle.fill" : "minus.circle")
+                .accessibilityLabel(available ? "\(name) available" : "\(name) unavailable")
                 .foregroundStyle(available ? .green : .secondary)
             Text(name)
             Spacer()

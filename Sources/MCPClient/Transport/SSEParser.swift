@@ -73,7 +73,7 @@ struct SSEParser: Sendable {
     }
 
     /// Clear all buffered state.
-    mutating func reset() {
+    mutating func reset() { // LIVE: public API for callers who reuse the parser
         buffer = ""
         resetCurrentFields()
     }

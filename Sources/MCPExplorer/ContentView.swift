@@ -68,6 +68,7 @@ struct ContentView: View {
         switch viewModel.connectionState {
         case .disconnected:
             Image(systemName: "circle")
+                .accessibilityLabel("Disconnected")
                 .foregroundStyle(.secondary)
         case .connecting:
             ProgressView()
@@ -75,6 +76,7 @@ struct ContentView: View {
         case .connected(let server, _):
             HStack(spacing: 4) {
                 Image(systemName: "circle.fill")
+                    .accessibilityLabel("Connected to \(server)")
                     .foregroundStyle(.green)
                     .font(.caption2)
                 Text(server)
@@ -82,6 +84,7 @@ struct ContentView: View {
             }
         case .error:
             Image(systemName: "exclamationmark.circle.fill")
+                .accessibilityLabel("Connection error")
                 .foregroundStyle(.red)
         }
     }

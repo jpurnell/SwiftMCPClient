@@ -58,21 +58,27 @@ struct NotificationsView: View {
         switch notification {
         case .progress:
             Image(systemName: "chart.bar.fill")
+                .accessibilityLabel("Progress notification")
                 .foregroundStyle(.blue)
         case .logMessage(let msg):
             Image(systemName: logIcon(msg.level))
+                .accessibilityLabel("Log message: \(msg.level.rawValue)")
                 .foregroundStyle(logColor(msg.level))
         case .toolsListChanged:
             Image(systemName: "wrench")
+                .accessibilityLabel("Tools list changed")
                 .foregroundStyle(.orange)
         case .resourcesListChanged:
             Image(systemName: "doc")
+                .accessibilityLabel("Resources list changed")
                 .foregroundStyle(.purple)
         case .resourceUpdated:
             Image(systemName: "arrow.triangle.2.circlepath")
+                .accessibilityLabel("Resource updated")
                 .foregroundStyle(.purple)
         case .promptsListChanged:
             Image(systemName: "text.bubble")
+                .accessibilityLabel("Prompts list changed")
                 .foregroundStyle(.teal)
         }
     }

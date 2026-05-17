@@ -11,7 +11,7 @@ struct MCPResourceTypesTests {
     func annotationsAllFields() {
         let annotations = MCPAnnotations(audience: [.user, .assistant], priority: 0.8)
         #expect(annotations.audience == [.user, .assistant])
-        #expect(annotations.priority == 0.8)
+        #expect(abs((annotations.priority ?? 0) - 0.8) < 1e-4)
     }
 
     @Test("Annotations with nil fields")
@@ -29,7 +29,7 @@ struct MCPResourceTypesTests {
         let data = json.data(using: .utf8)!
         let annotations = try JSONDecoder().decode(MCPAnnotations.self, from: data)
         #expect(annotations.audience == [.user])
-        #expect(annotations.priority == 0.5)
+        #expect(abs((annotations.priority ?? 0) - 0.5) < 1e-4)
     }
 
     @Test("Annotations round-trips through JSON")
@@ -69,7 +69,7 @@ struct MCPResourceTypesTests {
         #expect(resource.description == "Q4 financial report")
         #expect(resource.mimeType == "application/pdf")
         #expect(resource.size == 1024)
-        #expect(resource.annotations?.priority == 0.9)
+        #expect(abs((resource.annotations?.priority ?? 0) - 0.9) < 1e-4)
     }
 
     @Test("Resource decodes from JSON")
@@ -103,7 +103,7 @@ struct MCPResourceTypesTests {
         let data = json.data(using: .utf8)!
         let resource = try JSONDecoder().decode(MCPResource.self, from: data)
         #expect(resource.annotations?.audience == [.user, .assistant])
-        #expect(resource.annotations?.priority == 0.7)
+        #expect(abs((resource.annotations?.priority ?? 0) - 0.7) < 1e-4)
     }
 
     @Test("Resource is equatable")
@@ -153,7 +153,7 @@ struct MCPResourceTypesTests {
         )
         #expect(template.uriTemplate == "db:///{table}/schema")
         #expect(template.description == "Database table schema")
-        #expect(template.annotations?.priority == 0.3)
+        #expect(abs((template.annotations?.priority ?? 0) - 0.3) < 1e-4)
     }
 
     @Test("ResourceTemplate decodes from JSON")

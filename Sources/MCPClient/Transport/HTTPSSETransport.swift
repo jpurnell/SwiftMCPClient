@@ -22,8 +22,8 @@ import Logging
 /// ## Reconnection
 ///
 /// If the SSE stream drops during ``connect()``, the transport automatically
-/// retries up to ``maxReconnectAttempts`` times with exponential backoff
-/// starting from ``reconnectBaseDelay``.
+/// retries up to `maxReconnectAttempts` times with exponential backoff
+/// starting from `reconnectBaseDelay`.
 ///
 /// ## Cross-Platform
 ///
@@ -83,7 +83,9 @@ public actor HTTPSSETransport: MCPTransport {
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
 
+    /// Open the SSE connection to the MCP server, retrying with exponential backoff on failure.
     public func connect() async throws {
+        let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
 
         for attempt in 0...maxReconnectAttempts {
@@ -97,9 +99,12 @@ public actor HTTPSSETransport: MCPTransport {
                 return
             } catch {
                 lastError = error
+                // logging: swift-log Logger does not support privacy annotations
+                logger.warning("SSE connect attempt \(attempt) failed: \(error.localizedDescription)")
                 // Clean up the HTTP client on failure so it doesn't leak
                 if let client = httpClient {
                     httpClient = nil
+                    // silent: best-effort cleanup during retry loop
                     try? await client.shutdown()
                 }
             }
@@ -110,6 +115,7 @@ public actor HTTPSSETransport: MCPTransport {
         )
     }
 
+    /// Cancel the SSE stream and shut down the HTTP client.
     public func disconnect() async throws {
         streamTask?.cancel()
         streamTask = nil
@@ -124,10 +130,12 @@ public actor HTTPSSETransport: MCPTransport {
         // Shut down the HTTP client
         if let client = httpClient {
             httpClient = nil
+            // silent: best-effort shutdown during disconnect
             try? await client.shutdown()
         }
     }
 
+    /// Post a JSON-RPC message to the server's endpoint URL.
     public func send(_ data: Data) async throws {
         guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -165,6 +173,7 @@ public actor HTTPSSETransport: MCPTransport {
         }
     }
 
+    /// Return the next queued SSE message, or suspend until one arrives.
     public func receive() async throws -> Data {
         guard isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -220,6 +229,7 @@ public actor HTTPSSETransport: MCPTransport {
 
             for event in events {
                 if event.event == "endpoint" {
+                    // SECURITY: URL is resolved from the server-provided endpoint path, caller controls the base URL
                     guard let resolvedEndpoint = URL(
                         string: event.data, relativeTo: url
                     )?.absoluteURL else {
@@ -261,7 +271,9 @@ public actor HTTPSSETransport: MCPTransport {
         iterator: sending HTTPClientResponse.Body.AsyncIterator,
         parser: sending SSEParser
     ) {
+        // Justification: iterator and parser are transferred via `sending` and used only inside this Task
         nonisolated(unsafe) var iterator = iterator
+        // Justification: parser is transferred via `sending` and used only inside this Task
         nonisolated(unsafe) var parser = parser
         streamTask = Task { [weak self] in
             do {
@@ -279,7 +291,9 @@ public actor HTTPSSETransport: MCPTransport {
                     }
                 }
             } catch {
-                // Stream ended or errored
+                let logger = Logger(label: "MCPClient.HTTPSSETransport")
+                // logging: swift-log Logger does not support privacy annotations
+                logger.warning("SSE stream ended with error: \(error.localizedDescription)")
             }
 
             // Stream has ended

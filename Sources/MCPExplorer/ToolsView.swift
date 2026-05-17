@@ -154,6 +154,7 @@ struct ToolsView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(maxHeight: 300)
+                        .accessibilityLabel("Tool result image of type \(mimeType)")
                 } else {
                     Text("(base64, \(data.count) chars)")
                         .font(.caption.monospaced())
@@ -211,7 +212,7 @@ struct ToolsView: View {
         for (key, _) in props {
             args[key] = .string("")
         }
-        guard let data = try? JSONEncoder().encode(args),
+        guard let data = try? JSONEncoder().encode(args), // silent: fallback to empty JSON on encode failure
               let json = String(data: data, encoding: .utf8) else {
             return "{}"
         }
@@ -221,7 +222,7 @@ struct ToolsView: View {
     private func prettyJSON(_ value: AnyCodableValue) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(value),
+        guard let data = try? encoder.encode(value), // silent: fallback to description on encode failure
               let string = String(data: data, encoding: .utf8) else {
             return "\(value)"
         }
@@ -230,8 +231,8 @@ struct ToolsView: View {
 
     private func prettyFormatJSON(_ raw: String) -> String {
         guard let data = raw.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data),
-              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let obj = try? JSONSerialization.jsonObject(with: data), // silent: fallback to raw string on parse failure
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]), // silent: fallback to raw string on format failure
               let result = String(data: pretty, encoding: .utf8) else {
             return raw
         }

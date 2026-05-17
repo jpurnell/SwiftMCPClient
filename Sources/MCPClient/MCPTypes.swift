@@ -118,6 +118,7 @@ extension MCPContent: Codable {
         case type, text, data, mimeType, resource, annotations
     }
 
+    /// Decodes content from a JSON representation using the discriminator `type` field.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(String.self, forKey: .type)
@@ -144,6 +145,7 @@ extension MCPContent: Codable {
         }
     }
 
+    /// Encodes content to a JSON representation with a discriminator `type` field.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
