@@ -93,9 +93,9 @@ public struct MCPPromptMessage: Codable, Sendable, Equatable {
 ///
 /// ## Variants
 ///
-/// - ``text(_:annotations:)`` — Plain text content
-/// - ``image(data:mimeType:annotations:)`` — Base64-encoded image
-/// - ``resource(_:annotations:)`` — Embedded resource contents
+/// - ``MCPContent/text(_:annotations:)`` — Plain text content
+/// - ``MCPContent/image(data:mimeType:annotations:)`` — Base64-encoded image
+/// - ``MCPContent/resource(_:annotations:)`` — Embedded resource contents
 /// Backward-compatible alias for ``MCPContent``.
 ///
 /// In MCP specification 2024-11-05, prompt message content and tool result

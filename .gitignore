@@ -7,3 +7,9 @@ DerivedData/
 .env
 .netrc
 development-guidelines/
+
+*.backup-*
+
+# Claude Code local settings (personal preferences, not shared)
+.claude/settings.local.json
+CLAUDE.local.md

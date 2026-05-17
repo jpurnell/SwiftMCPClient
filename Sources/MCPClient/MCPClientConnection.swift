@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 /// An actor that manages communication with an MCP server.
 ///
@@ -69,7 +70,7 @@ public actor MCPClientConnection: MCPClientProtocol {
 
     /// Stream of server-to-client notifications.
     ///
-    /// This stream becomes active after ``initialize(clientName:clientVersion:)``
+    /// This stream becomes active after ``initialize(clientName:clientVersion:capabilities:protocolVersion:)``
     /// is called and the message dispatcher starts. It yields notifications for
     /// progress updates, log messages, and list changes from the server.
     public var notifications: AsyncStream<MCPNotification> {
@@ -82,7 +83,7 @@ public actor MCPClientConnection: MCPClientProtocol {
 
     /// Creates a new MCP client connection with the given transport.
     ///
-    /// The transport is not connected until ``initialize(clientName:clientVersion:)``
+    /// The transport is not connected until ``initialize(clientName:clientVersion:capabilities:protocolVersion:)``
     /// is called.
     ///
     /// - Parameters:
@@ -106,10 +107,11 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Parameters:
     ///   - clientName: The name of this client application.
     ///   - clientVersion: The version of this client application.
+    ///   - capabilities: The client capabilities to advertise. Defaults to an empty set.
     ///   - protocolVersion: The MCP protocol version to request. Defaults to `"2024-11-05"`.
     /// - Returns: The server's initialization result including capabilities.
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport cannot connect.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server rejects the handshake.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server rejects the handshake.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func initialize(
         clientName: String,
@@ -165,7 +167,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// returns a `nextCursor`. Returns an empty array if the server reports no tools.
     ///
     /// - Returns: An array of all tool definitions available on the server.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func listTools() async throws -> [MCPTool] {
         try await paginatedList(method: "tools/list", key: "tools")
@@ -195,7 +197,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///   - name: The name of the tool to call (must match a name from ``listTools()``).
     ///   - arguments: The arguments to pass to the tool. Defaults to empty.
     /// - Returns: The tool's result containing one or more content blocks.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func callTool(name: String, arguments: [String: AnyCodableValue] = [:]) async throws -> MCPToolResult {
         try await callTool(name: name, arguments: arguments, progressToken: nil)
@@ -336,7 +338,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// returns a `nextCursor`. Returns an empty array if no resources are available.
     ///
     /// - Returns: An array of all resource definitions.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func listResources() async throws -> [MCPResource] {
         try await paginatedList(method: "resources/list", key: "resources")
@@ -347,7 +349,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// Sends a `resources/templates/list` request and auto-paginates.
     ///
     /// - Returns: An array of all resource template definitions.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func listResourceTemplates() async throws -> [MCPResourceTemplate] {
         try await paginatedList(method: "resources/templates/list", key: "resourceTemplates")
     }
@@ -359,7 +361,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///
     /// - Parameter uri: The resource URI to read.
     /// - Returns: An array of resource contents (text or blob).
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the resource is not found.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the resource is not found.
     public func readResource(uri: String) async throws -> [MCPResourceContents] {
         let params = AnyCodableValue.object(["uri": .string(uri)])
         let response = try await sendRequest(method: "resources/read", params: params)
@@ -379,7 +381,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// may send `notifications/resources/updated` when the resource changes.
     ///
     /// - Parameter uri: The resource URI to subscribe to.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func subscribeResource(uri: String) async throws {
         let params = AnyCodableValue.object(["uri": .string(uri)])
         _ = try await sendRequest(method: "resources/subscribe", params: params)
@@ -388,7 +390,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// Unsubscribe from updates for a specific resource.
     ///
     /// - Parameter uri: The resource URI to unsubscribe from.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func unsubscribeResource(uri: String) async throws {
         let params = AnyCodableValue.object(["uri": .string(uri)])
         _ = try await sendRequest(method: "resources/unsubscribe", params: params)
@@ -402,7 +404,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// returns a `nextCursor`.
     ///
     /// - Returns: An array of all prompt definitions.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func listPrompts() async throws -> [MCPPrompt] {
         try await paginatedList(method: "prompts/list", key: "prompts")
     }
@@ -416,7 +418,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///   - name: The prompt name (must match a name from ``listPrompts()``).
     ///   - arguments: String-valued arguments to fill prompt template placeholders.
     /// - Returns: The prompt result containing messages.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func getPrompt(name: String, arguments: [String: String] = [:]) async throws -> MCPPromptResult {
         var paramsDict: [String: AnyCodableValue] = ["name": .string(name)]
         if !arguments.isEmpty {
@@ -439,7 +441,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// only send `notifications/message` at or above the specified severity.
     ///
     /// - Parameter level: The minimum log level to receive.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func setLogLevel(_ level: MCPLogLevel) async throws {
         let params = AnyCodableValue.object(["level": .string(level.rawValue)])
         _ = try await sendRequest(method: "logging/setLevel", params: params)
@@ -481,7 +483,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///   - argumentName: The name of the argument being completed.
     ///   - argumentValue: The current partial value to match against.
     /// - Returns: The completion result with suggested values.
-    /// - Throws: ``MCPError/requestFailed(code:message:)`` if the server returns an error.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     public func complete(
         ref: MCPCompletionRef,
         argumentName: String,
@@ -585,6 +587,9 @@ public actor MCPClientConnection: MCPClientProtocol {
                     let resultData = try JSONEncoder().encode(result)
                     return try JSONDecoder().decode(AnyCodableValue.self, from: resultData)
                 } catch {
+                    let logger = Logger(label: "MCPClient.MCPClientConnection")
+                    // logging: error details needed for diagnostics
+                    logger.warning("sampling/createMessage handler failed: \(error.localizedDescription)")
                     return nil
                 }
 

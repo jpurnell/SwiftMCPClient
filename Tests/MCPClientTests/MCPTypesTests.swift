@@ -43,7 +43,11 @@ struct MCPTypesTests {
         let tool = try JSONDecoder().decode(MCPTool.self, from: data)
         #expect(tool.name == "audit_meta_tags")
         #expect(tool.description == "Audit essential meta tags for SEO compliance.")
-        #expect(tool.inputSchema != nil)
+        if case .object(let schema) = tool.inputSchema {
+            #expect(schema["type"] == .string("object"))
+        } else {
+            Issue.record("Expected object inputSchema")
+        }
     }
 
     @Test("MCPTool is equatable")
@@ -156,7 +160,7 @@ struct MCPTypesTests {
         let content = MCPContent.text("hello", annotations: annotations)
         if case .text(let str, let ann) = content {
             #expect(str == "hello")
-            #expect(ann?.priority == 0.8)
+            #expect(abs((ann?.priority ?? 0) - 0.8) < 1e-4)
             #expect(ann?.audience == [.user])
         } else {
             Issue.record("Expected text case")
@@ -250,7 +254,7 @@ struct MCPTypesTests {
         if case .text(let str, let ann) = content {
             #expect(str == "hello")
             #expect(ann?.audience == [.user])
-            #expect(ann?.priority == 0.5)
+            #expect(abs((ann?.priority ?? 0) - 0.5) < 1e-4)
         } else {
             Issue.record("Expected text case")
         }
@@ -399,7 +403,7 @@ struct MCPTypesTests {
     @Test("ServerCapabilities with logging")
     func capabilitiesWithLogging() {
         let caps = ServerCapabilities(logging: LoggingCapability())
-        #expect(caps.logging != nil)
+        #expect(caps.logging == LoggingCapability())
     }
 
     @Test("ServerCapabilities decodes logging from JSON")
@@ -413,7 +417,7 @@ struct MCPTypesTests {
         let data = json.data(using: .utf8)!
         let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
         #expect(caps.tools?.listChanged == true)
-        #expect(caps.logging != nil)
+        #expect(caps.logging == LoggingCapability())
     }
 
     // MARK: - InitializeResult

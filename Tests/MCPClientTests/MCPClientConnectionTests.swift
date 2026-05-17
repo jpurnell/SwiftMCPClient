@@ -1347,7 +1347,8 @@ struct MCPClientConnectionTests {
         let transport = MockTransport()
         let client = MCPClientConnection(transport: transport)
         try await client.disconnect()
-        // Should not throw
+        // Verify transport is not connected after disconnect
+        #expect(await !transport.state.isConnected())
     }
 
     // MARK: - Request Timeouts
@@ -1470,7 +1471,13 @@ struct MCPClientConnectionTests {
             }
             if responseSent != nil { break }
         }
-        #expect(responseSent != nil)
+        let response = try #require(responseSent, "Sampling response should have been sent")
+        #expect(response["id"] == .integer(99))
+        if case .object(let result) = response["result"] {
+            #expect(result["model"] == .string("test-model"))
+        } else {
+            Issue.record("Expected result object in sampling response")
+        }
     }
 
     // MARK: - Notifications Stream
@@ -1478,8 +1485,8 @@ struct MCPClientConnectionTests {
     @Test("notifications property returns stream")
     func notificationsStream() async throws {
         let (client, _) = try await makeInitializedClient()
-        // Just verify we can access the stream without error
-        let stream = await client.notifications
-        _ = stream
+        // Verify we can access the notification stream
+        _ = await client.notifications
+        #expect(Bool(true), "Notification stream is accessible")
     }
 }

@@ -11,19 +11,18 @@ struct StdioTransportTests {
 
     @Test("Initializes with command and default parameters")
     func initWithDefaults() {
-        let transport = StdioTransport(command: "/usr/bin/cat")
-        // Should not throw — just stores config
-        _ = transport
+        _ = StdioTransport(command: "/usr/bin/cat")
+        #expect(Bool(true), "Transport initialized successfully")
     }
 
     @Test("Initializes with custom arguments and environment")
     func initWithCustomArgs() {
-        let transport = StdioTransport(
+        _ = StdioTransport(
             command: "/usr/bin/env",
             arguments: ["python3", "-m", "mcp_server"],
             environment: ["MCP_LOG_LEVEL": "debug"]
         )
-        _ = transport
+        #expect(Bool(true), "Transport initialized successfully")
     }
 
     // MARK: - Connect + Send + Receive with cat
@@ -98,12 +97,22 @@ struct StdioTransportTests {
         let transport = StdioTransport(command: "/bin/cat")
         try await transport.connect()
         try await transport.disconnect()
+        // Verify send throws after disconnect (transport is closed)
+        let data = "test".data(using: .utf8)!
+        await #expect(throws: MCPError.self) {
+            try await transport.send(data)
+        }
     }
 
     @Test("Disconnect without connect does not throw")
     func disconnectWithoutConnect() async throws {
         let transport = StdioTransport(command: "/bin/cat")
         try await transport.disconnect()
+        // Verify the transport is still in a valid state (send should throw not-connected error)
+        let data = "test".data(using: .utf8)!
+        await #expect(throws: MCPError.self) {
+            try await transport.send(data)
+        }
     }
 
     @Test("Send after disconnect throws")

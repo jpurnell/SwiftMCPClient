@@ -17,7 +17,7 @@ import NIOSSL
 /// 2. **Send:** POSTs JSON-RPC to `/mcp`. Captures `Mcp-Session-Id` from
 ///    the response headers. Enqueues the response body for ``receive()``.
 /// 3. **Receive:** Returns the next queued response, or suspends until one
-///    arrives from a ``send()`` call.
+///    arrives from a ``send(_:)`` call.
 /// 4. **Disconnect:** Sends `DELETE /mcp` with session ID to terminate the
 ///    session, then shuts down the HTTP client.
 ///
@@ -72,11 +72,13 @@ public actor StreamableHTTPTransport: MCPTransport {
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
 
+    /// Create the HTTP client for subsequent requests.
     public func connect() async throws {
         httpClient = makeHTTPClient()
         isConnected = true
     }
 
+    /// Send a DELETE request to terminate the session and shut down the HTTP client.
     public func disconnect() async throws {
         defer { isConnected = false }
 
@@ -88,6 +90,7 @@ public actor StreamableHTTPTransport: MCPTransport {
             for (key, value) in headers {
                 request.headers.replaceOrAdd(name: key, value: value)
             }
+            // silent: best-effort session termination during disconnect
             _ = try? await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
         }
 
@@ -100,10 +103,12 @@ public actor StreamableHTTPTransport: MCPTransport {
 
         if let client = httpClient {
             httpClient = nil
+            // silent: best-effort shutdown during disconnect
             try? await client.shutdown()
         }
     }
 
+    /// Post a JSON-RPC message to the MCP endpoint and enqueue the response.
     public func send(_ data: Data) async throws {
         guard let client = httpClient, isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -154,6 +159,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         }
     }
 
+    /// Return the next queued response, or suspend until one arrives from a ``send(_:)`` call.
     public func receive() async throws -> Data {
         guard isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")

@@ -31,7 +31,7 @@ public struct MCPAnnotations: Codable, Sendable, Equatable {
 /// Role identifier used in MCP annotations and prompt messages.
 public enum MCPRole: String, Codable, Sendable, Equatable {
     case user
-    case assistant
+    case assistant // LIVE: part of MCP protocol specification
 }
 
 /// A resource exposed by an MCP server.
@@ -182,6 +182,7 @@ extension MCPResourceContents: Codable {
         case uri, mimeType, text, blob
     }
 
+    /// Decodes resource contents from a JSON representation.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let uri = try container.decode(String.self, forKey: .uri)
@@ -201,6 +202,7 @@ extension MCPResourceContents: Codable {
         }
     }
 
+    /// Encodes resource contents to a JSON representation.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {

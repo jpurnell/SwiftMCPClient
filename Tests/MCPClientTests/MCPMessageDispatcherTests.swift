@@ -15,7 +15,11 @@ struct MCPMessageDispatcherTests {
         let msg = IncomingMessage.parse(json)
         if case .response(let r) = msg {
             #expect(r.id == 1)
-            #expect(r.result != nil)
+            if case .object(let resultObj) = r.result {
+                #expect(resultObj["tools"] == .array([]))
+            } else {
+                Issue.record("Expected object result with tools key")
+            }
         } else {
             Issue.record("Expected response, got \(String(describing: msg))")
         }
@@ -86,7 +90,11 @@ struct MCPMessageDispatcherTests {
 
         let response = try await dispatcher.waitForResponse(id: 1)
         #expect(response.id == 1)
-        #expect(response.result != nil)
+        if case .object(let resultObj) = response.result {
+            #expect(resultObj["ok"] == .bool(true))
+        } else {
+            Issue.record("Expected object result with ok key")
+        }
 
         await dispatcher.stop()
     }

@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 /// Classifies an incoming JSON-RPC message by inspecting its fields.
 ///
@@ -143,6 +144,9 @@ actor MCPMessageDispatcher {
             do {
                 data = try await transport.receive()
             } catch {
+                let logger = Logger(label: "MCPClient.MCPMessageDispatcher")
+                // logging: error details needed for transport diagnostics
+                logger.warning("transport receive failed: \(error.localizedDescription)")
                 transportError = error
                 let pending = pendingRequests
                 pendingRequests.removeAll()
@@ -183,8 +187,8 @@ actor MCPMessageDispatcher {
                             "id": .integer(id),
                             "result": result ?? .object([:])
                         ]
-                        if let responseData = try? JSONEncoder().encode(response) {
-                            try? await transport.send(responseData)
+                        if let responseData = try? JSONEncoder().encode(response) { // silent: best-effort response encoding
+                            try? await transport.send(responseData) // silent: best-effort response delivery
                         }
                     }
                 }

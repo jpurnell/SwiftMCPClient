@@ -1,5 +1,6 @@
 import SwiftUI
 import MCPClient
+import os
 
 enum ConnectionState: Equatable {
     case disconnected
@@ -47,9 +48,11 @@ struct NotificationEntry: Identifiable {
 @Observable
 @MainActor
 final class MCPViewModel {
+    private static let logger = os.Logger(subsystem: "MCPExplorer", category: "MCPViewModel")
+
     // Connection
     var serverURL: String = ""
-    var bearerToken: String = ""
+    var bearerToken: String = "" // SECURITY: empty default, populated by user at runtime
     var stdioCommand: String = ""
     var stdioArguments: String = ""
     var transportType: TransportType = .httpSSE
@@ -87,7 +90,7 @@ final class MCPViewModel {
     var lastError: String?
 
     private var client: MCPClientConnection?
-    private var notificationTask: Task<Void, Never>?
+    private var notificationTask: Task<Void, Never>? // lifecycle:exempt — cancelled in disconnect() and consumeNotifications()
 
     // MARK: - Connection
 
@@ -100,6 +103,7 @@ final class MCPViewModel {
             let transport: MCPTransport
             switch transportType {
             case .httpSSE:
+                // SECURITY: URL is user-provided configuration entered in the UI
                 guard let url = URL(string: serverURL), !serverURL.isEmpty else {
                     connectionState = .error("Invalid URL")
                     return
@@ -111,6 +115,7 @@ final class MCPViewModel {
                 transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)
 
             case .webSocket:
+                // SECURITY: URL is user-provided configuration entered in the UI
                 guard let url = URL(string: serverURL), !serverURL.isEmpty else {
                     connectionState = .error("Invalid URL")
                     return
@@ -142,15 +147,16 @@ final class MCPViewModel {
                 version: result.serverInfo.version
             )
 
-            // Start notification listener
+            // Cancel any previous notification listener before starting a new one
+            notificationTask?.cancel()
             notificationTask = Task { await consumeNotifications() }
 
             // Auto-discover
             await discover()
 
         } catch {
-            connectionState = .error("\(error)")
-            lastError = "\(error)"
+            connectionState = .error(String(describing: error))
+            lastError = String(describing: error)
         }
     }
 
@@ -159,7 +165,7 @@ final class MCPViewModel {
         notificationTask = nil
 
         if let client {
-            try? await client.disconnect()
+            try? await client.disconnect() // silent: best-effort cleanup during disconnect
         }
         client = nil
         connectionState = .disconnected
@@ -180,16 +186,16 @@ final class MCPViewModel {
         lastError = nil
 
         do { tools = try await client.listTools() }
-        catch { tools = [] }
+        catch { tools = []; lastError = "listTools: \(error)"; Self.logger.error("listTools failed: \(error, privacy: .public)") }
 
         do { resources = try await client.listResources() }
-        catch { resources = [] }
+        catch { resources = []; lastError = "listResources: \(error)"; Self.logger.error("listResources failed: \(error, privacy: .public)") }
 
         do { resourceTemplates = try await client.listResourceTemplates() }
-        catch { resourceTemplates = [] }
+        catch { resourceTemplates = []; lastError = "listResourceTemplates: \(error)"; Self.logger.error("listResourceTemplates failed: \(error, privacy: .public)") }
 
         do { prompts = try await client.listPrompts() }
-        catch { prompts = [] }
+        catch { prompts = []; lastError = "listPrompts: \(error)"; Self.logger.error("listPrompts failed: \(error, privacy: .public)") }
     }
 
     // MARK: - Tool Calling
@@ -212,6 +218,7 @@ final class MCPViewModel {
             toolResult = try await client.callTool(name: tool.name, arguments: arguments)
         } catch {
             lastError = "callTool: \(error)"
+            Self.logger.error("callTool failed: \(error, privacy: .public)")
         }
         toolCallInProgress = false
     }
@@ -228,6 +235,7 @@ final class MCPViewModel {
             resourceContents = try await client.readResource(uri: resource.uri)
         } catch {
             lastError = "readResource: \(error)"
+            Self.logger.error("readResource failed: \(error, privacy: .public)")
         }
         resourceReadInProgress = false
     }
@@ -244,6 +252,7 @@ final class MCPViewModel {
             promptResult = try await client.getPrompt(name: prompt.name, arguments: promptArguments)
         } catch {
             lastError = "getPrompt: \(error)"
+            Self.logger.error("getPrompt failed: \(error, privacy: .public)")
         }
         promptGetInProgress = false
     }
@@ -266,6 +275,7 @@ final class MCPViewModel {
             return try await client.ping()
         } catch {
             lastError = "ping: \(error)"
+            Self.logger.error("ping failed: \(error, privacy: .public)")
             return false
         }
     }

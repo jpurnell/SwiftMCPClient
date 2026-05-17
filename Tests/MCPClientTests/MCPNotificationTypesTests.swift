@@ -127,7 +127,7 @@ struct MCPNotificationTypesTests {
     func notificationResourcesChanged() {
         let n = MCPNotification.resourcesListChanged
         if case .resourcesListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched resourcesListChanged case")
         } else {
             Issue.record("Expected resourcesListChanged")
         }
@@ -147,7 +147,7 @@ struct MCPNotificationTypesTests {
     func notificationPromptsChanged() {
         let n = MCPNotification.promptsListChanged
         if case .promptsListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched promptsListChanged case")
         } else {
             Issue.record("Expected promptsListChanged")
         }
@@ -157,7 +157,7 @@ struct MCPNotificationTypesTests {
     func notificationToolsChanged() {
         let n = MCPNotification.toolsListChanged
         if case .toolsListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched toolsListChanged case")
         } else {
             Issue.record("Expected toolsListChanged")
         }
@@ -176,11 +176,12 @@ struct MCPNotificationTypesTests {
             ])
         ]
         let notification = MCPNotification.parse(method: "notifications/progress", params: json["params"])
-        #expect(notification != nil)
         if case .progress(let p) = notification {
             #expect(p.progressToken == .string("tok-1"))
             #expect(p.progress == 50)
             #expect(p.total == 100)
+        } else {
+            Issue.record("Expected progress notification, got \(String(describing: notification))")
         }
     }
 
@@ -240,7 +241,7 @@ struct MCPNotificationTypesTests {
     func parseResourcesListChanged() {
         let n = MCPNotification.parse(method: "notifications/resources/list_changed", params: nil)
         if case .resourcesListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched resourcesListChanged case")
         } else {
             Issue.record("Expected resourcesListChanged")
         }
@@ -263,7 +264,7 @@ struct MCPNotificationTypesTests {
     func parsePromptsListChanged() {
         let n = MCPNotification.parse(method: "notifications/prompts/list_changed", params: nil)
         if case .promptsListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched promptsListChanged case")
         } else {
             Issue.record("Expected promptsListChanged")
         }
@@ -273,7 +274,7 @@ struct MCPNotificationTypesTests {
     func parseToolsListChanged() {
         let n = MCPNotification.parse(method: "notifications/tools/list_changed", params: nil)
         if case .toolsListChanged = n {
-            // pass
+            #expect(Bool(true), "Matched toolsListChanged case")
         } else {
             Issue.record("Expected toolsListChanged")
         }

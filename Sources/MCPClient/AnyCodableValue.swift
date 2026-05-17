@@ -84,32 +84,32 @@ extension AnyCodableValue: Codable {
         }
 
         // Try bool before int/double since Bool can be decoded as Int
-        if let boolValue = try? container.decode(Bool.self) {
+        if let boolValue = try? container.decode(Bool.self) { // silent: fallthrough to next type attempt
             self = .bool(boolValue)
             return
         }
 
-        if let intValue = try? container.decode(Int.self) {
+        if let intValue = try? container.decode(Int.self) { // silent: fallthrough to next type attempt
             self = .integer(intValue)
             return
         }
 
-        if let doubleValue = try? container.decode(Double.self) {
+        if let doubleValue = try? container.decode(Double.self) { // silent: fallthrough to next type attempt
             self = .number(doubleValue)
             return
         }
 
-        if let stringValue = try? container.decode(String.self) {
+        if let stringValue = try? container.decode(String.self) { // silent: fallthrough to next type attempt
             self = .string(stringValue)
             return
         }
 
-        if let arrayValue = try? container.decode([AnyCodableValue].self) {
+        if let arrayValue = try? container.decode([AnyCodableValue].self) { // silent: fallthrough to next type attempt
             self = .array(arrayValue)
             return
         }
 
-        if let objectValue = try? container.decode([String: AnyCodableValue].self) {
+        if let objectValue = try? container.decode([String: AnyCodableValue].self) { // silent: fallthrough to next type attempt
             self = .object(objectValue)
             return
         }

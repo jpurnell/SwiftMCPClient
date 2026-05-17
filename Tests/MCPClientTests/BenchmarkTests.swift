@@ -23,11 +23,11 @@ struct BenchmarkTests {
             ])
         ])
 
-        let duration = clock.measure {
+        _ = try clock.measure {
             for i in 1...iterations {
                 let request = JSONRPCRequest(id: i, method: "tools/call", params: params)
-                let data = try! JSONEncoder().encode(request)
-                _ = try! JSONDecoder().decode(JSONRPCRequest.self, from: data)
+                let data = try JSONEncoder().encode(request)
+                _ = try JSONDecoder().decode(JSONRPCRequest.self, from: data)
             }
         }
 
@@ -53,10 +53,10 @@ struct BenchmarkTests {
         }
         let largeValue = AnyCodableValue.object(["tools": .array(items)])
 
-        let duration = clock.measure {
+        _ = try clock.measure {
             for _ in 1...iterations {
-                let data = try! JSONEncoder().encode(largeValue)
-                _ = try! JSONDecoder().decode(AnyCodableValue.self, from: data)
+                let data = try JSONEncoder().encode(largeValue)
+                _ = try JSONDecoder().decode(AnyCodableValue.self, from: data)
             }
         }
 
@@ -76,7 +76,7 @@ struct BenchmarkTests {
         }
 
         var parsedCount = 0
-        let duration = clock.measure {
+        _ = clock.measure {
             var parser = SSEParser()
             let events = parser.append(chunk)
             parsedCount = events.count
@@ -96,10 +96,10 @@ struct BenchmarkTests {
             .text("Second block", annotations: MCPAnnotations(audience: [.user], priority: 0.5))
         ]
 
-        let duration = clock.measure {
+        _ = try clock.measure {
             for _ in 1...iterations {
-                let data = try! JSONEncoder().encode(contents)
-                _ = try! JSONDecoder().decode([MCPContent].self, from: data)
+                let data = try JSONEncoder().encode(contents)
+                _ = try JSONDecoder().decode([MCPContent].self, from: data)
             }
         }
 

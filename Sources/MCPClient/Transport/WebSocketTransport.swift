@@ -56,6 +56,7 @@ public actor WebSocketTransport: MCPTransport {
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
 
+    /// Establish a WebSocket connection to the MCP server.
     public func connect() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.eventLoopGroup = group
@@ -93,14 +94,17 @@ public actor WebSocketTransport: MCPTransport {
             self.isConnected = true
             setupHandlers(ws)
         } catch {
+            // silent: best-effort cleanup after failed connect
             try? await group.shutdownGracefully()
             eventLoopGroup = nil
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
     }
 
+    /// Close the WebSocket and shut down the event loop.
     public func disconnect() async throws {
         if let ws = webSocket {
+            // silent: best-effort close during disconnect
             try? await ws.close()
             webSocket = nil
         }
@@ -113,10 +117,12 @@ public actor WebSocketTransport: MCPTransport {
 
         if let group = eventLoopGroup {
             eventLoopGroup = nil
+            // silent: best-effort shutdown during disconnect
             try? await group.shutdownGracefully()
         }
     }
 
+    /// Send a JSON-RPC message as a WebSocket text frame.
     public func send(_ data: Data) async throws {
         guard let ws = webSocket, isConnected else {
             throw MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
@@ -126,6 +132,7 @@ public actor WebSocketTransport: MCPTransport {
         try await ws.send(text)
     }
 
+    /// Return the next queued WebSocket message, or suspend until one arrives.
     public func receive() async throws -> Data {
         guard isConnected else {
             throw MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
