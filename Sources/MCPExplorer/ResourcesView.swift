@@ -33,6 +33,16 @@ struct ResourcesView: View {
                             }
                             .padding(.vertical, 2)
                             .tag(resource.uri)
+                            .contextMenu {
+                                Button("Copy URI") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(resource.uri, forType: .string)
+                                }
+                                Button("Copy Name") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(resource.name, forType: .string)
+                                }
+                            }
                         }
                     }
                 }
@@ -54,6 +64,16 @@ struct ResourcesView: View {
                                 }
                             }
                             .padding(.vertical, 2)
+                            .contextMenu {
+                                Button("Copy URI Template") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(template.uriTemplate, forType: .string)
+                                }
+                                Button("Copy Name") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(template.name, forType: .string)
+                                }
+                            }
                         }
                     }
                 }

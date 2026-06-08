@@ -47,6 +47,12 @@ struct NotificationsView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Copy Text") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(entry.summary, forType: .string)
+                        }
+                    }
                 }
             }
         }

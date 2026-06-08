@@ -22,5 +22,20 @@ struct MCPExplorerApp: App {
                 .environment(viewModel)
         }
         .defaultSize(width: 1000, height: 700)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Refresh Discovery") {
+                    Task { await viewModel.discover() }
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!viewModel.connectionState.isConnected)
+            }
+        }
+
+        #if os(macOS)
+        Settings {
+            SettingsView()
+        }
+        #endif
     }
 }

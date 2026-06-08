@@ -31,17 +31,37 @@ struct ContentView: View {
                     NavigationLink(value: Tab.tools) {
                         Label("Tools (\(viewModel.tools.count))", systemImage: "wrench")
                     }
+                    .contextMenu {
+                        Button("Refresh Tools") {
+                            Task { await viewModel.discover() }
+                        }
+                    }
                     NavigationLink(value: Tab.resources) {
                         Label("Resources (\(viewModel.resources.count))", systemImage: "doc")
                     }
+                    .contextMenu {
+                        Button("Refresh Resources") {
+                            Task { await viewModel.discover() }
+                        }
+                    }
                     NavigationLink(value: Tab.prompts) {
                         Label("Prompts (\(viewModel.prompts.count))", systemImage: "text.bubble")
+                    }
+                    .contextMenu {
+                        Button("Refresh Prompts") {
+                            Task { await viewModel.discover() }
+                        }
                     }
                 }
 
                 Section("Monitor") {
                     NavigationLink(value: Tab.notifications) {
                         Label("Notifications (\(viewModel.notifications.count))", systemImage: "bell")
+                    }
+                    .contextMenu {
+                        Button("Clear Notifications") {
+                            viewModel.notifications.removeAll()
+                        }
                     }
                 }
             }

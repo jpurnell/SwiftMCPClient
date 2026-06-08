@@ -38,6 +38,12 @@ struct PromptsView: View {
                     }
                 }
                 .padding(.vertical, 2)
+                .contextMenu {
+                    Button("Copy Name") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(prompt.name, forType: .string)
+                    }
+                }
             }
             .frame(minWidth: 250)
 
