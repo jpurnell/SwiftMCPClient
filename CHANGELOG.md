@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-30
+
 ### Added
 - StreamableHTTP transport for MCP 2025-03-26 specification
 - WebSocket transport via WebSocketKit for cross-platform support
