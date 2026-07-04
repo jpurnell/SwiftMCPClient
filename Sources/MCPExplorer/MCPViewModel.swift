@@ -1,6 +1,8 @@
 import SwiftUI
 import MCPClient
+#if canImport(os)
 import os
+#endif
 
 enum ConnectionState: Equatable {
     case disconnected
