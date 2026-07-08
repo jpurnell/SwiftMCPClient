@@ -1,4 +1,5 @@
 // swift-tools-version: 6.2
+// legibility:description: A Swift 6 client library for the Model Context Protocol (MCP), enabling Swift applications to connect to MCP servers over HTTP/SSE, WebSocket, or stdio.
 import PackageDescription
 
 var targets: [Target] = [
