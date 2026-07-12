@@ -21,8 +21,10 @@ struct ConnectionView: View {
                     TextField("Server URL", text: $vm.serverURL)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
-                    #if os(macOS)
                         .textContentType(.URL)
+                    #if os(iOS)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
                     #endif
 
                     if viewModel.transportType == .httpSSE {
