@@ -14,3 +14,5 @@ development-guidelines/07_LIBRARY/latestReport.json
 # Claude Code local settings (personal preferences, not shared)
 .claude/settings.local.json
 CLAUDE.local.md
+/.claude/skills/
+/development-guidelines.pre-v2/
