@@ -4,6 +4,10 @@ import MCPClient
 struct ConnectionView: View {
     @Environment(MCPViewModel.self) private var viewModel
 
+    /// Whether the user has asked for state to be shown without relying on colour.
+    @Environment(\.accessibilityDifferentiateWithoutColor)
+    private var differentiateWithoutColor
+
     var body: some View {
         @Bindable var vm = viewModel
 
@@ -133,9 +137,15 @@ struct ConnectionView: View {
 
     private func capabilityRow(_ name: String, available: Bool, detail: String?) -> some View {
         HStack {
+            // The symbol already differs, so availability is never carried by colour alone.
+            // When the user has asked to differentiate without colour, the tint is dropped
+            // entirely rather than merely supplemented — green reads as meaningful whether
+            // or not it is the only signal.
             Image(systemName: available ? "checkmark.circle.fill" : "minus.circle")
                 .accessibilityLabel(available ? "\(name) available" : "\(name) unavailable")
-                .foregroundStyle(available ? .green : .secondary)
+                .foregroundStyle(differentiateWithoutColor
+                                 ? AnyShapeStyle(.primary)
+                                 : AnyShapeStyle(available ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary)))
             Text(name)
             Spacer()
             if let detail {

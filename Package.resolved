@@ -1,5 +1,5 @@
 {
-  "originHash" : "d3b77f9e537c0d6e63bd595b127dafc3c7e210f32059f041930d297cb453f97e",
+  "originHash" : "7877a6064cb7f0caba4368a6636a3648926740ad40667667e91a3241eb7290c5",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -78,8 +78,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-crypto.git",
       "state" : {
-        "revision" : "fa308c07a6fa04a727212d793e761460e41049c3",
-        "version" : "4.3.0"
+        "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
+        "version" : "3.15.1"
       }
     },
     {
@@ -215,6 +215,15 @@
       "state" : {
         "revision" : "7c6ad0fc39d0763e0b699210e4124afd5041c5df",
         "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swiftoauth",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpurnell/SwiftOAuth",
+      "state" : {
+        "revision" : "dd3c14aece5a2e4ce4b7c4d1d323079fc4d895ff",
+        "version" : "0.3.0"
       }
     },
     {

@@ -4,6 +4,10 @@ import MCPClient
 struct PromptsView: View {
     @Environment(MCPViewModel.self) private var viewModel
 
+    /// Whether the user has asked for state to be shown without relying on colour.
+    @Environment(\.accessibilityDifferentiateWithoutColor)
+    private var differentiateWithoutColor
+
     var body: some View {
         HSplitView {
             // Prompt list
@@ -137,9 +141,16 @@ struct PromptsView: View {
                     ForEach(Array(result.messages.enumerated()), id: \.offset) { _, message in
                         GroupBox {
                             VStack(alignment: .leading, spacing: 4) {
+                                // The label itself says USER or ASSISTANT; the colour only
+                                // reinforces it, and is dropped when the user has asked not
+                                // to depend on colour.
                                 Text(message.role.rawValue.uppercased())
                                     .font(.caption.bold())
-                                    .foregroundStyle(message.role == .user ? .blue : .green)
+                                    .foregroundStyle(differentiateWithoutColor
+                                                     ? AnyShapeStyle(.primary)
+                                                     : AnyShapeStyle(message.role == .user
+                                                                     ? AnyShapeStyle(.blue)
+                                                                     : AnyShapeStyle(.green)))
 
                                 messageContent(message.content)
                             }
