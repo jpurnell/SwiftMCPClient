@@ -7,6 +7,7 @@ var targets: [Target] = [
         name: "MCPClient",
         dependencies: [
             .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
+            .product(name: "Crypto", package: "swift-crypto"),
             .product(name: "SwiftOAuthCore", package: "SwiftOAuth"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
@@ -62,11 +63,12 @@ let package = Package(
         // OAuth for MCP servers that require it. An MCP client is pointed at a server by a
         // user and has no pre-registered credentials, so it needs discovery and dynamic
         // registration rather than a token someone pasted in.
-        .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.3.0"),
+        .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.4.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
     ],

@@ -164,9 +164,13 @@ struct ConnectionView: View {
                     .foregroundStyle(.secondary)
 
             case .signedIn:
-                Label("Signed in", systemImage: "checkmark.seal.fill")
+                Label(viewModel.credentialsPersist ? "Signed in" : "Signed in (this session only)",
+                      systemImage: "checkmark.seal.fill")
                     .font(.caption)
                     .labelStyle(.titleAndIcon)
+                    .help(viewModel.credentialsPersist
+                          ? "The credential is stored, encrypted, and refreshed as needed."
+                          : "Credential storage is unavailable, so this sign-in ends when the app quits.")
                 Spacer()
                 Button("Sign out") {
                     Task { await viewModel.signOutOfOAuth() }

@@ -72,8 +72,15 @@ final class MCPViewModel {
 
     // OAuth. The session holds the credential; nothing here ever holds a code, a verifier or
     // a state, because those are what an application gets subtly wrong.
-    private let oauthSession = MCPOAuthSession()
+    private let oauthSession: MCPOAuthSession
     var oauthState: OAuthState = .signedOut
+
+    /// Whether the credential will survive a restart.
+    ///
+    /// Surfaced rather than assumed. If the Keychain refuses — an unsigned build, a locked
+    /// keychain — the app still works, but it will forget on quit, and a user who is not told
+    /// that will read the next sign-in prompt as a bug.
+    private(set) var credentialsPersist: Bool
     var stdioCommand: String = ""
     var stdioArguments: String = ""
     var transportType: TransportType = .httpSSE
@@ -319,6 +326,23 @@ final class MCPViewModel {
             if notifications.count > 200 {
                 notifications = Array(notifications.prefix(200))
             }
+        }
+    }
+
+    init() {
+        // Persistent by default. Making a user authorise on every launch trains them to
+        // click through consent screens without reading them, which is the opposite of what
+        // consent screens are for.
+        do {
+            oauthSession = try MCPOAuthSession.persistent()
+            credentialsPersist = true
+        } catch {
+            // Working-but-forgetful beats not starting. The banner in the UI is what keeps
+            // this from being a silent downgrade.
+            Self.logger.error(
+                "credential storage unavailable, falling back to memory: \(String(describing: error), privacy: .public)")
+            oauthSession = MCPOAuthSession(storage: InMemoryClientStorage())
+            credentialsPersist = false
         }
     }
 

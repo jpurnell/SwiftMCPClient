@@ -21,14 +21,43 @@ public actor MCPOAuthSession {
     ///
     /// - Parameters:
     ///   - setup: How discovery is performed. Injected for tests.
-    ///   - storage: Where the credential lives. In memory by default, which means signing in
-    ///     again after a restart — honest for a tool, wrong for a service.
+    ///   - storage: Where the credential lives.
     public init(
         setup: MCPOAuthSetup = MCPOAuthSetup(),
-        storage: any OAuthClientStorage = InMemoryClientStorage()
+        storage: any OAuthClientStorage
     ) {
         self.setup = setup
         self.storage = storage
+    }
+
+    /// Creates a session that keeps its credential across launches.
+    ///
+    /// The credential file is sealed with a key from the Keychain — one small key there, and
+    /// everything else in a file beside the application's other state. Signing in again after
+    /// every restart is the alternative, and it trains a user to click through consent
+    /// screens without reading them.
+    ///
+    /// - Parameters:
+    ///   - directory: Where the credential file lives. Defaults to the user's application
+    ///     support directory.
+    ///   - setup: How discovery is performed. Injected for tests.
+    /// - Returns: A session backed by encrypted storage.
+    /// - Throws: ``CredentialKeyError`` if the Keychain refused, or a file error.
+    public static func persistent(
+        directory: URL? = nil,
+        setup: MCPOAuthSetup = MCPOAuthSetup()
+    ) throws -> MCPOAuthSession {
+        let base = try directory ?? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true).appending(path: "MCPExplorer")
+
+        return MCPOAuthSession(
+            setup: setup,
+            storage: try EncryptedFileClientStorage(
+                url: base.appending(path: "credentials.enc"),
+                key: try CredentialStoreKey.loadOrCreate()))
     }
 
     /// Runs the whole flow and stores the resulting credential.
@@ -113,6 +142,27 @@ public actor MCPOAuthSession {
 
     /// Whether this session holds a credential.
     public var isSignedIn: Bool { connection != nil }
+
+    /// Whether a credential for this server is already stored from a previous launch.
+    ///
+    /// Reported separately from ``isSignedIn`` because a stored credential is not yet a usable
+    /// one: it still has to be refreshed, and the refresh can fail with the grant revoked.
+    /// Telling a user "signed in" and then failing their first request is worse than asking.
+    ///
+    /// - Parameters:
+    ///   - server: The MCP server.
+    ///   - tenant: Who the connection belongs to.
+    /// - Returns: `true` if a credential is on file.
+    public func hasStoredCredential(server: URL, tenant: String = "local") async -> Bool {
+        let identifier = server.host() ?? "mcp"
+        let id = ConnectionID(
+            tenant: tenant, provider: identifier, account: server.absoluteString)
+        // An unreadable store and an empty one mean the same thing to a caller deciding
+        // whether to offer a sign-in button: offer it.
+        // silent: both outcomes lead to the same UI, and the store logs its own reason
+        let stored = try? await storage.credential(for: id)
+        return stored != nil
+    }
 
     /// Forgets the credential, and revokes it where the server allows.
     public func signOut() async throws {
