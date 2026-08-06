@@ -1,4 +1,3 @@
-#if canImport(Darwin)
 import Foundation
 import Testing
 import SwiftOAuthCore
@@ -169,4 +168,3 @@ private func metadataFetch(
         throw MCPOAuthError.noAuthorizationServer
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if canImport(Darwin)
 import Foundation
 import SwiftOAuthCore
 import SwiftOAuthClient
@@ -147,4 +146,3 @@ public actor MCPOAuthSession {
         return try JSONDecoder().decode(ClientRegistrationResponse.self, from: data)
     }
 }
-#endif

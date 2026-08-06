@@ -1,7 +1,7 @@
-#if canImport(Darwin)
 import Foundation
-import Darwin
-import CLoopbackSocket
+import NIOCore
+import NIOPosix
+import NIOHTTP1
 
 /// Why the loopback listener could not deliver a callback.
 public enum LoopbackError: Error, Equatable, Sendable {
@@ -15,7 +15,7 @@ public enum LoopbackError: Error, Equatable, Sendable {
     /// closes the tab produces exactly this, and it must not leave a listener bound forever.
     case timedOut
 
-    /// The request that arrived was not a readable HTTP request line.
+    /// The request that arrived was not a readable HTTP request.
     case malformedRequest
 }
 
@@ -30,8 +30,8 @@ public enum LoopbackError: Error, Equatable, Sendable {
 ///
 /// It binds **127.0.0.1**, never `0.0.0.0`. Binding every interface would let anything that
 /// can route here deliver a callback — which is to say, hand this client an authorization
-/// code of an attacker's choosing. The `state` check would catch that, but there is no
-/// reason to accept the connection at all.
+/// code of an attacker's choosing. The `state` check would catch that, but there is no reason
+/// to accept the connection at all.
 ///
 /// It takes a **kernel-assigned port**. RFC 8252 §7.3 requires an authorization server to
 /// accept any port on the loopback address for exactly this reason: a fixed port can be
@@ -41,17 +41,28 @@ public enum LoopbackError: Error, Equatable, Sendable {
 /// authorization; leaving it bound afterwards leaves something accepting authorization codes
 /// long after anyone is expecting one.
 ///
-/// ## Why a socket rather than `Network.framework`
+/// ## Why NIO
 ///
-/// `NWListener` cannot express "this address, any free port". A required local endpoint needs
-/// a concrete port; an ephemeral port means not stating the endpoint at all. Both were tried
-/// and neither binds. Giving up either would mean surrendering the address restriction or the
-/// assigned port, and both are load-bearing above. `bind` with port 0 does exactly this in one
-/// call, and lives in `CLoopbackSocket` — composing a `sockaddr_in` is what C is for.
+/// `bind(host:port:)` expresses exactly what is needed — that address, a kernel-assigned port
+/// — in one call and with no pointers. `NWListener` cannot: a required local endpoint needs a
+/// concrete port, and an ephemeral port means not stating the endpoint at all, so it can
+/// offer the address restriction or the assigned port but not both. Reaching for the C
+/// sockets API instead would mean composing a `sockaddr_in` by hand, which is the same
+/// capability with worse ergonomics and a pointer cast that no static checker can tell apart
+/// from one that outlives its buffer.
 public actor LoopbackRedirectListener {
 
     private let path: String
-    private var socketDescriptor: Int32?
+    private var channel: Channel?
+    private var callback: EventLoopPromise<URL>?
+
+    /// The process-wide event loop group.
+    ///
+    /// Shared rather than one group per listener: a per-listener group has to be shut down,
+    /// and a shutdown that has to happen on every exit path — including the ones taken when
+    /// something has already gone wrong — is a thread leak waiting for the one path that
+    /// forgets. The singleton is owned by NIO and must not be shut down at all.
+    private var group: EventLoopGroup { MultiThreadedEventLoopGroup.singleton }
 
     /// Creates a listener.
     ///
@@ -64,17 +75,38 @@ public actor LoopbackRedirectListener {
     ///
     /// - Returns: The redirect URI, including the assigned port.
     /// - Throws: ``LoopbackError/couldNotListen``.
-    public func start() throws -> String {
-        let descriptor = clb_listen_on_loopback()
-        guard descriptor >= 0 else { throw LoopbackError.couldNotListen }
+    public func start() async throws -> String {
+        let promise = group.next().makePromise(of: URL.self)
+        let expectedPath = path
 
-        let port = clb_bound_port(descriptor)
-        guard port != 0 else {
-            close(descriptor)
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(.backlog, value: 1)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    channel.pipeline.addHandler(
+                        CallbackHandler(expectedPath: expectedPath, promise: promise))
+                }
+            }
+
+        // 127.0.0.1, not 0.0.0.0, and port 0 for a kernel-assigned one. The whole security
+        // property and the whole RFC 8252 requirement, in a single call.
+        let channel: Channel
+        do {
+            channel = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
+        } catch {
+            promise.fail(error)
             throw LoopbackError.couldNotListen
         }
 
-        socketDescriptor = descriptor
+        guard let port = channel.localAddress?.port else {
+            promise.fail(LoopbackError.couldNotListen)
+            try? await channel.close().get() // silent: closing a channel that failed to bind
+            throw LoopbackError.couldNotListen
+        }
+
+        self.channel = channel
+        self.callback = promise
         return "http://127.0.0.1:\(port)\(path)"
     }
 
@@ -85,123 +117,131 @@ public actor LoopbackRedirectListener {
     /// - Returns: The full callback URL, query intact.
     /// - Throws: ``LoopbackError``.
     public func awaitCallback(timeout: Duration = .seconds(300)) async throws -> URL {
-        guard let descriptor = socketDescriptor else { throw LoopbackError.couldNotListen }
-        let port = clb_bound_port(descriptor)
-        guard port != 0 else { throw LoopbackError.couldNotListen }
-        let expectedPath = path
-        let deadline = ContinuousClock.now + timeout
+        guard let callback, let channel else { throw LoopbackError.couldNotListen }
 
-        // Accepting blocks, so it runs off the actor and off the cooperative pool. The socket
-        // is polled rather than blocked on outright, so the deadline stays checkable and a
-        // cancelled task does not leave a thread parked in `accept` forever.
-        return try await Task.detached(priority: .userInitiated) {
-            while ContinuousClock.now < deadline {
-                try Task.checkCancellation()
+        // The deadline is scheduled on the event loop and fulfils the same promise, so there
+        // is exactly one thing to await. Racing a `Task.sleep` against the future in a task
+        // group does not work: awaiting a NIO future is not cancellation-aware, so the losing
+        // child never finishes and the group never returns.
+        let deadline = channel.eventLoop.scheduleTask(in: Self.amount(timeout)) {
+            callback.fail(LoopbackError.timedOut)
+        }
+        defer { deadline.cancel() }
 
-                guard let ready = Self.waitForConnection(descriptor, milliseconds: 100) else {
-                    throw LoopbackError.couldNotListen
-                }
-                guard ready else { continue }
-
-                let connection = accept(descriptor, nil, nil)
-                guard connection >= 0 else { continue }
-                defer { close(connection) }
-
-                guard let request = Self.readRequest(connection),
-                      let target = Self.requestTarget(request) else {
-                    Self.respond(on: connection, body: Self.failurePage)
-                    continue
-                }
-
-                // Composed rather than parsed: the scheme, host and port are this listener's
-                // own, and only the path and query come from the request.
-                var components = URLComponents()
-                components.scheme = "http"
-                components.host = "127.0.0.1"
-                components.port = Int(port)
-                // The target is already percent-encoded, so it goes into the `percentEncoded*`
-                // properties. Assigning it to `path`/`query` would encode it a second time —
-                // `User%20refused` becomes `User%2520refused`, and the caller reads a literal
-                // `%20` in the provider's explanation.
-                let split = target.split(separator: "?", maxSplits: 1)
-                components.percentEncodedPath = String(split.first ?? "")
-                components.percentEncodedQuery = split.count > 1 ? String(split[1]) : nil
-
-                guard components.percentEncodedPath == expectedPath,
-                      let url = components.url else {
-                    // Browsers request `/favicon.ico` unprompted. Answering it must not end
-                    // the wait, or the real callback arrives to a closed socket.
-                    Self.respond(on: connection, body: Self.failurePage)
-                    continue
-                }
-
-                Self.respond(on: connection, body: Self.successPage)
-                return url
-            }
-            throw LoopbackError.timedOut
-        }.value
+        return try await callback.futureResult.get()
     }
 
-    /// Closes the listening socket.
+    /// Converts a `Duration` to NIO's `TimeAmount`.
+    static func amount(_ duration: Duration) -> TimeAmount {
+        let components = duration.components
+        let nanoseconds = components.seconds * 1_000_000_000
+            + components.attoseconds / 1_000_000_000
+        return .nanoseconds(nanoseconds)
+    }
+
+    /// Closes the listener and releases its event loop.
     ///
     /// Idempotent, and worth calling on every exit path: an abandoned authorization must not
     /// leave something bound and accepting codes.
-    public func stop() {
-        if let descriptor = socketDescriptor {
-            close(descriptor)
-        }
-        socketDescriptor = nil
+    public func stop() async {
+        // Failing the promise first means a caller still inside `awaitCallback` gets an error
+        // rather than waiting out its full timeout on a socket that is already gone.
+        callback?.fail(LoopbackError.couldNotListen)
+        callback = nil
+
+        // silent: a channel already closed is the state this method wants
+        try? await channel?.close().get()
+        channel = nil
+        // The event loop group is NIO's singleton and is deliberately not shut down here.
+    }
+}
+
+/// Answers HTTP requests until one is the callback.
+///
+/// Not `Sendable`, and it does not need to be: NIO runs every handler for a channel on that
+/// channel's event loop, one at a time.
+private final class CallbackHandler: ChannelInboundHandler {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
+
+    private let expectedPath: String
+    private let promise: EventLoopPromise<URL>
+
+    init(expectedPath: String, promise: EventLoopPromise<URL>) {
+        self.expectedPath = expectedPath
+        self.promise = promise
     }
 
-    // MARK: - Socket details
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard case .head(let head) = unwrapInboundIn(data) else { return }
 
-    /// Whether a connection is waiting, polled so the deadline stays checkable.
+        // Only GET. An authorization redirect is a GET, and anything else would carry a body
+        // this handler never reads.
+        guard head.method == .GET else {
+            respond(context: context, body: LoopbackRedirectListener.failurePage)
+            return
+        }
+
+        guard let url = LoopbackRedirectListener.callbackURL(
+            from: head.uri, port: context.localAddress?.port) else {
+            respond(context: context, body: LoopbackRedirectListener.failurePage)
+            return
+        }
+
+        guard url.path == expectedPath else {
+            // Browsers request `/favicon.ico` unprompted. Answering it must not end the wait,
+            // or the real callback arrives to a closed channel.
+            respond(context: context, body: LoopbackRedirectListener.failurePage)
+            return
+        }
+
+        respond(context: context, body: LoopbackRedirectListener.successPage)
+        // Succeeding twice is a no-op on a promise, so a duplicated request is harmless.
+        promise.succeed(url)
+    }
+
+    private func respond(context: ChannelHandlerContext, body: String) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/html; charset=utf-8")
+        headers.add(name: "Content-Length", value: String(body.utf8.count))
+        headers.add(name: "Connection", value: "close")
+
+        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+
+        var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
+        buffer.writeString(body)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+            context.close(promise: nil)
+        }
+    }
+}
+
+extension LoopbackRedirectListener {
+
+    /// Builds the callback URL from an HTTP request target.
     ///
-    /// - Returns: `true` if one is waiting, `false` if this poll expired, `nil` if the socket
-    ///   is gone — which is what `stop()` looks like from in here.
-    private static func waitForConnection(_ descriptor: Int32, milliseconds: Int32) -> Bool? {
-        var descriptorSet = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-        let result = poll(&descriptorSet, 1, milliseconds)
-        if result < 0 { return errno == EINTR ? false : nil }
-        if result == 0 { return false }
-        // A closed or errored socket also reports readable. Distinguishing it here is what
-        // turns `stop()` into a clean exit rather than a spin on a dead descriptor.
-        if descriptorSet.revents & Int16(POLLNVAL | POLLERR | POLLHUP) != 0 { return nil }
-        return true
-    }
-
-    /// Reads the request, which for a redirect is small and arrives at once.
-    private static func readRequest(_ connection: Int32) -> String? {
-        var buffer = [UInt8](repeating: 0, count: 8192)
-        let count = read(connection, &buffer, buffer.count)
-        guard count > 0 else { return nil }
-        return String(decoding: buffer[0..<count], as: UTF8.self)
-    }
-
-    /// The request target from an HTTP request line, e.g. `/callback?code=…`.
-    static func requestTarget(_ request: String) -> String? {
-        guard let line = request.split(separator: "\r\n", maxSplits: 1).first else { return nil }
-        let parts = line.split(separator: " ")
-        guard parts.count >= 2, parts[0] == "GET" else { return nil }
-        return String(parts[1])
-    }
-
-    /// Writes a minimal HTML response.
-    private static func respond(on connection: Int32, body: String) {
-        let response = """
-        HTTP/1.1 200 OK\r
-        Content-Type: text/html; charset=utf-8\r
-        Content-Length: \(body.utf8.count)\r
-        Connection: close\r
-        \r
-        \(body)
-        """
-        var written = 0
-        Array(response.utf8).withUnsafeBufferPointer { pointer in
-            guard let base = pointer.baseAddress else { return }
-            written = write(connection, base, pointer.count)
-        }
-        _ = written
+    /// Composed rather than parsed whole: the scheme, host and port are this listener's own,
+    /// and only the path and query come from the request. The target arrives already
+    /// percent-encoded, so it goes into the `percentEncoded*` properties — assigning it to
+    /// `path`/`query` would encode it a second time, and a provider saying `User%20refused`
+    /// would reach the caller as `User%2520refused`.
+    ///
+    /// - Parameters:
+    ///   - target: The request target, e.g. `/callback?code=…`.
+    ///   - port: The port this listener is bound to.
+    /// - Returns: The URL, or `nil` if the target cannot form one.
+    static func callbackURL(from target: String, port: Int?) -> URL? {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = port
+        let split = target.split(separator: "?", maxSplits: 1)
+        components.percentEncodedPath = String(split.first ?? "")
+        components.percentEncodedQuery = split.count > 1 ? String(split[1]) : nil
+        return components.url
     }
 
     /// Shown in the browser once the code has been received.
@@ -222,4 +262,3 @@ public actor LoopbackRedirectListener {
     <h1>Nothing to see here</h1><p>This page is waiting for a sign-in redirect.</p>
     """
 }
-#endif

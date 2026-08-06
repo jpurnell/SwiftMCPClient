@@ -1,4 +1,3 @@
-#if canImport(Darwin)
 import Foundation
 import Testing
 @testable import MCPClient
@@ -8,32 +7,53 @@ import Testing
 /// The listener's one job is turning an HTTP request into a callback URL. That part needs no
 /// network to test, and the failure modes — a browser fetching `/favicon.ico`, a request that
 /// is not a request — are awkward to provoke against a real one.
-@Suite("Loopback — reading the request line")
-struct RequestLineTests {
+@Suite("Loopback — composing the callback URL")
+struct CallbackURLTests {
 
-    @Test("A GET request line yields its target")
-    func getYieldsTarget() {
-        let request = "GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
-        #expect(LoopbackRedirectListener.requestTarget(request) == "/callback?code=abc&state=xyz")
+    /// The target becomes a URL whose query survives intact.
+    @Test("A target becomes a callback URL")
+    func targetBecomesURL() throws {
+        let url = try #require(LoopbackRedirectListener.callbackURL(
+            from: "/callback?code=abc&state=xyz", port: 51234))
+
+        #expect(url.absoluteString == "http://127.0.0.1:51234/callback?code=abc&state=xyz")
     }
 
-    /// Only GET. An authorization redirect is a GET, and accepting a POST would mean
-    /// accepting a body this listener never reads.
-    @Test("A non-GET request is refused")
-    func nonGetRefused() {
-        for method in ["POST", "PUT", "DELETE", "HEAD"] {
-            let request = "\(method) /callback?code=abc HTTP/1.1\r\n\r\n"
-            #expect(LoopbackRedirectListener.requestTarget(request) == nil,
-                    "\(method) was accepted")
-        }
+    /// The request target is already percent-encoded. Encoding it a second time turns a
+    /// provider's `User%20refused` into `User%2520refused`, and the caller reads an
+    /// explanation with a literal `%20` in it.
+    @Test("An encoded target is not encoded twice")
+    func encodedTargetNotDoubleEncoded() throws {
+        let url = try #require(LoopbackRedirectListener.callbackURL(
+            from: "/callback?error=access_denied&error_description=User%20refused",
+            port: 51234))
+
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = Dictionary(uniqueKeysWithValues:
+            (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+        #expect(items["error_description"] == "User refused")
+        #expect(items["error_description"] != "User%20refused")
     }
 
-    @Test("A malformed request line yields nothing")
-    func malformedYieldsNil() {
-        for request in ["", "GET", "\r\n\r\n", "not a request at all\r\n"] {
-            #expect(LoopbackRedirectListener.requestTarget(request) == nil,
-                    "\"\(request)\" was accepted")
-        }
+    /// A target with no query is still a valid callback URL — an empty query is not the same
+    /// as a malformed one.
+    @Test("A target without a query yields a URL with none")
+    func targetWithoutQuery() throws {
+        let url = try #require(LoopbackRedirectListener.callbackURL(
+            from: "/callback", port: 51234))
+        #expect(url.path == "/callback")
+        #expect(url.query == nil)
+    }
+
+    /// The host and port are the listener's own and never come from the request, so a target
+    /// that looks like an absolute URL cannot redirect anything.
+    @Test("The host is always loopback, whatever the target says")
+    func hostIsAlwaysLoopback() throws {
+        let url = try #require(LoopbackRedirectListener.callbackURL(
+            from: "/callback?code=c", port: 51234))
+        #expect(url.host == "127.0.0.1")
+        #expect(url.port == 51234)
     }
 
     /// The success page is rendered by the user's browser, and the URL that produced it —
@@ -199,4 +219,3 @@ private func get(port: Int, target: String) async throws {
     request.httpMethod = "GET"
     _ = try await URLSession.shared.data(for: request)
 }
-#endif

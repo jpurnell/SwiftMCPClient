@@ -3,17 +3,15 @@
 import PackageDescription
 
 var targets: [Target] = [
-    // The sockaddr composition for the OAuth loopback redirect. In C because that is what C
-    // is for: the pointer casts `bind` needs are unremarkable here and, in Swift, are
-    // indistinguishable from a pointer outliving its buffer.
-    .target(name: "CLoopbackSocket"),
     .target(
         name: "MCPClient",
         dependencies: [
-            "CLoopbackSocket",
             .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
             .product(name: "SwiftOAuthCore", package: "SwiftOAuth"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+            .product(name: "NIOHTTP1", package: "swift-nio"),
             .product(name: "WebSocketKit", package: "websocket-kit"),
         ],
         // Declared rather than left implicit. SwiftPM does not claim this catalog on a
@@ -66,6 +64,9 @@ let package = Package(
         // registration rather than a token someone pasted in.
         .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.3.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+        // Already present transitively via websocket-kit; declared because the OAuth loopback
+        // listener uses it directly.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
     ],
