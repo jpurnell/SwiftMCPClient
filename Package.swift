@@ -11,6 +11,13 @@ var targets: [Target] = [
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "WebSocketKit", package: "websocket-kit"),
         ],
+        // Declared rather than left implicit. SwiftPM does not claim this catalog on a
+        // plain build and warns that it is unhandled; the obvious quietening — `exclude` —
+        // silently drops all eight hand-written guides from the generated documentation,
+        // leaving symbol pages only. Verified by generating both ways and looking for them.
+        resources: [
+            .copy("MCPClient.docc")
+        ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]
