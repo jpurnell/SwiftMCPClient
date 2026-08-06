@@ -57,7 +57,7 @@ public actor MCPOAuthSession {
             setup: setup,
             storage: try EncryptedFileClientStorage(
                 url: base.appending(path: "credentials.enc"),
-                key: try CredentialStoreKey.loadOrCreate()))
+                key: try CredentialStoreKey().loadOrCreate()))
     }
 
     /// Runs the whole flow and stores the resulting credential.
