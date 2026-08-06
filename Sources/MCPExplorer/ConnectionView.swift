@@ -36,9 +36,15 @@ struct ConnectionView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
+                        oauthRow
+
                         TextField("Bearer Token (optional)", text: $vm.bearerToken)
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
+                            .disabled(viewModel.oauthState == .signedIn)
+                            .help(viewModel.oauthState == .signedIn
+                                  ? "Signed in with OAuth; the token is managed for you."
+                                  : "Used only if you are not signed in with OAuth.")
 
                         Toggle("Trust self-signed certificates", isOn: $vm.trustSelfSignedCertificates)
                             .font(.callout)
@@ -132,6 +138,48 @@ struct ConnectionView: View {
         case .error(let msg):
             Label(msg, systemImage: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
+        }
+    }
+
+    /// Sign in, or say why it did not work.
+    ///
+    /// The failure text is specific on purpose: "this server does not advertise OAuth",
+    /// "this server does not allow clients to register themselves" and "the server pointed
+    /// sign-in at another host" have different remedies, and a single "sign-in failed" would
+    /// hide which one applies.
+    @ViewBuilder
+    private var oauthRow: some View {
+        HStack(spacing: 8) {
+            switch viewModel.oauthState {
+            case .signedOut, .failed:
+                Button("Sign in with OAuth…") {
+                    Task { await viewModel.signInWithOAuth() }
+                }
+                .disabled(viewModel.serverURL.isEmpty)
+
+            case .awaitingBrowser:
+                ProgressView().controlSize(.small)
+                Text("Waiting for your browser…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .signedIn:
+                Label("Signed in", systemImage: "checkmark.seal.fill")
+                    .font(.caption)
+                    .labelStyle(.titleAndIcon)
+                Spacer()
+                Button("Sign out") {
+                    Task { await viewModel.signOutOfOAuth() }
+                }
+                .controlSize(.small)
+            }
+        }
+
+        if case .failed(let reason) = viewModel.oauthState {
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

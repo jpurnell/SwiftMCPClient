@@ -3,9 +3,14 @@
 import PackageDescription
 
 var targets: [Target] = [
+    // The sockaddr composition for the OAuth loopback redirect. In C because that is what C
+    // is for: the pointer casts `bind` needs are unremarkable here and, in Swift, are
+    // indistinguishable from a pointer outliving its buffer.
+    .target(name: "CLoopbackSocket"),
     .target(
         name: "MCPClient",
         dependencies: [
+            "CLoopbackSocket",
             .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
             .product(name: "SwiftOAuthCore", package: "SwiftOAuth"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
@@ -32,7 +37,11 @@ var targets: [Target] = [
 targets.append(
     .executableTarget(
         name: "MCPExplorer",
-        dependencies: ["MCPClient"],
+        dependencies: [
+            "MCPClient",
+            .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
+            .product(name: "SwiftOAuthCore", package: "SwiftOAuth")
+        ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]

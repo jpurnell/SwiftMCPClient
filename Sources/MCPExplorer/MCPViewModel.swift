@@ -1,8 +1,22 @@
 import SwiftUI
 import MCPClient
+import SwiftOAuthCore
+import SwiftOAuthClient
+#if canImport(AppKit)
+import AppKit
+#endif
 #if canImport(os)
 import os
 #endif
+
+/// Where the OAuth sign-in has got to.
+enum OAuthState: Equatable {
+    case signedOut
+    /// The browser is open and the user has not come back yet.
+    case awaitingBrowser
+    case signedIn
+    case failed(String)
+}
 
 enum ConnectionState: Equatable {
     case disconnected
@@ -55,6 +69,11 @@ final class MCPViewModel {
     // Connection
     var serverURL: String = ""
     var bearerToken: String = "" // SECURITY: empty default, populated by user at runtime
+
+    // OAuth. The session holds the credential; nothing here ever holds a code, a verifier or
+    // a state, because those are what an application gets subtly wrong.
+    private let oauthSession = MCPOAuthSession()
+    var oauthState: OAuthState = .signedOut
     var stdioCommand: String = ""
     var stdioArguments: String = ""
     var transportType: TransportType = .httpSSE
@@ -111,7 +130,11 @@ final class MCPViewModel {
                     return
                 }
                 var headers: [String: String] = [:]
-                if !bearerToken.isEmpty {
+                // A signed-in OAuth session wins over a pasted token: it refreshes, and a
+                // token typed in by hand is the thing it replaces.
+                if let header = try await oauthSession.authorizationHeader() {
+                    headers["Authorization"] = header
+                } else if !bearerToken.isEmpty {
                     headers["Authorization"] = "Bearer \(bearerToken)"
                 }
                 transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)
@@ -296,6 +319,80 @@ final class MCPViewModel {
             if notifications.count > 200 {
                 notifications = Array(notifications.prefix(200))
             }
+        }
+    }
+
+    // MARK: - OAuth
+
+    /// Signs in to the MCP server named in `serverURL`.
+    ///
+    /// Everything that could be got wrong — the state, the PKCE verifier, the redirect port,
+    /// the authorization code — stays inside `MCPOAuthSession`. This method's whole job is
+    /// opening a browser and reporting what happened.
+    func signInWithOAuth() async {
+        // Parsed into components and checked before it becomes a URL. This string is typed
+        // by hand into a text field and is about to name the host an OAuth flow runs
+        // against; `https` is required because every secret in that flow crosses it.
+        guard let components = URLComponents(string: serverURL),
+              components.scheme?.lowercased() == "https",
+              let host = components.host, !host.isEmpty,
+              let url = components.url else {
+            oauthState = .failed("Enter an https:// server URL first")
+            return
+        }
+
+        oauthState = .awaitingBrowser
+        do {
+            try await oauthSession.signIn(
+                server: url,
+                clientName: "MCP Explorer",
+                openURL: { authorizationURL in
+                    #if os(macOS)
+                    NSWorkspace.shared.open(authorizationURL)
+                    #endif
+                })
+            oauthState = .signedIn
+        } catch {
+            Self.logger.error("OAuth sign-in failed: \(String(describing: error), privacy: .public)")
+            oauthState = .failed(Self.describe(error))
+        }
+    }
+
+    /// Forgets the credential, and revokes it where the server allows.
+    func signOutOfOAuth() async {
+        do {
+            try await oauthSession.signOut()
+        } catch {
+            // The local credential is gone either way; a server that could not be reached
+            // must not leave the app claiming to be signed in.
+            Self.logger.error("Revocation failed: \(String(describing: error), privacy: .public)")
+        }
+        oauthState = .signedOut
+    }
+
+    /// Turns an error into something an operator can act on.
+    ///
+    /// Each of these has a different remedy, and a single "sign-in failed" would hide which.
+    private static func describe(_ error: Error) -> String {
+        switch error {
+        case MCPOAuthError.noAuthorizationServer:
+            return "This server does not advertise OAuth."
+        case MCPOAuthError.registrationUnavailable:
+            return "This server does not allow clients to register themselves."
+        case MCPOAuthError.discovery(.pkceUnsupported):
+            return "This server does not support PKCE, which is required."
+        case MCPOAuthError.discovery(.endpointOutsideIssuer(let endpoint)):
+            return "The server pointed sign-in at another host (\(endpoint)). Refused."
+        case MCPOAuthError.discovery(.insecureEndpoint(let endpoint)):
+            return "The server offered a non-HTTPS endpoint (\(endpoint)). Refused."
+        case LoopbackError.timedOut:
+            return "Timed out waiting for the browser."
+        case CallbackError.stateMismatch:
+            return "The sign-in response did not match this request. Refused."
+        case CallbackError.provider(let oauthError):
+            return oauthError.detail ?? oauthError.standardDescription
+        default:
+            return String(describing: error)
         }
     }
 }
