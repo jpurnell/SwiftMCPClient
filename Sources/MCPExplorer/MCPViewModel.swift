@@ -32,10 +32,27 @@ enum ConnectionState: Equatable {
 
 enum TransportType: String, CaseIterable, Identifiable {
     case httpSSE = "HTTP/SSE"
+    case streamableHTTP = "Streamable HTTP"
     case webSocket = "WebSocket"
     case stdio = "stdio"
 
     var id: String { rawValue }
+
+    /// Whether this transport speaks HTTP and can therefore carry a bearer credential.
+    var usesHTTPCredentials: Bool {
+        self == .httpSSE || self == .streamableHTTP
+    }
+
+    /// A representative URL, shown so a user can tell at a glance whether they have pasted
+    /// the right endpoint for the transport they picked.
+    var exampleURL: String {
+        switch self {
+        case .httpSSE: "https://mcp.example.com/sse"
+        case .streamableHTTP: "https://mcp.example.com/mcp"
+        case .webSocket: "wss://mcp.example.com/ws"
+        case .stdio: ""
+        }
+    }
 }
 
 struct NotificationEntry: Identifiable {
@@ -130,7 +147,7 @@ final class MCPViewModel {
         do {
             let transport: MCPTransport
             switch transportType {
-            case .httpSSE:
+            case .httpSSE, .streamableHTTP:
                 // SECURITY: URL is user-provided configuration entered in the UI
                 guard let url = URL(string: serverURL), !serverURL.isEmpty else {
                     connectionState = .error("Invalid URL")
@@ -144,7 +161,16 @@ final class MCPViewModel {
                 } else if !bearerToken.isEmpty {
                     headers["Authorization"] = "Bearer \(bearerToken)"
                 }
-                transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)
+                // Both are HTTP with the same credential; they differ in how the server
+                // frames its side of the conversation, which is the transport's business.
+                if transportType == .streamableHTTP {
+                    transport = StreamableHTTPTransport(
+                        url: url,
+                        headers: headers,
+                        trustSelfSignedCertificates: trustSelfSignedCertificates)
+                } else {
+                    transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)
+                }
 
             case .webSocket:
                 // SECURITY: URL is user-provided configuration entered in the UI

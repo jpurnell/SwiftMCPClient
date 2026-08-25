@@ -21,7 +21,7 @@ struct ConnectionView: View {
                 .pickerStyle(.segmented)
 
                 switch viewModel.transportType {
-                case .httpSSE, .webSocket:
+                case .httpSSE, .streamableHTTP, .webSocket:
                     TextField("Server URL", text: $vm.serverURL)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
@@ -31,8 +31,8 @@ struct ConnectionView: View {
                         .textInputAutocapitalization(.never)
                     #endif
 
-                    if viewModel.transportType == .httpSSE {
-                        Text("Example: https://mcp.example.com/sse")
+                    if viewModel.transportType.usesHTTPCredentials {
+                        Text("Example: \(viewModel.transportType.exampleURL)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -49,7 +49,7 @@ struct ConnectionView: View {
                         Toggle("Trust self-signed certificates", isOn: $vm.trustSelfSignedCertificates)
                             .font(.callout)
                     } else {
-                        Text("Example: wss://mcp.example.com/ws")
+                        Text("Example: \(viewModel.transportType.exampleURL)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -210,7 +210,7 @@ struct ConnectionView: View {
 
     private var isConnectDisabled: Bool {
         switch viewModel.transportType {
-        case .httpSSE, .webSocket:
+        case .httpSSE, .streamableHTTP, .webSocket:
             return viewModel.serverURL.isEmpty
         case .stdio:
             return viewModel.stdioCommand.isEmpty

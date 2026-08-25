@@ -132,3 +132,50 @@ struct StreamableHTTPTransportTests {
         try? await transport.disconnect()
     }
 }
+
+/// Carrying a credential that changes during a session.
+@Suite("StreamableHTTPTransport — authorization")
+struct StreamableHTTPTransportAuthorizationTests {
+
+    private func url() throws -> URL {
+        try #require(URL(string: "https://mcp.example.com/mcp"))
+    }
+
+    @Test("An authorization header can be set after construction")
+    func setsHeader() async throws {
+        let transport = StreamableHTTPTransport(url: try url())
+        await transport.updateAuthorization("Bearer first")
+
+        #expect(await transport.currentHeaders["Authorization"] == "Bearer first")
+    }
+
+    /// The refresh case: a new token replaces the old one rather than accumulating.
+    @Test("A refreshed token replaces the previous one")
+    func replacesHeader() async throws {
+        let transport = StreamableHTTPTransport(
+            url: try url(), headers: ["Authorization": "Bearer stale"])
+        await transport.updateAuthorization("Bearer fresh")
+
+        #expect(await transport.currentHeaders["Authorization"] == "Bearer fresh")
+    }
+
+    /// Signing out must actually stop sending the credential, not send an empty one.
+    @Test("Passing nil removes the header entirely")
+    func removesHeader() async throws {
+        let transport = StreamableHTTPTransport(
+            url: try url(), headers: ["Authorization": "Bearer stale"])
+        await transport.updateAuthorization(nil)
+
+        #expect(await transport.currentHeaders["Authorization"] == nil)
+    }
+
+    /// Other headers are not collateral damage.
+    @Test("Unrelated headers survive an authorization change")
+    func preservesOtherHeaders() async throws {
+        let transport = StreamableHTTPTransport(
+            url: try url(), headers: ["X-Trace": "abc"])
+        await transport.updateAuthorization("Bearer token")
+
+        #expect(await transport.currentHeaders["X-Trace"] == "abc")
+    }
+}

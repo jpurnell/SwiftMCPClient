@@ -21,6 +21,16 @@ public enum MCPOAuthError: Error, Equatable, Sendable {
 
     /// The server's advertised authorization server could not be used.
     case discovery(DiscoveryError)
+
+    /// Nothing usable was served where protected-resource metadata should be.
+    ///
+    /// Distinct from ``noAuthorizationServer``: that is a server saying it does not use
+    /// OAuth, this is a server that should have answered and did not. Carrying the URL and
+    /// status matters because the client tries more than one candidate location, and
+    /// "not found" without saying where is not actionable.
+    ///
+    /// A `status` of `0` means no candidate URL could be formed from the server URL at all.
+    case metadataNotFound(url: URL, status: Int)
 }
 
 /// RFC 9728 protected resource metadata — how an MCP server names its authorization server.
@@ -92,9 +102,68 @@ public struct MCPOAuthSetup: Sendable {
     ///
     /// - Parameter fetch: How to retrieve a document. Defaults to `URLSession.shared`.
     public init(fetch: @escaping Fetch = { url in
-        try await URLSession.shared.data(from: url).0
+        let (data, response) = try await URLSession.shared.data(from: url)
+        return try MCPOAuthSetup.validate(data: data, response: response, url: url)
     }) {
         self.fetch = fetch
+    }
+
+    /// Rejects a response that carries a failing HTTP status.
+    ///
+    /// Without this, a `404` body is handed to `JSONDecoder` and "there is nothing at that
+    /// URL" arrives as "the JSON was malformed" — a diagnostic that sends the reader to the
+    /// wrong place entirely. A response with no HTTP status is not judged, so injected
+    /// fetches and non-HTTP schemes keep working.
+    ///
+    /// - Parameters:
+    ///   - data: The body as received.
+    ///   - response: The response, if the transport produced one.
+    ///   - url: The URL requested, carried into the error so the caller knows where we looked.
+    /// - Returns: `data`, unchanged, when the status is a success or absent.
+    /// - Throws: ``MCPOAuthError/metadataNotFound(url:status:)`` for any non-2xx status.
+    public static func validate(data: Data, response: URLResponse?, url: URL) throws -> Data {
+        guard let http = response as? HTTPURLResponse else { return data }
+        guard (200...299).contains(http.statusCode) else {
+            throw MCPOAuthError.metadataNotFound(url: url, status: http.statusCode)
+        }
+        return data
+    }
+
+    /// The candidate metadata URLs for a server, most specific first.
+    ///
+    /// RFC 9728 §3.1 inserts the well-known segment *between the host and the server's
+    /// path*, giving `https://host/.well-known/oauth-protected-resource/path`. Appending it
+    /// to the end of the path instead — the obvious-looking mistake — produces a URL that
+    /// 404s against every server whose MCP endpoint is not at an origin root.
+    ///
+    /// Servers at an origin root publish at the bare well-known path, and some servers with
+    /// a path publish there too, so that location is tried second rather than assumed away.
+    /// A server with no path yields one candidate, not the same URL twice.
+    ///
+    /// - Parameter server: The MCP server's base URL.
+    /// - Returns: One or two URLs, in the order they should be attempted. Empty only if no
+    ///   URL could be formed at all.
+    public static func protectedResourceURLs(server: URL) -> [URL] {
+        guard var components = URLComponents(url: server, resolvingAgainstBaseURL: false) else {
+            return []
+        }
+        // Query and fragment belong to the MCP endpoint, not to its metadata document.
+        components.query = nil
+        components.fragment = nil
+
+        let wellKnown = "/.well-known/oauth-protected-resource"
+        // A pasted URL brings its trailing slash along; left in, it becomes an empty path
+        // segment and a different URL.
+        let path = server.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        var candidates: [URL] = []
+        if !path.isEmpty {
+            components.path = "\(wellKnown)/\(path)"
+            if let url = components.url { candidates.append(url) }
+        }
+        components.path = wellKnown
+        if let url = components.url { candidates.append(url) }
+        return candidates
     }
 
     /// Discovers how to authenticate against an MCP server.
@@ -139,8 +208,23 @@ public struct MCPOAuthSetup: Sendable {
     /// - Returns: The metadata.
     /// - Throws: ``MCPOAuthError`` or a transport error.
     public func protectedResourceMetadata(server: URL) async throws -> ProtectedResourceMetadata {
-        let url = server.appending(path: ".well-known/oauth-protected-resource")
-        return try JSONDecoder().decode(
-            ProtectedResourceMetadata.self, from: try await fetch(url))
+        let candidates = Self.protectedResourceURLs(server: server)
+        guard !candidates.isEmpty else {
+            throw MCPOAuthError.metadataNotFound(url: server, status: 0)
+        }
+
+        var lastError: (any Error)?
+        for candidate in candidates {
+            do {
+                return try JSONDecoder().decode(
+                    ProtectedResourceMetadata.self, from: try await fetch(candidate))
+            } catch {
+                // Keep going: a 404 at the RFC location is expected against servers that
+                // publish only at the origin root. The last failure is reported if every
+                // candidate is exhausted.
+                lastError = error
+            }
+        }
+        throw lastError ?? MCPOAuthError.metadataNotFound(url: server, status: 0)
     }
 }

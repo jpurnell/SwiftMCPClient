@@ -33,7 +33,7 @@ import NIOSSL
 /// behavior on macOS and Linux.
 public actor StreamableHTTPTransport: MCPTransport {
     private let url: URL
-    private let headers: [String: String]
+    private var headers: [String: String]
     private let connectionTimeout: TimeInterval
     private let trustSelfSignedCertificates: Bool
 
@@ -71,6 +71,26 @@ public actor StreamableHTTPTransport: MCPTransport {
         self.connectionTimeout = connectionTimeout
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
+
+    /// Replaces the `Authorization` header used by subsequent requests.
+    ///
+    /// An OAuth access token outlives neither a long survey of a server's tools nor, on some
+    /// providers, a lunch break. Rebuilding the transport to carry a refreshed token would
+    /// discard the session the server is tracking by `Mcp-Session-Id`; replacing the header
+    /// in place keeps it.
+    ///
+    /// - Parameter header: A complete header value, such as `"Bearer eyJ…"`. Passing `nil`
+    ///   removes the header, which is how a sign-out is expressed.
+    public func updateAuthorization(_ header: String?) {
+        if let header {
+            headers["Authorization"] = header
+        } else {
+            headers.removeValue(forKey: "Authorization")
+        }
+    }
+
+    /// The headers currently sent with each request. Test visibility only.
+    var currentHeaders: [String: String] { headers }
 
     /// Create the HTTP client for subsequent requests.
     public func connect() async throws {
@@ -151,11 +171,17 @@ public actor StreamableHTTPTransport: MCPTransport {
             sessionId = sid
         }
 
-        // Read response body — the JSON-RPC result
+        // Read response body — the JSON-RPC result, framed either as a single JSON
+        // document or as an SSE stream. The `Accept` header above promises to handle both,
+        // so the body cannot be assumed to be JSON just because a POST was sent.
         let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB limit
-        let responseData = Data(buffer: body)
-        if !responseData.isEmpty {
-            enqueueMessage(responseData)
+        let payloads = try StreamableHTTPBodyDecoder.decode(
+            body: Data(buffer: body),
+            contentType: response.headers.first(name: "Content-Type"))
+
+        // One SSE response may carry several messages; each is a separate `receive()`.
+        for payload in payloads {
+            enqueueMessage(payload)
         }
     }
 
