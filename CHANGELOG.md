@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - DocC guides referenced `client`, `transport`, `logger`, `args`, `resource`, and `myLLM`
   without ever defining them, and reused bindings across fences within one article.
 - OAuth protected-resource discovery now logs each candidate URL it fails on.
+- Two `Sendable` warnings in `LoopbackRedirectListener`: `CallbackHandler` now declares the
+  EventLoop confinement its doc comment already argued, and the deferred `context.close` goes
+  through `NIOLoopBound`.
 - Quality gate: 0 errors / 0 warnings across 40 checkers (from 135 errors / 10 warnings).
   Removed 118 force unwraps from the test suite.
 

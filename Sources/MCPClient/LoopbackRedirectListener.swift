@@ -158,9 +158,11 @@ public actor LoopbackRedirectListener {
 
 /// Answers HTTP requests until one is the callback.
 ///
-/// Not `Sendable`, and it does not need to be: NIO runs every handler for a channel on that
-/// channel's event loop, one at a time.
-private final class CallbackHandler: ChannelInboundHandler {
+/// NIO runs every handler for a channel on that channel's event loop, one at a time, so this
+/// type is never touched from two places at once. `addHandler` still requires the conformance,
+/// which is why it is spelled `@unchecked` rather than derived.
+// Justification: EventLoop-confined by NIO; both stored properties are immutable `let`s anyway.
+private final class CallbackHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -213,8 +215,11 @@ private final class CallbackHandler: ChannelInboundHandler {
         buffer.writeString(body)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
+        // `whenComplete` runs on this channel's event loop, so reaching the context there is
+        // safe — `NIOLoopBound` is how that gets stated to the compiler rather than assumed.
+        let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
+            boundContext.value.close(promise: nil)
         }
     }
 }
