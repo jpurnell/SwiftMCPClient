@@ -53,7 +53,7 @@ struct JSONRPCTypesTests {
             "result": {"score": 75}
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let response = try JSONDecoder().decode(JSONRPCResponse.self, from: data)
         #expect(response.jsonrpc == "2.0")
         #expect(response.id == 1)
@@ -73,7 +73,7 @@ struct JSONRPCTypesTests {
             }
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let response = try JSONDecoder().decode(JSONRPCResponse.self, from: data)
         #expect(response.result == nil)
         #expect(response.error?.code == -32601)
@@ -89,7 +89,7 @@ struct JSONRPCTypesTests {
             "result": "ok"
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let response = try JSONDecoder().decode(JSONRPCResponse.self, from: data)
         #expect(response.id == nil)
     }
@@ -171,7 +171,7 @@ struct JSONRPCTypesTests {
             }
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let response = try JSONDecoder().decode(JSONRPCResponse.self, from: data)
         #expect(response.error?.code == -32602)
         #expect(response.error?.data == .object([

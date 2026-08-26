@@ -30,15 +30,16 @@ print("Connected to \(info.serverInfo.name) v\(info.serverInfo.version)")
 For local development, use ``StdioTransport`` to launch a server process:
 
 ```swift
-let transport = StdioTransport(
+let stdioTransport = StdioTransport(
     command: "npx",
     arguments: ["-y", "@anthropic/my-mcp-server"]
 )
-let client = MCPClientConnection(transport: transport)
-let info = try await client.initialize(
+let stdioClient = MCPClientConnection(transport: stdioTransport)
+let stdioInfo = try await stdioClient.initialize(
     clientName: "my-app",
     clientVersion: "1.0.0"
 )
+print("Connected to \(stdioInfo.serverInfo.name)")
 ```
 
 ## Discover Available Tools
@@ -71,11 +72,11 @@ let result = try await client.callTool(
     ]
 )
 
-// Check for tool-level errors
-if result.isError == true {
-    print("Tool error: \(result.content.first?.text ?? "Unknown")")
+// Content is an enum, so match the case rather than reaching for a property.
+if case .text(let output, _)? = result.content.first {
+    print(result.isError == true ? "Tool error: \(output)" : output)
 } else {
-    print(result.content.first?.text ?? "No output")
+    print("No text content returned")
 }
 ```
 
@@ -85,12 +86,12 @@ MCPClient uses ``MCPError`` for protocol-level failures:
 
 ```swift
 do {
-    let result = try await client.callTool(name: "nonexistent_tool")
+    _ = try await client.callTool(name: "nonexistent_tool")
 } catch let error as MCPError {
     switch error {
     case .connectionFailed(let reason):
         print("Connection failed: \(reason)")
-    case .requestFailed(let code, let message):
+    case .requestFailed(let code, let message, _):
         print("Server error \(code): \(message)")
     case .timeout:
         print("Request timed out")

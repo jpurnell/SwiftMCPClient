@@ -8,6 +8,15 @@ MCPClient v1.0.0 introduces two breaking changes to improve MCP specification
 compliance. Both are straightforward to migrate. This guide shows before/after
 code for each change, plus highlights the new features available in v1.0.
 
+Every example below runs against this connection:
+
+```swift
+import MCPClient
+
+let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
+let client = MCPClientConnection(transport: transport)
+```
+
 ## MCPContent is now a discriminated union
 
 The biggest change: ``MCPContent`` was previously a struct with optional fields.
@@ -16,6 +25,7 @@ It is now an enum with cases for each content type, matching the MCP spec's
 
 ### Before (v0.4.0)
 
+<!-- docs:illustrative -->
 ```swift
 let result = try await client.callTool(name: "analyze", arguments: [:])
 for block in result.content {
@@ -33,12 +43,11 @@ for block in result.content {
     switch block {
     case .text(let str, let annotations):
         print(str)
-    case .image(let data, let mimeType, _):
-        // Handle base64 image
-        break
+        if let annotations { print("  annotations: \(annotations)") }
+    case .image(let base64, let mimeType, _):
+        print("image (\(mimeType)), \(base64.count) base64 characters")
     case .resource(let contents, _):
-        // Handle embedded resource
-        break
+        print("embedded resource: \(contents)")
     }
 }
 ```
@@ -57,6 +66,7 @@ JSON-RPC error's `data` payload.
 
 ### Before (v0.4.0)
 
+<!-- docs:illustrative -->
 ```swift
 do {
     _ = try await client.callTool(name: "broken")
@@ -80,6 +90,7 @@ do {
 
 If you don't need the data field, use a wildcard:
 
+<!-- docs:illustrative -->
 ```swift
 } catch MCPError.requestFailed(let code, let message, _) {
 ```
@@ -92,7 +103,7 @@ Declare client capabilities during initialization:
 
 ```swift
 let caps = ClientCapabilities(roots: RootsCapability(listChanged: true))
-let result = try await client.initialize(
+let initializeResult = try await client.initialize(
     clientName: "my-app",
     clientVersion: "1.0",
     capabilities: caps
@@ -104,7 +115,7 @@ let result = try await client.initialize(
 Track progress for long-running tool calls:
 
 ```swift
-let result = try await client.callTool(
+let progressResult = try await client.callTool(
     name: "slow_analysis",
     arguments: ["url": .string("https://example.com")],
     progressToken: .string("analysis-1")
@@ -124,7 +135,7 @@ try await client.disconnect()
 Configure per-connection timeout:
 
 ```swift
-let client = MCPClientConnection(
+let patientClient = MCPClientConnection(
     transport: transport,
     requestTimeout: .seconds(60)
 )
@@ -135,11 +146,19 @@ let client = MCPClientConnection(
 Handle server requests for LLM completions:
 
 ```swift
+// Stand-in for whichever model you call.
+struct MyLLM {
+    func complete(_ messages: [MCPSamplingMessage]) async throws -> String {
+        "a completion for \(messages.count) message(s)"
+    }
+}
+let myLLM = MyLLM()
+
 await client.setSamplingHandler { request in
     let response = try await myLLM.complete(request.messages)
     return MCPSamplingResult(
         role: .assistant,
-        content: .text(response.text),
+        content: .text(response),
         model: "my-model",
         stopReason: "endTurn"
     )
@@ -151,11 +170,11 @@ await client.setSamplingHandler { request in
 Subscribe to specific notification types:
 
 ```swift
-for await progress in client.progressUpdates {
+for await progress in await client.progressUpdates {
     print("Progress: \(progress.progress)/\(progress.total ?? 0)")
 }
 
-for await message in client.logMessages {
+for await message in await client.logMessages {
     print("[\(message.level)] \(message.data)")
 }
 ```
@@ -165,7 +184,7 @@ for await message in client.logMessages {
 Connect via WebSocket instead of HTTP/SSE:
 
 ```swift
-let transport = WebSocketTransport(
+let webSocketTransport = WebSocketTransport(
     url: URL(string: "wss://mcp.example.com/ws")!,
     headers: ["Authorization": "Bearer token"]
 )

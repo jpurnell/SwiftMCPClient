@@ -57,7 +57,7 @@ actor MockTransportState {
 }
 
 /// Mock transport conforming to MCPTransport for deterministic testing.
-public final class MockTransport: MCPTransport, @unchecked Sendable {
+public final class MockTransport: MCPTransport, Sendable {
     let state: MockTransportState
 
     public init() {

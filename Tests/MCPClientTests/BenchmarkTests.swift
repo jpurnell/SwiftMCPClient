@@ -113,15 +113,15 @@ struct BenchmarkTests {
 
         let responseData = """
         {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}
-        """.data(using: .utf8)!
+        """.utf8Data
 
         let notificationData = """
         {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":0.5}}
-        """.data(using: .utf8)!
+        """.utf8Data
 
         let requestData = """
         {"jsonrpc":"2.0","id":99,"method":"roots/list"}
-        """.data(using: .utf8)!
+        """.utf8Data
 
         var classified = 0
         for _ in 1...iterations {

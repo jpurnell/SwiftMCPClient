@@ -142,6 +142,7 @@ struct CredentialStoreKeyTests {
 /// The real one prompts, behaves differently under an unsigned test bundle, and leaves items
 /// on the developer's machine. None of that exercises the logic being tested here, which is
 /// entirely about what happens on the second launch and on refusal.
+// Justification: every stored property is private and reached only under `lock`.
 private final class FakeKeychain: KeychainAccess, @unchecked Sendable {
 
     struct Key: Hashable {
@@ -149,42 +150,52 @@ private final class FakeKeychain: KeychainAccess, @unchecked Sendable {
         let account: String
     }
 
-    // Justification: every access is guarded by `lock`; no other state exists.
     private let lock = NSLock()
     private var storage: [Key: Data] = [:]
+    private var injectedReadStatus: OSStatus?
+    private var injectedWriteStatus: OSStatus?
 
     /// A status to return from reads instead of succeeding.
-    var readStatus: OSStatus?
+    var readStatus: OSStatus? {
+        get { withLock { injectedReadStatus } }
+        set { withLock { injectedReadStatus = newValue } }
+    }
 
     /// A status to return from writes instead of succeeding.
-    var writeStatus: OSStatus?
+    var writeStatus: OSStatus? {
+        get { withLock { injectedWriteStatus } }
+        set { withLock { injectedWriteStatus = newValue } }
+    }
 
     var items: [Key: Data] {
-        get {
-            lock.lock(); defer { lock.unlock() }
-            return storage
-        }
-        set {
-            lock.lock(); defer { lock.unlock() }
-            storage = newValue
-        }
+        get { withLock { storage } }
+        set { withLock { storage = newValue } }
+    }
+
+    private func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
     }
 
     func data(service: String, account: String) throws -> Data? {
-        if let readStatus { throw CredentialKeyError.keychain(readStatus) }
-        lock.lock(); defer { lock.unlock() }
-        return storage[Key(service: service, account: account)]
+        try withLock {
+            if let injectedReadStatus { throw CredentialKeyError.keychain(injectedReadStatus) }
+            return storage[Key(service: service, account: account)]
+        }
     }
 
     func store(_ data: Data, service: String, account: String) throws {
-        if let writeStatus { throw CredentialKeyError.keychain(writeStatus) }
-        lock.lock(); defer { lock.unlock() }
-        storage[Key(service: service, account: account)] = data
+        try withLock {
+            if let injectedWriteStatus { throw CredentialKeyError.keychain(injectedWriteStatus) }
+            storage[Key(service: service, account: account)] = data
+        }
     }
 
     func delete(service: String, account: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        storage.removeValue(forKey: Key(service: service, account: account))
+        withLock {
+            _ = storage.removeValue(forKey: Key(service: service, account: account))
+        }
     }
 }
 #endif

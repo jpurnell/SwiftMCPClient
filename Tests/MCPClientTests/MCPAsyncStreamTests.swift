@@ -43,7 +43,11 @@ struct MCPAsyncStreamTests {
             progressValues.append(p.progress)
             if progressValues.count >= 2 { break }
         }
-        #expect(progressValues == [0.5, 1.0])
+        // Exact IEEE 754 equality, deliberately: these are the wire values decoded, not
+        // computed, and 0.5 and 1.0 are both exactly representable. Nothing rounds.
+        let expected = [0.5, 1.0]
+        #expect(progressValues.count == expected.count)
+        #expect(zip(progressValues, expected).allSatisfy { $0.isEqual(to: $1) })
     }
 
     @Test("logMessages filters only log notifications")

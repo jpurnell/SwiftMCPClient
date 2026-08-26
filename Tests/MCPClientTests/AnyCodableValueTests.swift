@@ -75,56 +75,56 @@ struct AnyCodableValueTests {
 
     @Test("Decodes JSON string")
     func decodesString() throws {
-        let data = "\"hello\"".data(using: .utf8)!
+        let data = "\"hello\"".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .string("hello"))
     }
 
     @Test("Decodes JSON number as number")
     func decodesNumber() throws {
-        let data = "3.14".data(using: .utf8)!
+        let data = "3.14".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .number(3.14))
     }
 
     @Test("Decodes JSON integer as integer")
     func decodesInteger() throws {
-        let data = "42".data(using: .utf8)!
+        let data = "42".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .integer(42))
     }
 
     @Test("Decodes JSON true as bool")
     func decodesBoolTrue() throws {
-        let data = "true".data(using: .utf8)!
+        let data = "true".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .bool(true))
     }
 
     @Test("Decodes JSON false as bool")
     func decodesBoolFalse() throws {
-        let data = "false".data(using: .utf8)!
+        let data = "false".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .bool(false))
     }
 
     @Test("Decodes JSON null")
     func decodesNull() throws {
-        let data = "null".data(using: .utf8)!
+        let data = "null".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .null)
     }
 
     @Test("Decodes JSON array")
     func decodesArray() throws {
-        let data = "[1, \"two\", true]".data(using: .utf8)!
+        let data = "[1, \"two\", true]".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .array([.integer(1), .string("two"), .bool(true)]))
     }
 
     @Test("Decodes JSON object")
     func decodesObject() throws {
-        let data = "{\"key\": \"value\"}".data(using: .utf8)!
+        let data = "{\"key\": \"value\"}".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .object(["key": .string("value")]))
     }
@@ -136,7 +136,7 @@ struct AnyCodableValueTests {
         let json = """
         {"outer": {"inner": [1, 2, 3]}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         let expected = AnyCodableValue.object([
             "outer": .object([
@@ -148,49 +148,49 @@ struct AnyCodableValueTests {
 
     @Test("Decodes empty object")
     func decodesEmptyObject() throws {
-        let data = "{}".data(using: .utf8)!
+        let data = "{}".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .object([:]))
     }
 
     @Test("Decodes empty array")
     func decodesEmptyArray() throws {
-        let data = "[]".data(using: .utf8)!
+        let data = "[]".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .array([]))
     }
 
     @Test("Decodes empty string")
     func decodesEmptyString() throws {
-        let data = "\"\"".data(using: .utf8)!
+        let data = "\"\"".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .string(""))
     }
 
     @Test("Decodes zero as integer")
     func decodesZero() throws {
-        let data = "0".data(using: .utf8)!
+        let data = "0".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .integer(0))
     }
 
     @Test("Decodes negative integer")
     func decodesNegativeInteger() throws {
-        let data = "-5".data(using: .utf8)!
+        let data = "-5".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .integer(-5))
     }
 
     @Test("Decodes negative float")
     func decodesNegativeFloat() throws {
-        let data = "-3.14".data(using: .utf8)!
+        let data = "-3.14".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .number(-3.14))
     }
 
     @Test("Decodes very large integer")
     func decodesLargeInteger() throws {
-        let data = "999999999".data(using: .utf8)!
+        let data = "999999999".utf8Data
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
         #expect(value == .integer(999999999))
     }

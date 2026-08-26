@@ -13,11 +13,14 @@ exposed as an `AsyncStream` on ``MCPClientConnection``.
 Access the notification stream via ``MCPClientConnection/notifications``:
 
 ```swift
+import MCPClient
+
+let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
 let client = MCPClientConnection(transport: transport)
 _ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
 
 Task {
-    for await notification in client.notifications {
+    for await notification in await client.notifications {
         switch notification {
         case .progress(let p):
             print("Progress: \(p.progress)/\(p.total ?? 0)")

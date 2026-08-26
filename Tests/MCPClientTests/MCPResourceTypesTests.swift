@@ -26,7 +26,7 @@ struct MCPResourceTypesTests {
         let json = """
         {"audience": ["user"], "priority": 0.5}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let annotations = try JSONDecoder().decode(MCPAnnotations.self, from: data)
         #expect(annotations.audience == [.user])
         #expect(abs((annotations.priority ?? 0) - 0.5) < 1e-4)
@@ -83,7 +83,7 @@ struct MCPResourceTypesTests {
             "size": 4096
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let resource = try JSONDecoder().decode(MCPResource.self, from: data)
         #expect(resource.uri == "file:///logs/app.log")
         #expect(resource.name == "Application Logs")
@@ -100,7 +100,7 @@ struct MCPResourceTypesTests {
             "annotations": {"audience": ["user", "assistant"], "priority": 0.7}
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let resource = try JSONDecoder().decode(MCPResource.self, from: data)
         #expect(resource.annotations?.audience == [.user, .assistant])
         #expect(abs((resource.annotations?.priority ?? 0) - 0.7) < 1e-4)
@@ -166,7 +166,7 @@ struct MCPResourceTypesTests {
             "mimeType": "application/json"
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let template = try JSONDecoder().decode(MCPResourceTemplate.self, from: data)
         #expect(template.uriTemplate == "file:///users/{userId}/profile")
         #expect(template.name == "User Profile")
@@ -212,7 +212,7 @@ struct MCPResourceTypesTests {
         let json = """
         {"uri": "file:///readme.md", "mimeType": "text/markdown", "text": "# Hello"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let contents = try JSONDecoder().decode(MCPResourceContents.self, from: data)
         if case .text(let uri, let mime, let text) = contents {
             #expect(uri == "file:///readme.md")
@@ -228,7 +228,7 @@ struct MCPResourceTypesTests {
         let json = """
         {"uri": "file:///image.png", "mimeType": "image/png", "blob": "aGVsbG8="}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let contents = try JSONDecoder().decode(MCPResourceContents.self, from: data)
         if case .blob(let uri, let mime, let blob) = contents {
             #expect(uri == "file:///image.png")
@@ -244,7 +244,7 @@ struct MCPResourceTypesTests {
         let json = """
         {"uri": "file:///data.txt", "text": "content"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let contents = try JSONDecoder().decode(MCPResourceContents.self, from: data)
         if case .text(_, let mime, _) = contents {
             #expect(mime == nil)

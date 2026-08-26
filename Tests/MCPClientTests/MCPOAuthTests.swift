@@ -142,6 +142,7 @@ struct ProtectedResourceMetadataTests {
 // MARK: - Helpers
 
 private func url(_ string: String) -> URL {
+    // SECURITY: parses a literal written in the test source; nothing reaches this from a server.
     URL(string: string) ?? URL(fileURLWithPath: "/")
 }
 

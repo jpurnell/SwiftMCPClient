@@ -39,7 +39,7 @@ struct MCPTypesTests {
             }
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let tool = try JSONDecoder().decode(MCPTool.self, from: data)
         #expect(tool.name == "audit_meta_tags")
         #expect(tool.description == "Audit essential meta tags for SEO compliance.")
@@ -90,7 +90,7 @@ struct MCPTypesTests {
             ]
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPToolResult.self, from: data)
         #expect(result.content.count == 1)
         if case .text(let str, _) = result.content[0] {
@@ -110,7 +110,7 @@ struct MCPTypesTests {
             ]
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPToolResult.self, from: data)
         #expect(result.content.count == 2)
     }
@@ -125,7 +125,7 @@ struct MCPTypesTests {
             ]
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPToolResult.self, from: data)
         #expect(result.content.count == 2)
         if case .text(let str, _) = result.content[0] {
@@ -201,7 +201,7 @@ struct MCPTypesTests {
         let json = """
         {"type": "text", "text": "Score: 74.8"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPContent.self, from: data)
         if case .text(let str, _) = content {
             #expect(str == "Score: 74.8")
@@ -215,7 +215,7 @@ struct MCPTypesTests {
         let json = """
         {"type": "image", "data": "iVBOR...", "mimeType": "image/png"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPContent.self, from: data)
         if case .image(let imgData, let mime, _) = content {
             #expect(imgData == "iVBOR...")
@@ -230,7 +230,7 @@ struct MCPTypesTests {
         let json = """
         {"type": "resource", "resource": {"uri": "file:///a.txt", "text": "contents"}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPContent.self, from: data)
         if case .resource(let res, _) = content {
             if case .text(let uri, _, let text) = res {
@@ -249,7 +249,7 @@ struct MCPTypesTests {
         let json = """
         {"type": "text", "text": "hello", "annotations": {"audience": ["user"], "priority": 0.5}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPContent.self, from: data)
         if case .text(let str, let ann) = content {
             #expect(str == "hello")
@@ -292,7 +292,7 @@ struct MCPTypesTests {
         let json = """
         {"type": "video", "data": "abc"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(MCPContent.self, from: data)
         }
@@ -317,7 +317,7 @@ struct MCPTypesTests {
         let json = """
         {"tools": {"listChanged": false}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
         #expect(caps.tools?.listChanged == false)
         #expect(caps.resources == nil)
@@ -346,7 +346,7 @@ struct MCPTypesTests {
             "prompts": {"listChanged": true}
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
         #expect(caps.tools?.listChanged == true)
         #expect(caps.resources?.subscribe == true)
@@ -394,7 +394,7 @@ struct MCPTypesTests {
     func clientCapabilitiesEmptyEncodes() throws {
         let caps = ClientCapabilities()
         let data = try JSONEncoder().encode(caps)
-        let json = String(data: data, encoding: .utf8)!
+        let json = String(decoding: data, as: UTF8.self)
         #expect(json == "{}")
     }
 
@@ -414,7 +414,7 @@ struct MCPTypesTests {
             "logging": {}
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let caps = try JSONDecoder().decode(ServerCapabilities.self, from: data)
         #expect(caps.tools?.listChanged == true)
         #expect(caps.logging == LoggingCapability())
@@ -436,7 +436,7 @@ struct MCPTypesTests {
             }
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(InitializeResult.self, from: data)
         #expect(result.protocolVersion == "2024-11-05")
         #expect(result.capabilities.tools?.listChanged == true)

@@ -18,7 +18,7 @@ transport for production use.
 let transport = HTTPSSETransport(
     url: URL(string: "https://mcp.example.com/sse")!,
     headers: ["Authorization": "Bearer token123"],
-    timeout: 30
+    connectionTimeout: 30
 )
 let client = MCPClientConnection(transport: transport)
 let info = try await client.initialize(
@@ -44,13 +44,13 @@ communicates via newline-delimited JSON over stdin/stdout pipes. This is ideal
 for development and testing against locally-installed MCP servers.
 
 ```swift
-let transport = StdioTransport(
+let stdioTransport = StdioTransport(
     command: "/usr/local/bin/my-mcp-server",
     arguments: ["--verbose"],
     environment: ["MCP_LOG_LEVEL": "debug"]
 )
-let client = MCPClientConnection(transport: transport)
-let info = try await client.initialize(
+let stdioClient = MCPClientConnection(transport: stdioTransport)
+let stdioInfo = try await stdioClient.initialize(
     clientName: "dev-tool",
     clientVersion: "0.1.0"
 )

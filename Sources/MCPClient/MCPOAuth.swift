@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import SwiftOAuthCore
 import SwiftOAuthClient
 
@@ -220,8 +221,11 @@ public struct MCPOAuthSetup: Sendable {
                     ProtectedResourceMetadata.self, from: try await fetch(candidate))
             } catch {
                 // Keep going: a 404 at the RFC location is expected against servers that
-                // publish only at the origin root. The last failure is reported if every
-                // candidate is exhausted.
+                // publish only at the origin root. The last failure is rethrown below if
+                // every candidate is exhausted.
+                let logger = Logger(label: "MCPClient.MCPOAuth")
+                // logging: candidate URL and error needed to diagnose a discovery failure
+                logger.debug("protected-resource metadata not at \(candidate): \(error.localizedDescription)")
                 lastError = error
             }
         }

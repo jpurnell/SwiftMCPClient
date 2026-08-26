@@ -11,7 +11,7 @@ struct MCPMessageDispatcherTests {
     func parseResponse() {
         let json = """
         {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}
-        """.data(using: .utf8)!
+        """.utf8Data
         let msg = IncomingMessage.parse(json)
         if case .response(let r) = msg {
             #expect(r.id == 1)
@@ -29,7 +29,7 @@ struct MCPMessageDispatcherTests {
     func parseErrorResponse() {
         let json = """
         {"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Not found"}}
-        """.data(using: .utf8)!
+        """.utf8Data
         let msg = IncomingMessage.parse(json)
         if case .response(let r) = msg {
             #expect(r.id == 2)
@@ -43,7 +43,7 @@ struct MCPMessageDispatcherTests {
     func parseNotification() {
         let json = """
         {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1}}
-        """.data(using: .utf8)!
+        """.utf8Data
         let msg = IncomingMessage.parse(json)
         if case .notification(let method, _) = msg {
             #expect(method == "notifications/progress")
@@ -56,7 +56,7 @@ struct MCPMessageDispatcherTests {
     func parseIncomingRequest() {
         let json = """
         {"jsonrpc":"2.0","id":5,"method":"roots/list"}
-        """.data(using: .utf8)!
+        """.utf8Data
         let msg = IncomingMessage.parse(json)
         if case .request(let id, let method, _) = msg {
             #expect(id == 5)
@@ -68,7 +68,7 @@ struct MCPMessageDispatcherTests {
 
     @Test("Returns nil for invalid JSON")
     func parseInvalid() {
-        let data = "not json".data(using: .utf8)!
+        let data = "not json".utf8Data
         #expect(IncomingMessage.parse(data) == nil)
     }
 

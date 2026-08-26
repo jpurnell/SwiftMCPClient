@@ -36,7 +36,7 @@ struct MCPCompletionTypesTests {
         let json = """
         {"values": ["python", "pytorch", "pyside"], "total": 10, "hasMore": true}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPCompletionResult.self, from: data)
         #expect(result.values == ["python", "pytorch", "pyside"])
         #expect(result.total == 10)
@@ -48,7 +48,7 @@ struct MCPCompletionTypesTests {
         let json = """
         {"values": []}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPCompletionResult.self, from: data)
         #expect(result.values.isEmpty)
         #expect(result.total == nil)

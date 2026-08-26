@@ -87,7 +87,7 @@ struct LoopbackSocketTests {
 
         // Assigned, not fixed. RFC 8252 §7.3 requires the server to accept any port for
         // exactly this reason: a fixed one can be occupied.
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
         #expect(port > 0)
     }
 
@@ -108,7 +108,7 @@ struct LoopbackSocketTests {
     func callbackDelivered() async throws {
         let listener = LoopbackRedirectListener()
         let redirect = try await listener.start()
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
 
         async let received = listener.awaitCallback(timeout: .seconds(10))
 
@@ -133,7 +133,7 @@ struct LoopbackSocketTests {
     func errorCallbackDelivered() async throws {
         let listener = LoopbackRedirectListener()
         let redirect = try await listener.start()
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
 
         async let received = listener.awaitCallback(timeout: .seconds(10))
         try await get(port: port,
@@ -156,7 +156,7 @@ struct LoopbackSocketTests {
     func otherPathDoesNotEndTheWait() async throws {
         let listener = LoopbackRedirectListener()
         let redirect = try await listener.start()
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
 
         async let received = listener.awaitCallback(timeout: .seconds(10))
 
@@ -190,7 +190,7 @@ struct LoopbackSocketTests {
     func stoppedListenerRefuses() async throws {
         let listener = LoopbackRedirectListener()
         let redirect = try await listener.start()
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
         await listener.stop()
 
         // Give the socket a moment to actually close before asserting on it.
@@ -212,7 +212,7 @@ struct LoopbackSocketTests {
 
 /// Makes a real HTTP GET against the loopback listener.
 private func get(port: Int, target: String) async throws {
-    guard let url = URL(string: "http://127.0.0.1:\(port)\(target)") else {
+    guard let url = loopbackURL(port: port, target: target) else {
         throw LoopbackError.malformedRequest
     }
     var request = URLRequest(url: url)

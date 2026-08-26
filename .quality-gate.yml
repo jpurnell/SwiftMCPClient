@@ -8,3 +8,8 @@ consistency:
 status:
   guidelinesPath: "."
   masterPlanPath: project/master_plan.md
+
+# The subprocess kernel: the single file allowed to construct a Process and read its pipes.
+# StdioTransport spawns MCP servers through it rather than blocking on availableData itself.
+boundedIO:
+  kernelPath: Sources/MCPClient/Transport/ProcessRunner.swift

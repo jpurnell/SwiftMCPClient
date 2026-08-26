@@ -34,7 +34,7 @@ struct StdioTransportTests {
 
         // cat echoes stdin to stdout — send a JSON-RPC message, get it back
         let message = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
-        let data = message.data(using: .utf8)!
+        let data = message.utf8Data
         try await transport.send(data)
 
         let received = try await transport.receive()
@@ -51,7 +51,7 @@ struct StdioTransportTests {
 
         for i in 1...3 {
             let msg = "{\"jsonrpc\":\"2.0\",\"id\":\(i),\"method\":\"ping\"}"
-            try await transport.send(msg.data(using: .utf8)!)
+            try await transport.send(msg.utf8Data)
             let received = try await transport.receive()
             let text = String(data: received, encoding: .utf8)
             #expect(text == msg)
@@ -74,7 +74,7 @@ struct StdioTransportTests {
     @Test("Send throws when not connected")
     func sendBeforeConnect() async throws {
         let transport = StdioTransport(command: "/bin/cat")
-        let data = "test".data(using: .utf8)!
+        let data = "test".utf8Data
 
         await #expect(throws: MCPError.self) {
             try await transport.send(data)
@@ -98,7 +98,7 @@ struct StdioTransportTests {
         try await transport.connect()
         try await transport.disconnect()
         // Verify send throws after disconnect (transport is closed)
-        let data = "test".data(using: .utf8)!
+        let data = "test".utf8Data
         await #expect(throws: MCPError.self) {
             try await transport.send(data)
         }
@@ -109,7 +109,7 @@ struct StdioTransportTests {
         let transport = StdioTransport(command: "/bin/cat")
         try await transport.disconnect()
         // Verify the transport is still in a valid state (send should throw not-connected error)
-        let data = "test".data(using: .utf8)!
+        let data = "test".utf8Data
         await #expect(throws: MCPError.self) {
             try await transport.send(data)
         }
@@ -121,7 +121,7 @@ struct StdioTransportTests {
         try await transport.connect()
         try await transport.disconnect()
 
-        let data = "test".data(using: .utf8)!
+        let data = "test".utf8Data
         await #expect(throws: MCPError.self) {
             try await transport.send(data)
         }

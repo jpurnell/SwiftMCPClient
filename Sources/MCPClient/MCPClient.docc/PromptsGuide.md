@@ -10,6 +10,16 @@ ready to feed into an LLM conversation.
 
 ## List Available Prompts
 
+These examples run against an initialized connection:
+
+```swift
+import MCPClient
+
+let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
+let client = MCPClientConnection(transport: transport)
+_ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+```
+
 Call ``MCPClientConnection/listPrompts()`` to discover what the server offers:
 
 ```swift
@@ -38,9 +48,9 @@ for message in result.messages {
     switch message.content {
     case .text(let text, _):
         print(text)
-    case .image(let data, let mimeType, _):
+    case .image(_, let mimeType, _):
         print("<image: \(mimeType)>")
-    case .resource(let contents, _):
+    case .resource:
         print("<resource>")
     }
 }
@@ -64,7 +74,7 @@ Arguments are always string-valued per the MCP specification. The
 the argument to be provided.
 
 ```swift
-let result = try await client.getPrompt(
+let summary = try await client.getPrompt(
     name: "summarize",
     arguments: [
         "text": "Long document text here...",

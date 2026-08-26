@@ -32,9 +32,7 @@ public actor StdioTransport: MCPTransport {
     private let arguments: [String]
     private let environment: [String: String]
 
-    private var process: Process?
-    private var stdinPipe: Pipe?
-    private var stdoutPipe: Pipe?
+    private var runner: ProcessRunner?
     private var bufferedLines: [String] = []
     private var readBuffer: String = ""
     private var isConnected: Bool = false
@@ -60,36 +58,12 @@ public actor StdioTransport: MCPTransport {
     ///
     /// - Throws: ``MCPError/processSpawnFailed(reason:)`` if the process cannot be launched.
     public func connect() async throws {
-        // SECURITY: command path and arguments are caller-controlled configuration, not user input
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: command)
-        proc.arguments = arguments
-
-        // Merge additional environment with current process environment
-        var env = ProcessInfo.processInfo.environment
-        for (key, value) in environment {
-            env[key] = value
-        }
-        proc.environment = env
-
-        let stdin = Pipe()
-        let stdout = Pipe()
-
-        proc.standardInput = stdin
-        proc.standardOutput = stdout
-        // Capture stderr to prevent it from mixing with our output
-        proc.standardError = Pipe()
-
-        do {
-            try proc.run()
-        } catch {
-            throw MCPError.processSpawnFailed(reason: error.localizedDescription)
-        }
-
-        self.process = proc
-        self.stdinPipe = stdin
-        self.stdoutPipe = stdout
-        self.isConnected = true
+        runner = try ProcessRunner(
+            command: command,
+            arguments: arguments,
+            environment: environment
+        )
+        isConnected = true
     }
 
     /// Close the subprocess connection.
@@ -100,34 +74,12 @@ public actor StdioTransport: MCPTransport {
     /// 3. Send SIGTERM if still running
     /// 4. Send SIGKILL as a last resort
     public func disconnect() async throws {
-        guard let proc = process else { return }
+        guard let runner else { return }
 
         isConnected = false
+        await runner.shutdown()
 
-        // Close stdin to signal the server to shut down
-        stdinPipe?.fileHandleForWriting.closeFile()
-
-        // Give the process time to exit gracefully
-        if proc.isRunning {
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
-        // SIGTERM if still running
-        if proc.isRunning {
-            proc.terminate()
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
-        // SIGKILL as last resort
-        #if os(macOS)
-        if proc.isRunning {
-            kill(proc.processIdentifier, SIGKILL)
-        }
-        #endif
-
-        process = nil
-        stdinPipe = nil
-        stdoutPipe = nil
+        self.runner = nil
         bufferedLines = []
         readBuffer = ""
     }
@@ -141,11 +93,11 @@ public actor StdioTransport: MCPTransport {
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if not connected.
     /// - Throws: ``MCPError/transportClosed`` if the process has exited.
     public func send(_ data: Data) async throws {
-        guard isConnected, let pipe = stdinPipe, let proc = process else {
+        guard isConnected, let runner else {
             throw MCPError.connectionFailed(reason: "StdioTransport is not connected")
         }
 
-        guard proc.isRunning else {
+        guard runner.isRunning else {
             isConnected = false
             throw MCPError.transportClosed
         }
@@ -153,7 +105,7 @@ public actor StdioTransport: MCPTransport {
         // Write data + newline delimiter
         var messageData = data
         messageData.append(contentsOf: [0x0A]) // newline
-        pipe.fileHandleForWriting.write(messageData)
+        try runner.write(messageData)
     }
 
     /// Receive the next JSON-RPC message from the subprocess via stdout.
@@ -165,7 +117,7 @@ public actor StdioTransport: MCPTransport {
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if not connected.
     /// - Throws: ``MCPError/transportClosed`` if the process has exited and no data remains.
     public func receive() async throws -> Data {
-        guard isConnected, let pipe = stdoutPipe else {
+        guard isConnected, let runner else {
             throw MCPError.connectionFailed(reason: "StdioTransport is not connected")
         }
 
@@ -179,11 +131,8 @@ public actor StdioTransport: MCPTransport {
         }
 
         // Read from stdout until we get a complete line
-        let handle = pipe.fileHandleForReading
         while !Task.isCancelled {
-            let chunk = handle.availableData
-
-            if chunk.isEmpty {
+            guard let chunk = await runner.nextChunk() else {
                 // EOF — process closed stdout
                 isConnected = false
                 throw MCPError.transportClosed
@@ -195,8 +144,10 @@ public actor StdioTransport: MCPTransport {
 
             readBuffer.append(text)
 
-            // Split on newlines
-            let lines = readBuffer.split(separator: "\n", omittingEmptySubsequences: false)
+            // Split on newlines. `whereSeparator` matches any newline Character, so a server
+            // that terminates with "\r\n" frames correctly — "\r\n" is one Character, and
+            // splitting on the "\n" literal would never match it.
+            let lines = readBuffer.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
             if lines.count > 1 {
                 // We have at least one complete line
                 for i in 0..<(lines.count - 1) {

@@ -8,15 +8,15 @@ struct HTTPSSETransportTests {
     // MARK: - Initialization
 
     @Test("Initializes with URL and default parameters")
-    func initWithDefaults() {
-        _ = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
+    func initWithDefaults() throws {
+        _ = HTTPSSETransport(url: try requireURL("https://mcp.example.com/sse"))
         #expect(Bool(true), "Transport initialized successfully")
     }
 
     @Test("Initializes with custom headers and timeout")
-    func initWithCustomParams() {
+    func initWithCustomParams() throws {
         _ = HTTPSSETransport(
-            url: URL(string: "https://mcp.example.com/sse")!,
+            url: try requireURL("https://mcp.example.com/sse"),
             headers: ["Authorization": "Bearer token123"],
             connectionTimeout: 60.0,
             maxReconnectAttempts: 5,
@@ -26,9 +26,9 @@ struct HTTPSSETransportTests {
     }
 
     @Test("Initializes with self-signed certificate trust")
-    func initWithSelfSignedTrust() {
+    func initWithSelfSignedTrust() throws {
         _ = HTTPSSETransport(
-            url: URL(string: "https://mcp.example.com/sse")!,
+            url: try requireURL("https://mcp.example.com/sse"),
             trustSelfSignedCertificates: true
         )
         #expect(Bool(true), "Transport initialized successfully")
@@ -37,9 +37,9 @@ struct HTTPSSETransportTests {
     // MARK: - Send/Receive Before Connect
 
     @Test("Send throws connectionFailed when not connected")
-    func sendThrowsWhenNotConnected() async {
+    func sendThrowsWhenNotConnected() async throws {
         let transport = HTTPSSETransport(
-            url: URL(string: "https://mcp.example.com/sse")!
+            url: try requireURL("https://mcp.example.com/sse")
         )
 
         let data = "{}".data(using: .utf8) ?? Data()
@@ -58,9 +58,9 @@ struct HTTPSSETransportTests {
     }
 
     @Test("Receive throws connectionFailed when not connected")
-    func receiveThrowsWhenNotConnected() async {
+    func receiveThrowsWhenNotConnected() async throws {
         let transport = HTTPSSETransport(
-            url: URL(string: "https://mcp.example.com/sse")!
+            url: try requireURL("https://mcp.example.com/sse")
         )
 
         do {
@@ -82,7 +82,7 @@ struct HTTPSSETransportTests {
     @Test("Disconnect without connect does not throw")
     func disconnectWithoutConnect() async throws {
         let transport = HTTPSSETransport(
-            url: URL(string: "https://mcp.example.com/sse")!
+            url: try requireURL("https://mcp.example.com/sse")
         )
         try await transport.disconnect()
         // Verify transport is still in a valid state after disconnect
@@ -92,9 +92,9 @@ struct HTTPSSETransportTests {
     // MARK: - Connect Errors
 
     @Test("Connect throws connectionFailed when server unreachable")
-    func connectThrowsOnUnreachable() async {
+    func connectThrowsOnUnreachable() async throws {
         let transport = HTTPSSETransport(
-            url: URL(string: "https://localhost:1/sse")!,
+            url: try requireURL("https://localhost:1/sse"),
             connectionTimeout: 2.0,
             maxReconnectAttempts: 0
         )

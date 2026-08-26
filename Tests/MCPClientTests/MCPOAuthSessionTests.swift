@@ -97,11 +97,11 @@ struct RedirectURITests {
         let redirect = try await listener.start()
         defer { Task { await listener.stop() } }
 
-        let port = try #require(URL(string: redirect)?.port)
+        let port = try loopbackPort(of: redirect)
 
         // Something is genuinely accepting on that port.
         async let received = listener.awaitCallback(timeout: .seconds(5))
-        guard let probe = URL(string: "http://127.0.0.1:\(port)/callback?code=c&state=s") else {
+        guard let probe = loopbackURL(port: port, target: "/callback?code=c&state=s") else {
             Issue.record("could not build the probe URL")
             return
         }
@@ -119,6 +119,9 @@ struct RedirectURITests {
         let redirect = try await listener.start()
         await listener.stop()
 
+        // This is the loopback-host check itself, so it cannot delegate to a helper that
+        // has already made the same check.
+        // SECURITY: the host is asserted against the loopback literal on the next line.
         let url = try #require(URL(string: redirect))
         #expect(url.host() == "127.0.0.1")
         #expect(url.host() != "0.0.0.0")

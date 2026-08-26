@@ -24,7 +24,7 @@ struct MCPRootTypesTests {
         let json = """
         {"uri": "file:///project", "name": "My Project"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let root = try JSONDecoder().decode(MCPRoot.self, from: data)
         #expect(root.uri == "file:///project")
         #expect(root.name == "My Project")

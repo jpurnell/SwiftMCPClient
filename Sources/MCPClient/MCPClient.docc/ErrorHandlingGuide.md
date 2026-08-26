@@ -121,8 +121,13 @@ do {
 ### Use exhaustive switch for robust handling
 
 ```swift
+import Logging
+
+let logger = Logger(label: "com.example.my-app")
+let args: [String: AnyCodableValue] = ["url": .string("https://example.com")]
+
 do {
-    let result = try await client.callTool(name: "analyze", arguments: args)
+    _ = try await client.callTool(name: "analyze", arguments: args)
     // handle result
 } catch let error as MCPError {
     switch error {

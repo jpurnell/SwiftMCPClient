@@ -55,7 +55,7 @@ struct MCPSamplingTypesTests {
             "systemPrompt": "Be concise"
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let request = try JSONDecoder().decode(MCPSamplingRequest.self, from: data)
         #expect(request.messages.count == 1)
         #expect(request.maxTokens == 50)
@@ -113,7 +113,7 @@ struct MCPSamplingTypesTests {
             "intelligencePriority": 0.5
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let prefs = try JSONDecoder().decode(MCPModelPreferences.self, from: data)
         #expect(prefs.hints?.count == 2)
         #expect(prefs.hints?[1].name == "claude")

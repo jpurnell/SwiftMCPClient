@@ -513,7 +513,7 @@ struct MCPClientConnectionTests {
         // Verify the ping request was sent correctly
         let sent = await transport.sentMessages()
         // initialize request + notification + ping = 3
-        let pingData = sent.last!
+        let pingData = try #require(sent.last)
         let request = try JSONDecoder().decode(JSONRPCRequest.self, from: pingData)
         #expect(request.method == "ping")
     }
@@ -844,7 +844,7 @@ struct MCPClientConnectionTests {
         _ = try await client.listResources()
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "resources/list")
     }
 
@@ -975,7 +975,7 @@ struct MCPClientConnectionTests {
         _ = try await client.readResource(uri: "file:///a.txt")
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "resources/read")
         if case .object(let params) = request.params {
             #expect(params["uri"] == .string("file:///a.txt"))
@@ -996,7 +996,7 @@ struct MCPClientConnectionTests {
         try await client.subscribeResource(uri: "file:///watched.log")
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "resources/subscribe")
         if case .object(let params) = request.params {
             #expect(params["uri"] == .string("file:///watched.log"))
@@ -1015,7 +1015,7 @@ struct MCPClientConnectionTests {
         try await client.unsubscribeResource(uri: "file:///watched.log")
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "resources/unsubscribe")
         if case .object(let params) = request.params {
             #expect(params["uri"] == .string("file:///watched.log"))
@@ -1093,7 +1093,7 @@ struct MCPClientConnectionTests {
         _ = try await client.listPrompts()
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "prompts/list")
     }
 
@@ -1132,7 +1132,7 @@ struct MCPClientConnectionTests {
         _ = try await client.getPrompt(name: "greet", arguments: ["name": "Alice"])
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "prompts/get")
         if case .object(let params) = request.params {
             #expect(params["name"] == .string("greet"))
@@ -1215,7 +1215,7 @@ struct MCPClientConnectionTests {
         try await client.setLogLevel(.warning)
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "logging/setLevel")
         if case .object(let params) = request.params {
             #expect(params["level"] == .string("warning"))
@@ -1233,7 +1233,7 @@ struct MCPClientConnectionTests {
         try await client.cancelRequest(id: 5, reason: "User cancelled")
 
         let sent = await transport.sentMessages()
-        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: #require(sent.last))
         #expect(json["method"] == .string("notifications/cancelled"))
         #expect(json["id"] == nil) // Notifications have no id
         if case .object(let params) = json["params"] {
@@ -1251,7 +1251,7 @@ struct MCPClientConnectionTests {
         try await client.cancelRequest(id: 3)
 
         let sent = await transport.sentMessages()
-        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: #require(sent.last))
         if case .object(let params) = json["params"] {
             #expect(params["requestId"] == .integer(3))
             #expect(params["reason"] == nil)
@@ -1280,7 +1280,7 @@ struct MCPClientConnectionTests {
         #expect(result.hasMore == true)
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         #expect(request.method == "completion/complete")
         if case .object(let params) = request.params,
            case .object(let ref) = params["ref"] {
@@ -1307,7 +1307,7 @@ struct MCPClientConnectionTests {
         #expect(result.values == ["users", "uploads"])
 
         let sent = await transport.sentMessages()
-        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: sent.last!)
+        let request = try JSONDecoder().decode(JSONRPCRequest.self, from: #require(sent.last))
         if case .object(let params) = request.params,
            case .object(let ref) = params["ref"] {
             #expect(ref["type"] == .string("ref/resource"))
@@ -1410,7 +1410,7 @@ struct MCPClientConnectionTests {
         try await client.notifyRootsChanged()
 
         let sent = await transport.sentMessages()
-        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: sent.last!)
+        let json = try JSONDecoder().decode([String: AnyCodableValue].self, from: #require(sent.last))
         #expect(json["method"] == .string("notifications/roots/list_changed"))
         #expect(json["id"] == nil)
     }

@@ -10,8 +10,17 @@ unique URI and optional metadata like MIME type and size.
 
 ## List Available Resources
 
-After initialization, call ``MCPClientConnection/listResources()`` to discover
-what the server exposes:
+These examples run against an initialized connection:
+
+```swift
+import MCPClient
+
+let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
+let client = MCPClientConnection(transport: transport)
+_ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+```
+
+Call ``MCPClientConnection/listResources()`` to discover what the server exposes:
 
 ```swift
 let resources = try await client.listResources()
@@ -34,9 +43,9 @@ Use ``MCPClientConnection/readResource(uri:)`` to fetch the actual content:
 let contents = try await client.readResource(uri: "file:///logs/app.log")
 for item in contents {
     switch item {
-    case .text(let uri, let mimeType, let text):
+    case .text(let uri, _, let text):
         print("Text from \(uri): \(text.prefix(100))...")
-    case .blob(let uri, let mimeType, let blob):
+    case .blob(let uri, _, let blob):
         print("Binary from \(uri): \(blob.count) bytes (base64)")
     }
 }
@@ -61,7 +70,7 @@ for template in templates {
 Expand the template with concrete values, then read it:
 
 ```swift
-let contents = try await client.readResource(uri: "file:///users/42/profile")
+let profile = try await client.readResource(uri: "file:///users/42/profile")
 ```
 
 ## Subscriptions
@@ -84,7 +93,8 @@ Resources and templates may carry ``MCPAnnotations`` with audience and
 priority hints:
 
 ```swift
-if let annotations = resource.annotations {
+for resource in try await client.listResources() {
+    guard let annotations = resource.annotations else { continue }
     print("Audience: \(annotations.audience ?? [])")
     print("Priority: \(annotations.priority ?? 0)")
 }

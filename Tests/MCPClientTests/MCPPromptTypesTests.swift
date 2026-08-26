@@ -41,7 +41,7 @@ struct MCPPromptTypesTests {
             ]
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let prompt = try JSONDecoder().decode(MCPPrompt.self, from: data)
         #expect(prompt.name == "code_review")
         #expect(prompt.arguments?.count == 2)
@@ -144,7 +144,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"type": "text", "text": "Hello"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPPromptContent.self, from: data)
         if case .text(let text, _) = content {
             #expect(text == "Hello")
@@ -158,7 +158,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"type": "image", "data": "iVBOR...", "mimeType": "image/png"}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPPromptContent.self, from: data)
         if case .image(let imgData, let mime, _) = content {
             #expect(imgData == "iVBOR...")
@@ -173,7 +173,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"type": "resource", "resource": {"uri": "file:///a.txt", "text": "content"}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPPromptContent.self, from: data)
         if case .resource(let r, _) = content {
             if case .text(let uri, _, let text) = r {
@@ -192,7 +192,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"type": "text", "text": "Hi", "annotations": {"audience": ["assistant"], "priority": 0.5}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let content = try JSONDecoder().decode(MCPPromptContent.self, from: data)
         if case .text(_, let annotations) = content {
             #expect(annotations?.audience == [.assistant])
@@ -251,7 +251,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"role": "user", "content": {"type": "text", "text": "Analyze this"}}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let message = try JSONDecoder().decode(MCPPromptMessage.self, from: data)
         #expect(message.role == .user)
     }
@@ -287,7 +287,7 @@ struct MCPPromptTypesTests {
             ]
         }
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPPromptResult.self, from: data)
         #expect(result.description == "Code review prompt")
         #expect(result.messages.count == 2)
@@ -300,7 +300,7 @@ struct MCPPromptTypesTests {
         let json = """
         {"messages": [{"role": "user", "content": {"type": "text", "text": "Hi"}}]}
         """
-        let data = json.data(using: .utf8)!
+        let data = json.utf8Data
         let result = try JSONDecoder().decode(MCPPromptResult.self, from: data)
         #expect(result.description == nil)
         #expect(result.messages.count == 1)

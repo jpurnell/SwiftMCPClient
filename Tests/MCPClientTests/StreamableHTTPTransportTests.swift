@@ -8,15 +8,15 @@ struct StreamableHTTPTransportTests {
     // MARK: - Initialization
 
     @Test("Initializes with URL and default parameters")
-    func initWithDefaults() {
-        _ = StreamableHTTPTransport(url: URL(string: "https://mcp.example.com/mcp")!)
+    func initWithDefaults() throws {
+        _ = StreamableHTTPTransport(url: try requireURL("https://mcp.example.com/mcp"))
         #expect(Bool(true), "Transport initialized successfully")
     }
 
     @Test("Initializes with custom headers and timeout")
-    func initWithCustomParams() {
+    func initWithCustomParams() throws {
         _ = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!,
+            url: try requireURL("https://mcp.example.com/mcp"),
             headers: ["Authorization": "Bearer token123"],
             connectionTimeout: 60.0,
             trustSelfSignedCertificates: false
@@ -25,9 +25,9 @@ struct StreamableHTTPTransportTests {
     }
 
     @Test("Initializes with self-signed certificate trust")
-    func initWithSelfSignedTrust() {
+    func initWithSelfSignedTrust() throws {
         _ = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!,
+            url: try requireURL("https://mcp.example.com/mcp"),
             trustSelfSignedCertificates: true
         )
         #expect(Bool(true), "Transport initialized successfully")
@@ -36,9 +36,9 @@ struct StreamableHTTPTransportTests {
     // MARK: - Send/Receive Before Connect
 
     @Test("Send throws connectionFailed when not connected")
-    func sendThrowsWhenNotConnected() async {
+    func sendThrowsWhenNotConnected() async throws {
         let transport = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!
+            url: try requireURL("https://mcp.example.com/mcp")
         )
 
         let data = "{}".data(using: .utf8) ?? Data()
@@ -57,9 +57,9 @@ struct StreamableHTTPTransportTests {
     }
 
     @Test("Receive throws connectionFailed when not connected")
-    func receiveThrowsWhenNotConnected() async {
+    func receiveThrowsWhenNotConnected() async throws {
         let transport = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!
+            url: try requireURL("https://mcp.example.com/mcp")
         )
 
         do {
@@ -81,7 +81,7 @@ struct StreamableHTTPTransportTests {
     @Test("Disconnect without connect does not throw")
     func disconnectWithoutConnect() async throws {
         let transport = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!
+            url: try requireURL("https://mcp.example.com/mcp")
         )
         try await transport.disconnect()
         #expect(Bool(true), "Transport initialized successfully")
@@ -90,9 +90,9 @@ struct StreamableHTTPTransportTests {
     // MARK: - Connect Errors
 
     @Test("Send throws connectionFailed when server unreachable")
-    func sendThrowsOnUnreachable() async {
+    func sendThrowsOnUnreachable() async throws {
         let transport = StreamableHTTPTransport(
-            url: URL(string: "https://localhost:1/mcp")!,
+            url: try requireURL("https://localhost:1/mcp"),
             connectionTimeout: 2.0
         )
 
@@ -124,7 +124,7 @@ struct StreamableHTTPTransportTests {
     @Test("Session ID is nil before initialization")
     func sessionIdNilBeforeInit() async throws {
         let transport = StreamableHTTPTransport(
-            url: URL(string: "https://mcp.example.com/mcp")!
+            url: try requireURL("https://mcp.example.com/mcp")
         )
         try? await transport.connect()
         let sessionId = await transport.sessionId
