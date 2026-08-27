@@ -13,3 +13,8 @@ status:
 # StdioTransport spawns MCP servers through it rather than blocking on availableData itself.
 boundedIO:
   kernelPath: Sources/MCPClient/Transport/ProcessRunner.swift
+
+# Refuse to trust a gate binary older than this. A stale binary silently runs
+# old rules; without this pin nothing says so. Ratchet on each deploy that the
+# repo depends on. Warns on every run; fails only under --strict.
+minimumGateVersion: "2026-08-26"
