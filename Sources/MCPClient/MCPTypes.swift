@@ -90,6 +90,7 @@ public struct MCPToolResult: Codable, Sendable, Equatable {
 /// ## Usage
 ///
 /// ```swift
+/// func inspect(client: any MCPClientProtocol) async throws {
 /// let result = try await client.callTool(name: "analyze", arguments: [:])
 /// for block in result.content {
 ///     switch block {
@@ -100,6 +101,7 @@ public struct MCPToolResult: Codable, Sendable, Equatable {
 ///     case .resource(let contents, _):
 ///         print("Resource: \(contents)")
 ///     }
+/// }
 /// }
 /// ```
 public enum MCPContent: Sendable, Equatable {

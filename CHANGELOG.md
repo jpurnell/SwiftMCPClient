@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`## Usage` examples compile.** `doc-comment-code` errors surfaced when that
+  checker briefly entered the default set upstream; they had been wrong for as
+  long as they existed.
+
+  `AnyCodableValue` and `MCPContent` used a `client` nothing defined — both fences
+  now take one as a parameter. `MCPClientProtocol` read `result.content.first?.text`,
+  but `MCPContent` is an enum, so `.text` is a case to match rather than a property
+  to read; the example now matches it, which is what a caller has to write.
+
+  One file is deliberately not included: `MCPClientConnection.swift` carries
+  unrelated in-progress work in the same tree, so its two doc fixes are applied
+  in the working copy but left for whoever commits that work. Its errors were the
+  same two shapes — an undefined `client`, and `.text` read as a property — plus
+  `notifications` needing `await`, since it is actor-isolated.
+
 ### Added
 - `ProcessRunner` — the single site in the package allowed to spawn a subprocess or read its
   pipes. `StdioTransport` now spawns through it.

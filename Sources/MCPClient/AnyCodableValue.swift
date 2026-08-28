@@ -11,6 +11,7 @@ import Foundation
 /// Build tool arguments as a dictionary of `AnyCodableValue`:
 ///
 /// ```swift
+/// func score(using client: any MCPClientProtocol) async throws {
 /// let arguments: [String: AnyCodableValue] = [
 ///     "ssr_score": .number(95),
 ///     "meta_tags_score": .number(75),
@@ -20,6 +21,8 @@ import Foundation
 ///     name: "score_technical_seo",
 ///     arguments: arguments
 /// )
+/// _ = result
+/// }
 /// ```
 ///
 /// Decode arbitrary JSON responses:

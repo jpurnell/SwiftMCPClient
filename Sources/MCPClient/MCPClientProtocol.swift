@@ -19,7 +19,13 @@ import Foundation
 ///         name: "score_technical_seo",
 ///         arguments: ["ssr_score": .number(95)]
 ///     )
-///     print(result.content.first?.text ?? "No output")
+///     // `content` is a list of MCPContent cases, not values with a `.text`
+///     // property — the first block has to be matched, not read through.
+///     if case .text(let str, _) = result.content.first {
+///         print(str)
+///     } else {
+///         print("No output")
+///     }
 /// }
 /// ```
 public protocol MCPClientProtocol: Sendable {
