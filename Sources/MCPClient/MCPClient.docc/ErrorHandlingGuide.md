@@ -10,16 +10,35 @@ to help diagnose and recover from problems.
 
 ## Error Cases
 
+Every example below is a function this guide defines but never calls. Each one
+needs a live server, and an example that reached for one would hang or crash
+here with no server to answer it. The compiler still checks each signature.
+
+```swift
+import MCPClient
+
+func connectedClient() async throws -> MCPClientConnection? {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return nil }
+    let client = MCPClientConnection(transport: HTTPSSETransport(url: url))
+    _ = try await client.initialize(clientName: "app", clientVersion: "1.0")
+    return client
+}
+```
+
 ### connectionFailed
 
 Thrown when the transport cannot establish or maintain a connection.
 
 ```swift
-do {
-    _ = try await client.initialize(clientName: "app", clientVersion: "1.0")
-} catch MCPError.connectionFailed(let reason) {
-    print("Connection failed: \(reason)")
-    // Recovery: check network, retry with backoff, or try a different server
+func handleConnectionFailure() async throws {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return }
+    let client = MCPClientConnection(transport: HTTPSSETransport(url: url))
+    do {
+        _ = try await client.initialize(clientName: "app", clientVersion: "1.0")
+    } catch MCPError.connectionFailed(let reason) {
+        print("Connection failed: \(reason)")
+        // Recovery: check network, retry with backoff, or try a different server
+    }
 }
 ```
 
@@ -34,16 +53,19 @@ do {
 Thrown when the server returns a JSON-RPC error response.
 
 ```swift
-do {
-    _ = try await client.callTool(name: "nonexistent")
-} catch MCPError.requestFailed(let code, let message, let data) {
-    switch code {
-    case -32601:
-        print("Method not found: \(message)")
-    case -32602:
-        print("Invalid params: \(message)")
-    default:
-        print("Server error \(code): \(message)")
+func handleRequestFailure() async throws {
+    guard let client = try await connectedClient() else { return }
+    do {
+        _ = try await client.callTool(name: "nonexistent")
+    } catch MCPError.requestFailed(let code, let message, let data) {
+        switch code {
+        case -32601:
+            print("Method not found: \(message)")
+        case -32602:
+            print("Invalid params: \(message)")
+        default:
+            print("Server error \(code): \(message)")
+        }
     }
 }
 ```
@@ -63,16 +85,20 @@ do {
 Thrown when a request exceeds the configured timeout duration.
 
 ```swift
-let client = MCPClientConnection(
-    transport: transport,
-    requestTimeout: .seconds(10)
-)
-// ...
-do {
-    _ = try await client.callTool(name: "slow_tool")
-} catch MCPError.timeout {
-    print("Request timed out")
-    // Recovery: increase timeout, cancel, or retry
+func handleTimeout() async throws {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return }
+    let transport = HTTPSSETransport(url: url)
+    let client = MCPClientConnection(
+        transport: transport,
+        requestTimeout: .seconds(10)
+    )
+    // ...
+    do {
+        _ = try await client.callTool(name: "slow_tool")
+    } catch MCPError.timeout {
+        print("Request timed out")
+        // Recovery: increase timeout, cancel, or retry
+    }
 }
 ```
 
@@ -81,11 +107,14 @@ do {
 Thrown when the server's response cannot be decoded as valid JSON-RPC.
 
 ```swift
-do {
-    _ = try await client.listTools()
-} catch MCPError.invalidResponse {
-    print("Server returned malformed response")
-    // Recovery: check server logs, verify server compatibility
+func handleInvalidResponse() async throws {
+    guard let client = try await connectedClient() else { return }
+    do {
+        _ = try await client.listTools()
+    } catch MCPError.invalidResponse {
+        print("Server returned malformed response")
+        // Recovery: check server logs, verify server compatibility
+    }
 }
 ```
 
@@ -94,12 +123,14 @@ do {
 Thrown by ``StdioTransport`` when the subprocess cannot be launched.
 
 ```swift
-let transport = StdioTransport(command: "/usr/bin/nonexistent")
-do {
-    try await transport.connect()
-} catch MCPError.processSpawnFailed(let reason) {
-    print("Cannot start server: \(reason)")
-    // Recovery: check command path, permissions, arguments
+func handleSpawnFailure() async throws {
+    let transport = StdioTransport(command: "/usr/bin/nonexistent")
+    do {
+        try await transport.connect()
+    } catch MCPError.processSpawnFailed(let reason) {
+        print("Cannot start server: \(reason)")
+        // Recovery: check command path, permissions, arguments
+    }
 }
 ```
 
@@ -108,11 +139,14 @@ do {
 Thrown when the transport connection closes unexpectedly.
 
 ```swift
-do {
-    _ = try await client.listTools()
-} catch MCPError.transportClosed {
-    print("Connection lost")
-    // Recovery: reconnect with a new client instance
+func handleTransportClosed() async throws {
+    guard let client = try await connectedClient() else { return }
+    do {
+        _ = try await client.listTools()
+    } catch MCPError.transportClosed {
+        print("Connection lost")
+        // Recovery: reconnect with a new client instance
+    }
 }
 ```
 
@@ -123,26 +157,29 @@ do {
 ```swift
 import Logging
 
-let logger = Logger(label: "com.example.my-app")
-let args: [String: AnyCodableValue] = ["url": .string("https://example.com")]
+func logEveryErrorCase() async throws {
+    guard let client = try await connectedClient() else { return }
+    let logger = Logger(label: "com.example.my-app")
+    let args: [String: AnyCodableValue] = ["url": .string("https://example.com")]
 
-do {
-    _ = try await client.callTool(name: "analyze", arguments: args)
-    // handle result
-} catch let error as MCPError {
-    switch error {
-    case .connectionFailed(let reason):
-        logger.error("Connection: \(reason)")
-    case .requestFailed(let code, let message, _):
-        logger.error("Server error \(code): \(message)")
-    case .timeout:
-        logger.warning("Request timed out")
-    case .invalidResponse:
-        logger.error("Malformed response")
-    case .processSpawnFailed(let reason):
-        logger.error("Spawn failed: \(reason)")
-    case .transportClosed:
-        logger.warning("Transport closed")
+    do {
+        _ = try await client.callTool(name: "analyze", arguments: args)
+        // handle result
+    } catch let error as MCPError {
+        switch error {
+        case .connectionFailed(let reason):
+            logger.error("Connection: \(reason)")
+        case .requestFailed(let code, let message, _):
+            logger.error("Server error \(code): \(message)")
+        case .timeout:
+            logger.warning("Request timed out")
+        case .invalidResponse:
+            logger.error("Malformed response")
+        case .processSpawnFailed(let reason):
+            logger.error("Spawn failed: \(reason)")
+        case .transportClosed:
+            logger.warning("Transport closed")
+        }
     }
 }
 ```

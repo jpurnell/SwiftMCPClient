@@ -15,31 +15,38 @@ Create a transport and pass it to ``MCPClientConnection``. Use
 ```swift
 import MCPClient
 
-let transport = HTTPSSETransport(
-    url: URL(string: "https://mcp.example.com/sse")!
-)
-let client = MCPClientConnection(transport: transport)
+// Every example below is a function this guide defines but never calls. Each
+// needs a live server, and an example that reached for one would hang here
+// with no server to answer it. The compiler still checks every signature.
+func connectedClient() async throws -> MCPClientConnection? {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return nil }
+    let transport = HTTPSSETransport(url: url)
+    let client = MCPClientConnection(transport: transport)
 
-let info = try await client.initialize(
-    clientName: "my-app",
-    clientVersion: "1.0.0"
-)
-print("Connected to \(info.serverInfo.name) v\(info.serverInfo.version)")
+    let info = try await client.initialize(
+        clientName: "my-app",
+        clientVersion: "1.0.0"
+    )
+    print("Connected to \(info.serverInfo.name) v\(info.serverInfo.version)")
+    return client
+}
 ```
 
 For local development, use ``StdioTransport`` to launch a server process:
 
 ```swift
-let stdioTransport = StdioTransport(
-    command: "npx",
-    arguments: ["-y", "@anthropic/my-mcp-server"]
-)
-let stdioClient = MCPClientConnection(transport: stdioTransport)
-let stdioInfo = try await stdioClient.initialize(
-    clientName: "my-app",
-    clientVersion: "1.0.0"
-)
-print("Connected to \(stdioInfo.serverInfo.name)")
+func connectOverStdio() async throws {
+    let stdioTransport = StdioTransport(
+        command: "npx",
+        arguments: ["-y", "@anthropic/my-mcp-server"]
+    )
+    let stdioClient = MCPClientConnection(transport: stdioTransport)
+    let stdioInfo = try await stdioClient.initialize(
+        clientName: "my-app",
+        clientVersion: "1.0.0"
+    )
+    print("Connected to \(stdioInfo.serverInfo.name)")
+}
 ```
 
 ## Discover Available Tools
@@ -48,9 +55,12 @@ After initialization, call ``MCPClientConnection/listTools()`` to retrieve
 the server's tool catalog:
 
 ```swift
-let tools = try await client.listTools()
-for tool in tools {
-    print("  \(tool.name): \(tool.description ?? "No description")")
+func listServerTools() async throws {
+    guard let client = try await connectedClient() else { return }
+    let tools = try await client.listTools()
+    for tool in tools {
+        print("  \(tool.name): \(tool.description ?? "No description")")
+    }
 }
 ```
 
@@ -63,20 +73,23 @@ Invoke a tool by name, passing arguments as a dictionary of
 ``AnyCodableValue``:
 
 ```swift
-let result = try await client.callTool(
-    name: "score_technical_seo",
-    arguments: [
-        "ssr_score": .number(95),
-        "meta_tags_score": .number(75),
-        "crawlability_score": .number(90)
-    ]
-)
+func callScoringTool() async throws {
+    guard let client = try await connectedClient() else { return }
+    let result = try await client.callTool(
+        name: "score_technical_seo",
+        arguments: [
+            "ssr_score": .number(95),
+            "meta_tags_score": .number(75),
+            "crawlability_score": .number(90)
+        ]
+    )
 
-// Content is an enum, so match the case rather than reaching for a property.
-if case .text(let output, _)? = result.content.first {
-    print(result.isError == true ? "Tool error: \(output)" : output)
-} else {
-    print("No text content returned")
+    // Content is an enum, so match the case rather than reaching for a property.
+    if case .text(let output, _)? = result.content.first {
+        print(result.isError == true ? "Tool error: \(output)" : output)
+    } else {
+        print("No text content returned")
+    }
 }
 ```
 
@@ -85,22 +98,25 @@ if case .text(let output, _)? = result.content.first {
 MCPClient uses ``MCPError`` for protocol-level failures:
 
 ```swift
-do {
-    _ = try await client.callTool(name: "nonexistent_tool")
-} catch let error as MCPError {
-    switch error {
-    case .connectionFailed(let reason):
-        print("Connection failed: \(reason)")
-    case .requestFailed(let code, let message, _):
-        print("Server error \(code): \(message)")
-    case .timeout:
-        print("Request timed out")
-    case .invalidResponse:
-        print("Could not decode server response")
-    case .transportClosed:
-        print("Transport connection was closed")
-    case .processSpawnFailed(let reason):
-        print("Failed to spawn subprocess: \(reason)")
+func handleToolErrors() async throws {
+    guard let client = try await connectedClient() else { return }
+    do {
+        _ = try await client.callTool(name: "nonexistent_tool")
+    } catch let error as MCPError {
+        switch error {
+        case .connectionFailed(let reason):
+            print("Connection failed: \(reason)")
+        case .requestFailed(let code, let message, _):
+            print("Server error \(code): \(message)")
+        case .timeout:
+            print("Request timed out")
+        case .invalidResponse:
+            print("Could not decode server response")
+        case .transportClosed:
+            print("Transport connection was closed")
+        case .processSpawnFailed(let reason):
+            print("Failed to spawn subprocess: \(reason)")
+        }
     }
 }
 ```

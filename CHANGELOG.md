@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **DocC articles terminate.** `doc-run` executes each `.docc` article as a
+  program. All eight drove a live connection to `mcp.example.com`, a server that
+  does not answer: five were killed at the 30-second deadline, one segfaulted
+  spawning `/usr/bin/nonexistent`, and `MigrationGuide` threw
+  `connectionFailed("Not connected — call connect() first")` at top level because
+  its setup fence constructed a client without initializing it.
+
+  Each example is now a function the article defines but never calls, with a
+  `connectedClient()` factory beside it. The compiler still checks every
+  signature — which is what the check is worth — and no article contacts a
+  server. `ErrorHandlingGuide` also used `client` before any fence declared it;
+  its examples are self-contained now, so that ordering trap is gone. The eight
+  articles run in 1.8s total.
+
 - **`## Usage` examples compile.** `doc-comment-code` errors surfaced when that
   checker briefly entered the default set upstream; they had been wrong for as
   long as they existed.

@@ -15,16 +15,23 @@ transports, each suited to a different deployment scenario.
 transport for production use.
 
 ```swift
-let transport = HTTPSSETransport(
-    url: URL(string: "https://mcp.example.com/sse")!,
-    headers: ["Authorization": "Bearer token123"],
-    connectionTimeout: 30
-)
-let client = MCPClientConnection(transport: transport)
-let info = try await client.initialize(
-    clientName: "my-app",
-    clientVersion: "1.0.0"
-)
+// `initialize` opens a live connection, so it is shown inside a function this
+// guide never calls. The signatures are checked by the compiler; no server is
+// contacted when the guide runs.
+func connectOverHTTPSSE() async throws {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return }
+    let transport = HTTPSSETransport(
+        url: url,
+        headers: ["Authorization": "Bearer token123"],
+        connectionTimeout: 30
+    )
+    let client = MCPClientConnection(transport: transport)
+    let info = try await client.initialize(
+        clientName: "my-app",
+        clientVersion: "1.0.0"
+    )
+    print("Connected to \(info.serverInfo.name)")
+}
 ```
 
 The SSE connection is established on ``MCPTransport/connect()`` and maintained
@@ -44,16 +51,20 @@ communicates via newline-delimited JSON over stdin/stdout pipes. This is ideal
 for development and testing against locally-installed MCP servers.
 
 ```swift
-let stdioTransport = StdioTransport(
-    command: "/usr/local/bin/my-mcp-server",
-    arguments: ["--verbose"],
-    environment: ["MCP_LOG_LEVEL": "debug"]
-)
-let stdioClient = MCPClientConnection(transport: stdioTransport)
-let stdioInfo = try await stdioClient.initialize(
-    clientName: "dev-tool",
-    clientVersion: "0.1.0"
-)
+// Spawning the subprocess is likewise a live operation; shown, not run.
+func connectOverStdio() async throws {
+    let stdioTransport = StdioTransport(
+        command: "/usr/local/bin/my-mcp-server",
+        arguments: ["--verbose"],
+        environment: ["MCP_LOG_LEVEL": "debug"]
+    )
+    let stdioClient = MCPClientConnection(transport: stdioTransport)
+    let stdioInfo = try await stdioClient.initialize(
+        clientName: "dev-tool",
+        clientVersion: "0.1.0"
+    )
+    print("Connected to \(stdioInfo.serverInfo.name)")
+}
 ```
 
 The subprocess is spawned on ``MCPTransport/connect()`` and terminated
@@ -76,7 +87,9 @@ watchOS. The type is conditionally compiled with `#if os(macOS) || os(Linux)`.
 Implement ``MCPTransport`` to add support for other communication channels:
 
 ```swift
-public protocol MCPTransport: Sendable {
+// This is the shape `MCPTransport` already has — repeated here for reference,
+// under a distinct name so the guide does not redeclare the real protocol.
+protocol MyCustomTransport: Sendable {
     func connect() async throws
     func disconnect() async throws
     func send(_ data: Data) async throws

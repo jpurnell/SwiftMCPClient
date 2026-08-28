@@ -13,8 +13,16 @@ Every example below runs against this connection:
 ```swift
 import MCPClient
 
-let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
-let client = MCPClientConnection(transport: transport)
+// Each "after" example below is a function this guide defines but never calls.
+// They need a live server, and one that reached for a server would throw or
+// hang here with none to answer it. The compiler still checks every signature.
+func connectedClient() async throws -> MCPClientConnection? {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return nil }
+    let transport = HTTPSSETransport(url: url)
+    let client = MCPClientConnection(transport: transport)
+    _ = try await client.initialize(clientName: "my-app", clientVersion: "1.0")
+    return client
+}
 ```
 
 ## MCPContent is now a discriminated union
@@ -38,16 +46,19 @@ for block in result.content {
 ### After (v1.0.0)
 
 ```swift
-let result = try await client.callTool(name: "analyze", arguments: [:])
-for block in result.content {
-    switch block {
-    case .text(let str, let annotations):
-        print(str)
-        if let annotations { print("  annotations: \(annotations)") }
-    case .image(let base64, let mimeType, _):
-        print("image (\(mimeType)), \(base64.count) base64 characters")
-    case .resource(let contents, _):
-        print("embedded resource: \(contents)")
+func readContentUnion() async throws {
+    guard let client = try await connectedClient() else { return }
+    let result = try await client.callTool(name: "analyze", arguments: [:])
+    for block in result.content {
+        switch block {
+        case .text(let str, let annotations):
+            print(str)
+            if let annotations { print("  annotations: \(annotations)") }
+        case .image(let base64, let mimeType, _):
+            print("image (\(mimeType)), \(base64.count) base64 characters")
+        case .resource(let contents, _):
+            print("embedded resource: \(contents)")
+        }
     }
 }
 ```
@@ -78,12 +89,15 @@ do {
 ### After (v1.0.0)
 
 ```swift
-do {
-    _ = try await client.callTool(name: "broken")
-} catch MCPError.requestFailed(let code, let message, let data) {
-    print("Error \(code): \(message)")
-    if let data {
-        print("Additional info: \(data)")
+func catchRequestFailure() async throws {
+    guard let client = try await connectedClient() else { return }
+    do {
+        _ = try await client.callTool(name: "broken")
+    } catch MCPError.requestFailed(let code, let message, let data) {
+        print("Error \(code): \(message)")
+        if let data {
+            print("Additional info: \(data)")
+        }
     }
 }
 ```
@@ -102,12 +116,15 @@ If you don't need the data field, use a wildcard:
 Declare client capabilities during initialization:
 
 ```swift
-let caps = ClientCapabilities(roots: RootsCapability(listChanged: true))
-let initializeResult = try await client.initialize(
-    clientName: "my-app",
-    clientVersion: "1.0",
-    capabilities: caps
-)
+func initializeWithCapabilities() async throws {
+    guard let client = try await connectedClient() else { return }
+    let caps = ClientCapabilities(roots: RootsCapability(listChanged: true))
+    let initializeResult = try await client.initialize(
+        clientName: "my-app",
+        clientVersion: "1.0",
+        capabilities: caps
+    )
+}
 ```
 
 ### Progress tokens
@@ -115,11 +132,14 @@ let initializeResult = try await client.initialize(
 Track progress for long-running tool calls:
 
 ```swift
-let progressResult = try await client.callTool(
-    name: "slow_analysis",
-    arguments: ["url": .string("https://example.com")],
-    progressToken: .string("analysis-1")
-)
+func callToolWithProgressToken() async throws {
+    guard let client = try await connectedClient() else { return }
+    let progressResult = try await client.callTool(
+        name: "slow_analysis",
+        arguments: ["url": .string("https://example.com")],
+        progressToken: .string("analysis-1")
+    )
+}
 ```
 
 ### Graceful disconnect
@@ -127,7 +147,10 @@ let progressResult = try await client.callTool(
 Clean up connections properly:
 
 ```swift
-try await client.disconnect()
+func closeTheConnection() async throws {
+    guard let client = try await connectedClient() else { return }
+    try await client.disconnect()
+}
 ```
 
 ### Request timeouts
@@ -135,10 +158,14 @@ try await client.disconnect()
 Configure per-connection timeout:
 
 ```swift
-let patientClient = MCPClientConnection(
-    transport: transport,
-    requestTimeout: .seconds(60)
-)
+func clientWithLongerTimeout() async throws {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return }
+    let transport = HTTPSSETransport(url: url)
+    let patientClient = MCPClientConnection(
+        transport: transport,
+        requestTimeout: .seconds(60)
+    )
+}
 ```
 
 ### Sampling
@@ -146,22 +173,25 @@ let patientClient = MCPClientConnection(
 Handle server requests for LLM completions:
 
 ```swift
-// Stand-in for whichever model you call.
-struct MyLLM {
-    func complete(_ messages: [MCPSamplingMessage]) async throws -> String {
-        "a completion for \(messages.count) message(s)"
+func registerSamplingHandler() async throws {
+    guard let client = try await connectedClient() else { return }
+    // Stand-in for whichever model you call.
+    struct MyLLM {
+        func complete(_ messages: [MCPSamplingMessage]) async throws -> String {
+            "a completion for \(messages.count) message(s)"
+        }
     }
-}
-let myLLM = MyLLM()
+    let myLLM = MyLLM()
 
-await client.setSamplingHandler { request in
-    let response = try await myLLM.complete(request.messages)
-    return MCPSamplingResult(
-        role: .assistant,
-        content: .text(response),
-        model: "my-model",
-        stopReason: "endTurn"
-    )
+    await client.setSamplingHandler { request in
+        let response = try await myLLM.complete(request.messages)
+        return MCPSamplingResult(
+            role: .assistant,
+            content: .text(response),
+            model: "my-model",
+            stopReason: "endTurn"
+        )
+    }
 }
 ```
 
@@ -170,12 +200,15 @@ await client.setSamplingHandler { request in
 Subscribe to specific notification types:
 
 ```swift
-for await progress in await client.progressUpdates {
-    print("Progress: \(progress.progress)/\(progress.total ?? 0)")
-}
+func consumeProgressAndLogs() async throws {
+    guard let client = try await connectedClient() else { return }
+    for await progress in await client.progressUpdates {
+        print("Progress: \(progress.progress)/\(progress.total ?? 0)")
+    }
 
-for await message in await client.logMessages {
-    print("[\(message.level)] \(message.data)")
+    for await message in await client.logMessages {
+        print("[\(message.level)] \(message.data)")
+    }
 }
 ```
 
@@ -184,8 +217,12 @@ for await message in await client.logMessages {
 Connect via WebSocket instead of HTTP/SSE:
 
 ```swift
-let webSocketTransport = WebSocketTransport(
-    url: URL(string: "wss://mcp.example.com/ws")!,
-    headers: ["Authorization": "Bearer token"]
-)
+func connectOverWebSocket() throws {
+    guard let url = URL(string: "wss://mcp.example.com/ws") else { return }
+    let webSocketTransport = WebSocketTransport(
+        url: url,
+        headers: ["Authorization": "Bearer token"]
+    )
+    _ = webSocketTransport
+}
 ```

@@ -15,11 +15,19 @@ Access the notification stream via ``MCPClientConnection/notifications``:
 ```swift
 import MCPClient
 
-let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
-let client = MCPClientConnection(transport: transport)
-_ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+// Every example below is a function this guide defines but never calls.
+// `initialize` and the calls that follow need a live server, and the
+// notification loop never ends by design — an example that ran here would
+// hang with no server to answer it. The compiler still checks each signature.
+func connectedClient() async throws -> MCPClientConnection? {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return nil }
+    let client = MCPClientConnection(transport: HTTPSSETransport(url: url))
+    _ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+    return client
+}
 
-Task {
+func consumeNotifications() async throws {
+    guard let client = try await connectedClient() else { return }
     for await notification in await client.notifications {
         switch notification {
         case .progress(let p):
@@ -45,8 +53,11 @@ Task {
 Control the minimum log level with ``MCPClientConnection/setLogLevel(_:)``:
 
 ```swift
-try await client.setLogLevel(.warning)
-// Server will now only send warning, error, critical, alert, emergency
+func raiseLogLevel() async throws {
+    guard let client = try await connectedClient() else { return }
+    try await client.setLogLevel(.warning)
+    // Server will now only send warning, error, critical, alert, emergency
+}
 ```
 
 Log levels follow RFC 5424 (syslog) severity, from least to most severe:
@@ -57,7 +68,10 @@ Log levels follow RFC 5424 (syslog) severity, from least to most severe:
 Cancel an in-flight request by its ID:
 
 ```swift
-try await client.cancelRequest(id: 5, reason: "User navigated away")
+func cancelInFlightRequest() async throws {
+    guard let client = try await connectedClient() else { return }
+    try await client.cancelRequest(id: 5, reason: "User navigated away")
+}
 ```
 
 The server SHOULD stop processing and not send a response.
@@ -67,13 +81,16 @@ The server SHOULD stop processing and not send a response.
 Request argument completion suggestions for prompts or resources:
 
 ```swift
-let result = try await client.complete(
-    ref: .prompt(name: "code_review"),
-    argumentName: "language",
-    argumentValue: "py"
-)
-for value in result.values {
-    print("  \(value)")  // "python", "pytorch", "pyside"
+func requestCompletions() async throws {
+    guard let client = try await connectedClient() else { return }
+    let result = try await client.complete(
+        ref: .prompt(name: "code_review"),
+        argumentName: "language",
+        argumentValue: "py"
+    )
+    for value in result.values {
+        print("  \(value)")  // "python", "pytorch", "pyside"
+    }
 }
 ```
 
@@ -82,16 +99,22 @@ for value in result.values {
 Register a handler for the server's `roots/list` requests:
 
 ```swift
-await client.setRootsHandler {
-    [
-        MCPRoot(uri: "file:///project", name: "My Project"),
-        MCPRoot(uri: "file:///data", name: "Data Directory")
-    ]
+func registerRootsHandler() async throws {
+    guard let client = try await connectedClient() else { return }
+    await client.setRootsHandler {
+        [
+            MCPRoot(uri: "file:///project", name: "My Project"),
+            MCPRoot(uri: "file:///data", name: "Data Directory")
+        ]
+    }
 }
 ```
 
 Notify the server when roots change:
 
 ```swift
-try await client.notifyRootsChanged()
+func announceRootsChanged() async throws {
+    guard let client = try await connectedClient() else { return }
+    try await client.notifyRootsChanged()
+}
 ```

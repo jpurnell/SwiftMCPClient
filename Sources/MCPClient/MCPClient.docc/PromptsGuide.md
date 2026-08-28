@@ -15,20 +15,30 @@ These examples run against an initialized connection:
 ```swift
 import MCPClient
 
-let transport = HTTPSSETransport(url: URL(string: "https://mcp.example.com/sse")!)
-let client = MCPClientConnection(transport: transport)
-_ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+// Every example below is a function this guide defines but never calls.
+// `initialize` and the calls that follow need a live server, and an example
+// that reached for one would hang here with no server to answer. The compiler
+// still checks every signature.
+func connectedClient() async throws -> MCPClientConnection? {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return nil }
+    let client = MCPClientConnection(transport: HTTPSSETransport(url: url))
+    _ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+    return client
+}
 ```
 
 Call ``MCPClientConnection/listPrompts()`` to discover what the server offers:
 
 ```swift
-let prompts = try await client.listPrompts()
-for prompt in prompts {
-    print("\(prompt.name): \(prompt.description ?? "No description")")
-    for arg in prompt.arguments ?? [] {
-        let req = arg.required == true ? " (required)" : ""
-        print("  - \(arg.name)\(req)")
+func listAvailablePrompts() async throws {
+    guard let client = try await connectedClient() else { return }
+    let prompts = try await client.listPrompts()
+    for prompt in prompts {
+        print("\(prompt.name): \(prompt.description ?? "No description")")
+        for arg in prompt.arguments ?? [] {
+            let req = arg.required == true ? " (required)" : ""
+            print("  - \(arg.name)\(req)")
+        }
     }
 }
 ```
@@ -38,20 +48,23 @@ for prompt in prompts {
 Expand a prompt template by name, passing string-valued arguments:
 
 ```swift
-let result = try await client.getPrompt(
-    name: "code_review",
-    arguments: ["code": "func add(_ a: Int, _ b: Int) -> Int { a + b }"]
-)
+func expandCodeReviewPrompt() async throws {
+    guard let client = try await connectedClient() else { return }
+    let result = try await client.getPrompt(
+        name: "code_review",
+        arguments: ["code": "func add(_ a: Int, _ b: Int) -> Int { a + b }"]
+    )
 
-for message in result.messages {
-    print("[\(message.role.rawValue)] ", terminator: "")
-    switch message.content {
-    case .text(let text, _):
-        print(text)
-    case .image(_, let mimeType, _):
-        print("<image: \(mimeType)>")
-    case .resource:
-        print("<resource>")
+    for message in result.messages {
+        print("[\(message.role.rawValue)] ", terminator: "")
+        switch message.content {
+        case .text(let text, _):
+            print(text)
+        case .image(_, let mimeType, _):
+            print("<image: \(mimeType)>")
+        case .resource:
+            print("<resource>")
+        }
     }
 }
 ```
@@ -74,11 +87,14 @@ Arguments are always string-valued per the MCP specification. The
 the argument to be provided.
 
 ```swift
-let summary = try await client.getPrompt(
-    name: "summarize",
-    arguments: [
-        "text": "Long document text here...",
-        "style": "bullet_points"
-    ]
-)
+func expandSummarizePrompt() async throws {
+    guard let client = try await connectedClient() else { return }
+    let summary = try await client.getPrompt(
+        name: "summarize",
+        arguments: [
+            "text": "Long document text here...",
+            "style": "bullet_points"
+        ]
+    )
+}
 ```
