@@ -34,7 +34,12 @@ import Logging
 ///     name: "analyze_data",
 ///     arguments: ["input": .string("Hello, world!")]
 /// )
-/// print(result.content.first?.text ?? "No output")
+/// // `content` holds MCPContent cases, not values with a `.text` property.
+/// if case .text(let str, _) = result.content.first {
+///     print(str)
+/// } else {
+///     print("No output")
+/// }
 /// ```
 ///
 /// ## Notifications
@@ -43,7 +48,8 @@ import Logging
 /// log messages, list changes) are available via the ``notifications`` stream:
 ///
 /// ```swift
-/// for await notification in client.notifications {
+/// func observe(client: MCPClientConnection) async {
+/// for await notification in await client.notifications {
 ///     switch notification {
 ///     case .progress(let p):
 ///         print("Progress: \(p.progress)/\(p.total ?? 0)")
@@ -52,6 +58,7 @@ import Logging
 ///     default:
 ///         break
 ///     }
+/// }
 /// }
 /// ```
 ///
@@ -124,40 +131,52 @@ public actor MCPClientConnection: MCPClientProtocol {
             isConnected = true
         }
 
-        // Encode client capabilities to AnyCodableValue
-        let capsData = try JSONEncoder().encode(capabilities)
-        let capsValue = try JSONDecoder().decode(AnyCodableValue.self, from: capsData)
+        do {
+            // Encode client capabilities to AnyCodableValue
+            let capsData = try JSONEncoder().encode(capabilities)
+            let capsValue = try JSONDecoder().decode(AnyCodableValue.self, from: capsData)
 
-        let params = AnyCodableValue.object([
-            "protocolVersion": .string(protocolVersion),
-            "capabilities": capsValue,
-            "clientInfo": .object([
-                "name": .string(clientName),
-                "version": .string(clientVersion)
+            let params = AnyCodableValue.object([
+                "protocolVersion": .string(protocolVersion),
+                "capabilities": capsValue,
+                "clientInfo": .object([
+                    "name": .string(clientName),
+                    "version": .string(clientVersion)
+                ])
             ])
-        ])
 
-        // Initialize uses direct transport.receive() since the dispatcher
-        // isn't running yet and no notifications can arrive before handshake.
-        let response = try await sendRequestDirect(method: "initialize", params: params)
-        let resultData = try JSONEncoder().encode(response)
-        let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
+            // Initialize uses direct transport.receive() since the dispatcher
+            // isn't running yet and no notifications can arrive before handshake.
+            let response = try await sendRequestDirect(method: "initialize", params: params)
+            let resultData = try JSONEncoder().encode(response)
+            let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
 
-        // The MCP spec says the server responds with the version it supports.
-        // We accept any version — the protocol is designed to be forward-compatible
-        // at the JSON-RPC level. Log but don't reject newer versions.
+            // The MCP spec says the server responds with the version it supports.
+            // We accept any version — the protocol is designed to be forward-compatible
+            // at the JSON-RPC level. Log but don't reject newer versions.
 
-        // Send notifications/initialized per MCP spec (fire-and-forget, no response)
-        let notification = JSONRPCNotification(method: "notifications/initialized")
-        let notificationData = try JSONEncoder().encode(notification)
-        try await transport.send(notificationData)
+            // Send notifications/initialized per MCP spec (fire-and-forget, no response)
+            let notification = JSONRPCNotification(method: "notifications/initialized")
+            let notificationData = try JSONEncoder().encode(notification)
+            try await transport.send(notificationData)
 
-        // Start the message dispatcher for all subsequent communication
-        let newDispatcher = MCPMessageDispatcher(transport: transport)
-        await newDispatcher.start()
-        self.dispatcher = newDispatcher
+            // Start the message dispatcher for all subsequent communication
+            let newDispatcher = MCPMessageDispatcher(transport: transport)
+            await newDispatcher.start()
+            self.dispatcher = newDispatcher
 
-        return initResult
+            return initResult
+        } catch {
+            // A failed handshake leaves the transport half-open. Release it before
+            // rethrowing: a transport dropped while holding a live HTTP client trips
+            // AsyncHTTPClient's shutdown-before-deinit precondition and crashes the
+            // process in debug builds. Best-effort — the handshake error is the one
+            // the caller needs to see.
+            // silent: cleanup must not mask the original failure
+            try? await transport.disconnect()
+            isConnected = false
+            throw error
+        }
     }
 
     /// Discover available tools on the MCP server.

@@ -46,6 +46,18 @@ targets.append(
         ]
     )
 )
+// Survey utility, not a product: connects with the persisted OAuth session and dumps
+// the server's tool catalog as JSON. MCPExplorer's tool list is a browsing surface;
+// auditing 69 tool schemas needs them in a file.
+targets.append(
+    .executableTarget(
+        name: "MCPDump",
+        dependencies: ["MCPClient"],
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
+    )
+)
 #endif
 
 let package = Package(
