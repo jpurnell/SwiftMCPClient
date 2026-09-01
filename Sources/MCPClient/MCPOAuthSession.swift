@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import SwiftOAuthCore
 import SwiftOAuthClient
 
@@ -15,19 +16,33 @@ public actor MCPOAuthSession {
 
     private let setup: MCPOAuthSetup
     private let storage: any OAuthClientStorage
+    private let registrations: any RegistrationRecordStore
     private var connection: OAuthConnection?
+
+    /// Which connection ``connection`` belongs to.
+    ///
+    /// Kept alongside it because signing out has to reach the stored registration, and a
+    /// connection does not publish the identifier it was built with.
+    private var connectionID: ConnectionID?
 
     /// Creates a session.
     ///
     /// - Parameters:
     ///   - setup: How discovery is performed. Injected for tests.
     ///   - storage: Where the credential lives.
+    ///   - registrations: Where this client's registration with the server lives. Defaults to
+    ///     memory, which is the behaviour of a session that cannot be resumed: a caller that
+    ///     wants ``resume(server:tenant:)`` to work across launches has to say where the
+    ///     registration is kept, because a credential outliving the registration that can use
+    ///     it is worse than neither being stored.
     public init(
         setup: MCPOAuthSetup = MCPOAuthSetup(),
-        storage: any OAuthClientStorage
+        storage: any OAuthClientStorage,
+        registrations: any RegistrationRecordStore = InMemoryRegistrationStore()
     ) {
         self.setup = setup
         self.storage = storage
+        self.registrations = registrations
     }
 
     /// Creates a session that keeps its credential across launches.
@@ -53,11 +68,18 @@ public actor MCPOAuthSession {
             appropriateFor: nil,
             create: true).appending(path: "MCPExplorer")
 
+        // One key for both files. They are worth the same to anyone who obtains one of them,
+        // and a second key would double what can be lost without protecting anything further.
+        let key = try CredentialStoreKey().loadOrCreate()
+
         return MCPOAuthSession(
             setup: setup,
             storage: try EncryptedFileClientStorage(
                 url: base.appending(path: "credentials.enc"),
-                key: try CredentialStoreKey().loadOrCreate()))
+                key: key),
+            registrations: try EncryptedFileRegistrationStore(
+                url: base.appending(path: "registrations.enc"),
+                key: key))
     }
 
     /// Runs the whole flow and stores the resulting credential.
@@ -113,12 +135,13 @@ public actor MCPOAuthSession {
             scope: discovered.scope,
             authenticationMethod: registration.authenticationMethod)
 
+        let id = ConnectionID(
+            tenant: tenant, provider: identifier, account: server.absoluteString)
         let connection = OAuthConnection(
             configuration: configuration,
             credentials: registration.credentials(environment: identifier),
             storage: storage,
-            connection: ConnectionID(
-                tenant: tenant, provider: identifier, account: server.absoluteString))
+            connection: id)
 
         let begun = await connection.beginAuthorization(redirectURI: redirectURI)
         openURL(begun.url)
@@ -128,7 +151,79 @@ public actor MCPOAuthSession {
             callback: callback, pending: begun.pending)
 
         self.connection = connection
+        self.connectionID = id
+
+        // Written only now that the exchange has succeeded. A record stored earlier would
+        // describe a client that never obtained anything, and the next launch would rebuild a
+        // connection around it and report a signed-in session with no credential behind it.
+        do {
+            try await registrations.store(registration, for: id)
+        } catch {
+            // Not rethrown. The sign-in *did* succeed, and failing it here would send the user
+            // back through consent — registering a second client at the server on the way,
+            // which is the accumulation this record exists to stop. What is lost is the next
+            // launch's resume, which is exactly the behaviour before this record existed.
+            let logger = Logger(label: "MCPClient.MCPOAuthSession")
+            // logging: the reason the next launch will ask for consent again
+            logger.error("the client registration could not be stored: \(error.localizedDescription)")
+        }
+
         return credential
+    }
+
+    /// Rebuilds the signed-in state for a server whose credential and registration are both on
+    /// file, without opening a browser.
+    ///
+    /// The registration is why this can exist. A refresh token is bound to the `client_id` that
+    /// obtained it (RFC 6749 §6), so a client that registered again at every launch could never
+    /// use the credential it already had — restoring means restoring *both* halves or neither.
+    ///
+    /// Endpoints are re-discovered rather than stored. They are public metadata, the round trip
+    /// precedes a connection to the same server anyway, and a server that moves its token
+    /// endpoint should not strand every client that cached the old one.
+    ///
+    /// - Parameters:
+    ///   - server: The MCP server's base URL.
+    ///   - tenant: Who the connection belongs to, in the application's terms.
+    /// - Returns: `true` when the session is signed in again; `false` when nothing, or only
+    ///   half, is stored — the caller should offer sign-in.
+    /// - Throws: ``MCPOAuthError`` if discovery fails, or a storage error if a store exists and
+    ///   cannot be read. A store that cannot be opened is deliberately not reported as `false`:
+    ///   `false` sends the caller to a sign-in that would write a record over a file it could
+    ///   not read.
+    @discardableResult
+    public func resume(server: URL, tenant: String = "local") async throws -> Bool {
+        let identifier = server.host() ?? "mcp"
+        let id = ConnectionID(
+            tenant: tenant, provider: identifier, account: server.absoluteString)
+
+        // Both halves are read before anything reaches the network. Discovery cannot change
+        // the answer when either is missing, and a launch with nothing stored is the common
+        // case — it should not cost a round trip to the server to find that out.
+        guard let registration = try await registrations.record(for: id) else { return false }
+        guard try await storage.credential(for: id) != nil else { return false }
+
+        let (discovered, _) = try await setup.discover(server: server, identifier: identifier)
+
+        // The *stored* authentication method, not one derived from what discovery returned.
+        // It has to match what this client registered as: presenting `client_secret_basic`
+        // with no secret fails as `invalid_client`, which reads like wrong credentials rather
+        // than like the wrong method.
+        let configuration = ProviderConfiguration(
+            identifier: discovered.identifier,
+            authorizationEndpoint: discovered.authorizationEndpoint,
+            tokenEndpoint: discovered.tokenEndpoint,
+            revocationEndpoint: discovered.revocationEndpoint,
+            scope: discovered.scope,
+            authenticationMethod: registration.authenticationMethod)
+
+        self.connection = OAuthConnection(
+            configuration: configuration,
+            credentials: registration.credentials(environment: identifier),
+            storage: storage,
+            connection: id)
+        self.connectionID = id
+        return true
     }
 
     /// An `Authorization` header value that is valid now, refreshing if it is not.
@@ -164,10 +259,21 @@ public actor MCPOAuthSession {
         return stored != nil
     }
 
-    /// Forgets the credential, and revokes it where the server allows.
+    /// Forgets the credential and the registration, and revokes the credential where the
+    /// server allows.
+    ///
+    /// The registration goes too. It carries a `client_secret`, and a secret that outlives the
+    /// session it belonged to is one nothing will ever come back to remove.
+    ///
+    /// - Throws: `ConnectionError` if revocation failed, or a storage error if the registration
+    ///   could not be removed — an erasure that did not happen is reported, not assumed.
     public func signOut() async throws {
         try await connection?.disconnect()
+        if let connectionID {
+            try await registrations.remove(connectionID)
+        }
         connection = nil
+        connectionID = nil
     }
 
     /// Registers this client with the authorization server.

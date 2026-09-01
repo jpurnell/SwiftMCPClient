@@ -43,11 +43,21 @@ struct MCPDump {
             throw MCPError.connectionFailed(reason: "Pass an https:// MCP server URL")
         }
 
-        FileHandle.standardError.write(Data("Signing in to \(host) — approve in the browser…\n".utf8))
         let session = try MCPOAuthSession.persistent()
-        try await session.signIn(server: url, clientName: "MCPDump") { authorizationURL in
-            NSWorkspace.shared.open(authorizationURL)
+
+        // Restoring first is the whole point of persisting the registration: every browser
+        // sign-in leaves another dynamic registration behind at the server, and a tool run from
+        // a shell is run repeatedly.
+        if try await session.resume(server: url) {
+            FileHandle.standardError.write(Data("Restored a stored session for \(host).\n".utf8))
+        } else {
+            FileHandle.standardError.write(
+                Data("Signing in to \(host) — approve in the browser…\n".utf8))
+            try await session.signIn(server: url, clientName: "MCPDump") { authorizationURL in
+                NSWorkspace.shared.open(authorizationURL)
+            }
         }
+
         guard let header = try await session.authorizationHeader() else {
             throw MCPError.connectionFailed(reason: "Sign-in completed without a credential")
         }

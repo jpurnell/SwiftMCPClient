@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **A signed-in session survives a restart.** `MCPOAuthSession.resume(server:tenant:)`
+  rebuilds the signed-in state from storage without opening a browser. The missing piece was
+  never the credential — that has persisted since 0.9.0 — but the dynamic client registration
+  that obtained it: a refresh token is bound to its `client_id` (RFC 6749 §6), so a client
+  that registered again at every launch could never use the credential it already had.
+
+  `RegistrationRecordStore` persists one registration per connection, AES-GCM-sealed in
+  `registrations.enc` beside `credentials.enc` and opened by the same Keychain key. A store
+  that cannot be decrypted throws rather than reporting itself empty, because empty means
+  "never signed in" and sends the caller to a sign-in that mints a fresh registration over the
+  top of a credential it has just orphaned.
+
+  Endpoints are re-discovered at resume rather than stored — public metadata, one round trip,
+  and a server that moves its token endpoint should not strand every client that cached the
+  old one. `resume` returns `false` when nothing or only half is stored, and reaches the
+  network only when both halves are present.
+
+  `signIn` now records the registration, but only after the token exchange succeeds, and a
+  failure to record it is logged rather than thrown: the sign-in did succeed, and failing it
+  would send the user back through consent, registering a second client on the way.
+  `signOut` removes the record — it carries a `client_secret`, and a secret that outlives its
+  session is one nothing comes back for.
+
+  MCPDump restores before it signs in; MCPExplorer restores when connecting and before
+  opening a browser. 19 tests written first (382 → 401), including the one that matters:
+  resume never calls the registration endpoint.
+
 ### Fixed
 - **A rejected handshake no longer crashes the client.** `MCPClientConnection.initialize`
   connected the transport but, when the server refused the handshake (Apollo MCP's 401

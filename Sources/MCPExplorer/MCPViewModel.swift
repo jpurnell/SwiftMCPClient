@@ -154,6 +154,10 @@ final class MCPViewModel {
                     return
                 }
                 var headers: [String: String] = [:]
+                // A session stored on an earlier launch is restored here rather than at
+                // launch, because this is the first moment a server URL exists to restore
+                // against — the field starts empty every time.
+                await restoreSession(for: url)
                 // A signed-in OAuth session wins over a pasted token: it refreshes, and a
                 // token typed in by hand is the thing it replaces.
                 if let header = try await oauthSession.authorizationHeader() {
@@ -391,6 +395,14 @@ final class MCPViewModel {
             return
         }
 
+        // Every browser sign-in leaves another dynamic registration behind at the server, so
+        // a stored session is tried first. Silent when it fails: the sign-in below is the
+        // answer to every reason it might.
+        if await restoreSession(for: url) {
+            oauthState = .signedIn
+            return
+        }
+
         oauthState = .awaitingBrowser
         do {
             try await oauthSession.signIn(
@@ -405,6 +417,31 @@ final class MCPViewModel {
         } catch {
             Self.logger.error("OAuth sign-in failed: \(String(describing: error), privacy: .public)")
             oauthState = .failed(Self.describe(error))
+        }
+    }
+
+    /// Restores a session stored on an earlier launch, without opening a browser.
+    ///
+    /// Silent on failure by design. Every reason this can fail — nothing stored, half stored,
+    /// a store that will not open — has the same answer for a user: the sign-in button, which
+    /// is already there. Reporting it would mean showing an error to someone who has not asked
+    /// for anything yet.
+    ///
+    /// - Parameter url: The MCP server to restore a session for.
+    /// - Returns: `true` if the session is now signed in.
+    @discardableResult
+    func restoreSession(for url: URL) async -> Bool {
+        if oauthState == .signedIn { return true }
+        do {
+            let restored = try await oauthSession.resume(server: url)
+            if restored { oauthState = .signedIn }
+            return restored
+        } catch {
+            // Logged, not shown. A stored session that cannot be restored is not an error the
+            // user caused, and the sign-in button is the same remedy either way.
+            Self.logger.error(
+                "restoring a stored session failed: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 
