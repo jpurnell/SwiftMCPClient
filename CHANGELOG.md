@@ -7,6 +7,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **A refreshed token now reaches the wire.** `StreamableHTTPTransport` takes an
+  `AuthorizationProvider` and asks it for a header before every request, instead of holding
+  the one it was built with. The refresh itself was never missing — SwiftOAuth exchanges,
+  dedupes and persists — but both consumers read the header once at connect time and froze it,
+  so the session refreshed underneath a transport that never looked again. That is why
+  `updateAuthorization(_:)` existed and had no caller.
+- **A refused request is retried once with a forcibly refreshed token.** A token can stop
+  working before it expires here: the grant is revoked, the clock drifts, the dynamic client
+  registration lapses (RFC 7591). None of that is visible to a transport that refreshes on
+  schedule, and the only evidence is a `401`. The retry asks for a token obtained *now* —
+  `MCPOAuthSession.authorizationHeader(forcingRefresh:)`, on
+  `OAuthConnection.refreshedAccessToken()` from **SwiftOAuth 0.6.0**, which was added upstream
+  for this. Once, not in a loop: a server refusing a just-refreshed token is refusing the
+  grant, and each further attempt spends a rotation to learn the same thing.
+
+  14 tests written first, against a real HTTP server on loopback rather than the transport's
+  own idea of its headers — the defect being fixed was exactly a gap between what the
+  transport believed it would send and what it sent (406 → 420).
+
+### Added
 - **MCPExplorer remembers the last server, and restores its session at launch.** The restore
   proposal (§15) wanted auto-resume at launch and could not have it: the URL field was empty
   on every launch, so a session that had survived the restart intact had no address to be

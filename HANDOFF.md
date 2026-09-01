@@ -6,11 +6,13 @@
 
 ## Current phase
 
-**OAuth session restore — DONE** (roadmap #2), merged and pushed, released as **v0.10.0**.
+**OAuth token refresh — DONE** (roadmap #3), on `main`. Session restore (#2) shipped earlier
+the same day as **v0.10.0**. The OAuth arc is now feature-complete and **unverified against a
+live server**, which is the next thing worth doing.
 
-Next up is **OAuth token refresh** (roadmap #3), which was promoted to priority 1 in
-`project/master_plan.md`: a restored session is precisely the thing that needs refreshing,
-and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
+Refresh turned out not to be missing: SwiftOAuth already exchanged and deduped, and what was
+missing was a transport that asked twice. See
+`project/summaries/2026-09-01_OAuthTokenRefresh.md`.
 
 ## Exact next step (start here)
 
@@ -29,9 +31,16 @@ and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 
 ## State of the world
 
-- **Branch:** `main`, clean, pushed. Session restore is merged; **v0.10.0** is tagged.
-- **Gate:** 0 errors / 0 warnings (`--no-cache`, 40 of 45 checkers, 2026-09-01).
-  **Tests:** 401 / 32 suites.
+- **Branch:** `main`, clean. **v0.10.0** is tagged; the refresh work sits after it, unreleased.
+- **Gate:** 0 errors / 0 warnings (`--no-cache`, 2026-09-01). **Tests:** 420 across two
+  targets — 415 in `MCPClientTests`, 5 in the new `MCPExplorerTests`.
+- **Depends on SwiftOAuth 0.6.0**, which was cut today specifically for this
+  (`refreshedAccessToken()`). Both repos are pushed and tagged; they move together now.
+- **`StubHTTPServer`** (`Tests/MCPClientTests/`) is new and reusable: a loopback NIO server
+  that records what a request actually carried. Any future transport work that needs to assert
+  wire behaviour should use it rather than reading `currentHeaders`. Tests using it **must**
+  go through the `withStub` harness — `HTTPClient` traps in `deinit` if it is not shut down,
+  and that kills the suite rather than failing a test.
 - **The toolchain moved on 2026-09-01.** The OS update left `xcode-select` on
   `/Library/Developer/CommandLineTools`, which ships no `Testing.swiftmodule` — every
   `import Testing` failed to compile until it was pointed at Xcode-beta 27.0:
@@ -48,21 +57,24 @@ and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 
 1. ~~Privacy decision on pushed history~~ — done: rewritten + force-pushed.
 2. ~~OAuth session restore~~ — **done 2026-09-01**, `7df8652`, unmerged.
-3. **OAuth token refresh** ← YOU ARE HERE
-4. AsyncHTTPClient chunk-flushing spike (timeboxed; can shrink Phase 2's scope)
-5. Explorer tools pane: height + JSON export
-6. TransportGuide.md Phase 1 revision (carried three times now)
-7. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
-8. Linux CI verification
-9. Deliberate v1.0.0 tag (after 3, 7, 8 — latest tag is **v0.10.0**, cut 2026-09-01)
+3. ~~OAuth token refresh~~ — **done 2026-09-01**
+4. **Live verification against Apollo** ← YOU ARE HERE (new; the OAuth work is unmeasured)
+5. AsyncHTTPClient chunk-flushing spike (timeboxed; can shrink Phase 2's scope)
+6. Explorer tools pane: height + JSON export
+7. TransportGuide.md Phase 1 revision (carried three times now)
+8. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
+9. Linux CI verification
+10. `HTTPSSETransport` has the same frozen-header defect the Streamable transport just lost,
+    and no `updateAuthorization(_:)` at all — a long-lived stream cannot re-authenticate
+    without reconnecting (OAuthTokenRefresh.md §15.2)
+11. Deliberate v1.0.0 tag (after 8, 9 — latest tag is **v0.10.0**, cut 2026-09-01)
 
 ## Blockers / decisions
 
-- **Open decision:** should MCPExplorer persist the last server URL? The restore proposal
-  (§15) assumed auto-resume *at launch*; that is impossible as built, because `serverURL`
-  is empty on every launch. Restore now happens at `connect()` and before a browser opens.
-  Persisting the URL is the only route to literal launch-time restore, and it is new
-  persisted state nobody asked for — hence left open.
+- ~~Should MCPExplorer persist the last server URL?~~ **Decided 2026-09-01: yes.**
+  `LastServer` persists it, and `restoreRememberedSession()` runs at launch, so §15 of the
+  restore proposal is now true rather than aspirational.
+- **Nothing blocking.** The open items are measurements, not decisions.
 - External context for this work (deadline, artifacts) lives in session memory
   (`apollo-pm-opportunity`), **not** in this repo. Keep it that way.
 
@@ -74,4 +86,4 @@ never gets committed. Auditor tripwires: catch blocks log or rethrow; logger int
 needs `privacy:` annotations in the app targets (os.Logger) and a `// logging:` marker in
 MCPClient (swift-log); `import os` goes inside `#if canImport(os)`.
 
-Session summaries: latest is `project/summaries/2026-09-01_OAuthSessionRestore.md`.
+Session summaries: latest is `project/summaries/2026-09-01_OAuthTokenRefresh.md`.

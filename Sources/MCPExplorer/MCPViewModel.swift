@@ -167,12 +167,21 @@ final class MCPViewModel {
                 // launch, because this is the first moment a server URL exists to restore
                 // against — the field starts empty every time.
                 await restoreSession(for: url)
-                // A signed-in OAuth session wins over a pasted token: it refreshes, and a
-                // token typed in by hand is the thing it replaces.
-                if let header = try await oauthSession.authorizationHeader() {
-                    headers["Authorization"] = header
-                } else if !bearerToken.isEmpty {
-                    headers["Authorization"] = "Bearer \(bearerToken)"
+
+                // A pasted token is a constant, so it goes in the headers. An OAuth session
+                // is not: it refreshes, and reading it once here would freeze whatever it
+                // held at connect time for the life of the transport.
+                let session = oauthSession
+                let provider: AuthorizationProvider?
+                if await session.isSignedIn {
+                    provider = { forcing in
+                        try await session.authorizationHeader(forcingRefresh: forcing)
+                    }
+                } else {
+                    provider = nil
+                    if !bearerToken.isEmpty {
+                        headers["Authorization"] = "Bearer \(bearerToken)"
+                    }
                 }
                 // Both are HTTP with the same credential; they differ in how the server
                 // frames its side of the conversation, which is the transport's business.
@@ -180,6 +189,7 @@ final class MCPViewModel {
                     transport = StreamableHTTPTransport(
                         url: url,
                         headers: headers,
+                        authorization: provider,
                         trustSelfSignedCertificates: trustSelfSignedCertificates)
                 } else {
                     transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)

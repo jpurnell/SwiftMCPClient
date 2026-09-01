@@ -5,6 +5,16 @@ import NIOHTTP1
 import NIOFoundationCompat
 import NIOSSL
 
+/// Supplies a current `Authorization` header value, refreshing if it has to.
+///
+/// Consulted once per request, and once more with `forcingRefresh` set after the server
+/// refuses one. The two are different questions: the ordinary call asks for a token that is
+/// valid by the clock, and the forced call asks for one obtained *now*, because a grant the
+/// provider has revoked still looks valid to every clock on this side.
+///
+/// Returning `nil` sends the request with no `Authorization` header at all.
+public typealias AuthorizationProvider = @Sendable (_ forcingRefresh: Bool) async throws -> String?
+
 /// Connects to a remote MCP server via Streamable HTTP (MCP spec 2025-03-26).
 ///
 /// All communication flows through a single `POST /mcp` endpoint. The server
@@ -34,6 +44,9 @@ import NIOSSL
 public actor StreamableHTTPTransport: MCPTransport {
     private let url: URL
     private var headers: [String: String]
+
+    /// Asked for a current `Authorization` header before each request.
+    private let authorization: AuthorizationProvider?
     private let connectionTimeout: TimeInterval
     private let trustSelfSignedCertificates: Bool
 
@@ -57,17 +70,23 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// - Parameters:
     ///   - url: The MCP endpoint URL (e.g., `https://mcp.example.com/mcp`).
     ///   - headers: Custom HTTP headers sent with all requests (e.g., authentication).
+    ///   - authorization: Asked for a current `Authorization` header before every request,
+    ///     and again after a `401`. Supplying one is how a session that refreshes reaches the
+    ///     wire; without it the header in `headers` is sent unchanged for the life of the
+    ///     transport, which outlives the token on any provider that expires them.
     ///   - connectionTimeout: Maximum time to wait for each HTTP request. Default 30s.
     ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
     ///     **Use only for development/testing** — this disables certificate validation.
     public init(
         url: URL,
         headers: [String: String] = [:],
+        authorization: AuthorizationProvider? = nil,
         connectionTimeout: TimeInterval = 30.0,
         trustSelfSignedCertificates: Bool = false
     ) {
         self.url = url
         self.headers = headers
+        self.authorization = authorization
         self.connectionTimeout = connectionTimeout
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
@@ -134,23 +153,18 @@ public actor StreamableHTTPTransport: MCPTransport {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
         }
 
-        var request = HTTPClientRequest(url: url.absoluteString)
-        request.method = .POST
-        request.headers.add(name: "Content-Type", value: "application/json")
-        request.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        if let sid = sessionId {
-            request.headers.add(name: "Mcp-Session-Id", value: sid)
-        }
-        for (key, value) in headers {
-            request.headers.replaceOrAdd(name: key, value: value)
-        }
-        request.body = .bytes(data)
+        var response = try await attempt(data, on: client, forcingRefresh: false)
 
-        let response: HTTPClientResponse
-        do {
-            response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
-        } catch {
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
+        // One retry, and only for a refusal. A token can stop working before it expires here
+        // — the grant is revoked, the clock drifted, the dynamic client registration lapsed —
+        // and none of that is visible to a transport that only refreshes on schedule. The
+        // retry asks for a token obtained now rather than one the clock still approves of.
+        //
+        // Once, not in a loop: a server refusing a token that was just refreshed is refusing
+        // the grant, and every further attempt spends another rotation to be told the same
+        // thing. Without a provider there is nothing to refresh, so the refusal stands.
+        if response.status.code == 401, authorization != nil {
+            response = try await attempt(data, on: client, forcingRefresh: true)
         }
 
         // 202 Accepted = notification acknowledged, no response body
@@ -182,6 +196,54 @@ public actor StreamableHTTPTransport: MCPTransport {
         // One SSE response may carry several messages; each is a separate `receive()`.
         for payload in payloads {
             enqueueMessage(payload)
+        }
+    }
+
+    /// Makes one attempt, with a freshly resolved `Authorization` header.
+    ///
+    /// - Parameters:
+    ///   - data: The JSON-RPC payload.
+    ///   - client: The HTTP client to send on.
+    ///   - forcingRefresh: Passed to the provider. `true` only on a retry after a refusal.
+    /// - Returns: The response, whatever its status — the caller decides what a status means.
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made, or
+    ///   whatever the provider threw. A provider that fails **fails the send**: continuing
+    ///   without the header would reach the server as a `401`, which reads as a credential
+    ///   problem at the far end rather than a local one.
+    private func attempt(
+        _ data: Data,
+        on client: HTTPClient,
+        forcingRefresh: Bool
+    ) async throws -> HTTPClientResponse {
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = .POST
+        request.headers.add(name: "Content-Type", value: "application/json")
+        request.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        if let sid = sessionId {
+            request.headers.add(name: "Mcp-Session-Id", value: sid)
+        }
+        for (key, value) in headers {
+            request.headers.replaceOrAdd(name: key, value: value)
+        }
+
+        // After the static headers, so a live session wins over a token pasted into
+        // configuration. Both present means the pasted one is the leftover.
+        if let authorization {
+            if let header = try await authorization(forcingRefresh) {
+                request.headers.replaceOrAdd(name: "Authorization", value: header)
+            } else {
+                // `nil` means not signed in, which is a request with no header — not one
+                // carrying `Bearer` and nothing after it.
+                request.headers.remove(name: "Authorization")
+            }
+        }
+
+        request.body = .bytes(data)
+
+        do {
+            return try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+        } catch {
+            throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
     }
 

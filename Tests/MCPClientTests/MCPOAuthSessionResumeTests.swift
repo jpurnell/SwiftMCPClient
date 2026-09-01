@@ -262,3 +262,94 @@ struct MCPOAuthSignOutTests {
         #expect(await session.isSignedIn == false)
     }
 }
+
+/// Asking the session for a token it must obtain now.
+///
+/// The distinction the transport depends on. An ordinary header request is answered from the
+/// stored credential whenever the clock says it is still good; a forced one exchanges anyway,
+/// because a grant the provider has revoked looks perfectly valid to every clock on this side.
+@Suite("MCP OAuth session — forced refresh")
+struct MCPOAuthSessionForcedRefreshTests {
+
+    /// The ordinary path must not exchange for a credential that is still valid. If it did,
+    /// every request would spend a rotation.
+    @Test("An ordinary header request does not exchange")
+    func ordinaryRequestDoesNotExchange() async throws {
+        let exchanges = ExchangeLog()
+        let session = try await resumedSession(exchanges: exchanges)
+
+        #expect(try await session.authorizationHeader() == "Bearer stored-access-token")
+        #expect(await exchanges.count == 0)
+    }
+
+    /// The forced path exchanges even though the stored token has an hour left, and hands
+    /// back what the provider issued rather than what was on file.
+    @Test("A forced header request exchanges and returns the new token")
+    func forcedRequestExchanges() async throws {
+        let exchanges = ExchangeLog()
+        let session = try await resumedSession(exchanges: exchanges)
+
+        let header = try await session.authorizationHeader(forcingRefresh: true)
+
+        #expect(header == "Bearer refreshed-access-token")
+        #expect(await exchanges.count == 1, "forcing a refresh did not reach the provider")
+        #expect(await exchanges.grantTypes == ["refresh_token"])
+    }
+
+    /// Forcing a refresh on a session that never signed in is `nil`, not an exchange against
+    /// a connection that does not exist.
+    @Test("Forcing a refresh while signed out yields no header")
+    func forcedRequestWhileSignedOut() async throws {
+        let session = MCPOAuthSession(
+            storage: InMemoryClientStorage(),
+            registrations: InMemoryRegistrationStore())
+
+        #expect(try await session.authorizationHeader(forcingRefresh: true) == nil)
+    }
+}
+
+// MARK: - Forced-refresh helpers
+
+/// A session resumed from storage, with the provider stubbed.
+private func resumedSession(exchanges: ExchangeLog) async throws -> MCPOAuthSession {
+    let storage = InMemoryClientStorage()
+    try await storage.store(storedCredential(), for: storedConnection())
+    let registrations = InMemoryRegistrationStore()
+    try await registrations.store(storedRegistration(), for: storedConnection())
+
+    let session = MCPOAuthSession(
+        setup: MCPOAuthSetup(fetch: metadataFetch()),
+        storage: storage,
+        registrations: registrations,
+        tokenTransport: StubTokenTransport(log: exchanges))
+
+    _ = try await session.resume(server: resumeServerURL())
+    return session
+}
+
+/// What the provider was asked for.
+private actor ExchangeLog {
+    private(set) var grantTypes: [String] = []
+    var count: Int { grantTypes.count }
+    func record(_ grantType: String?) { grantTypes.append(grantType ?? "") }
+}
+
+/// A token endpoint that answers without a network.
+private struct StubTokenTransport: TokenTransport {
+    let log: ExchangeLog
+
+    func exchange(
+        endpoint: URL,
+        parameters: [String: String],
+        credentials: ClientCredentials,
+        method: ClientAuthenticationMethod
+    ) async throws -> TokenResponse {
+        await log.record(parameters["grant_type"])
+        return TokenResponse(
+            accessToken: "refreshed-access-token",
+            tokenType: "Bearer",
+            expiresIn: 3_600,
+            refreshToken: "rotated-refresh-token",
+            scope: "mcp:tools")
+    }
+}

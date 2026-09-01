@@ -58,11 +58,18 @@ struct MCPDump {
             }
         }
 
-        guard let header = try await session.authorizationHeader() else {
+        guard try await session.authorizationHeader() != nil else {
             throw MCPError.connectionFailed(reason: "Sign-in completed without a credential")
         }
 
-        let transport = StreamableHTTPTransport(url: url, headers: ["Authorization": header])
+        // The session, not a copy of one header it produced. Dumping a large catalogue can
+        // outlast an access token, and a frozen header would start failing partway through
+        // with no way to recover but to sign in again.
+        let transport = StreamableHTTPTransport(
+            url: url,
+            authorization: { [session] forcing in
+                try await session.authorizationHeader(forcingRefresh: forcing)
+            })
         let connection = MCPClientConnection(transport: transport, requestTimeout: .seconds(60))
         let serverInfo = try await connection.initialize(
             clientName: "MCPDump",

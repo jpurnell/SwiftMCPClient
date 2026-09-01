@@ -10,13 +10,20 @@ import SwiftOAuthClient
 /// ``signIn(server:clientName:tenant:openURL:)``, which is the point: every one of them is a
 /// credential whose mishandling is invisible until someone is signed in to the wrong account.
 ///
-/// After sign-in, ``authorizationHeader()`` is the only thing a caller needs. It refreshes
+/// After sign-in, ``authorizationHeader(forcingRefresh:)`` is the only thing a caller needs. It refreshes
 /// when the token has expired, and a caller cannot forget to.
 public actor MCPOAuthSession {
 
     private let setup: MCPOAuthSetup
     private let storage: any OAuthClientStorage
     private let registrations: any RegistrationRecordStore
+
+    /// How token requests reach the provider.
+    ///
+    /// Injected for the same reason the Keychain is: the behaviour worth testing here is what
+    /// happens when a token is exchanged, and a test that had to reach a provider to exercise
+    /// it would not be run.
+    private let tokenTransport: any TokenTransport
     private var connection: OAuthConnection?
 
     /// Which connection ``connection`` belongs to.
@@ -30,6 +37,7 @@ public actor MCPOAuthSession {
     /// - Parameters:
     ///   - setup: How discovery is performed. Injected for tests.
     ///   - storage: Where the credential lives.
+    ///   - tokenTransport: How token requests reach the provider. Injected for tests.
     ///   - registrations: Where this client's registration with the server lives. Defaults to
     ///     memory, which is the behaviour of a session that cannot be resumed: a caller that
     ///     wants ``resume(server:tenant:)`` to work across launches has to say where the
@@ -38,11 +46,13 @@ public actor MCPOAuthSession {
     public init(
         setup: MCPOAuthSetup = MCPOAuthSetup(),
         storage: any OAuthClientStorage,
-        registrations: any RegistrationRecordStore = InMemoryRegistrationStore()
+        registrations: any RegistrationRecordStore = InMemoryRegistrationStore(),
+        tokenTransport: any TokenTransport = URLSessionTokenTransport()
     ) {
         self.setup = setup
         self.storage = storage
         self.registrations = registrations
+        self.tokenTransport = tokenTransport
     }
 
     /// Creates a session that keeps its credential across launches.
@@ -141,7 +151,8 @@ public actor MCPOAuthSession {
             configuration: configuration,
             credentials: registration.credentials(environment: identifier),
             storage: storage,
-            connection: id)
+            connection: id,
+            transport: tokenTransport)
 
         let begun = await connection.beginAuthorization(redirectURI: redirectURI)
         openURL(begun.url)
@@ -221,18 +232,33 @@ public actor MCPOAuthSession {
             configuration: configuration,
             credentials: registration.credentials(environment: identifier),
             storage: storage,
-            connection: id)
+            connection: id,
+            transport: tokenTransport)
         self.connectionID = id
         return true
     }
 
     /// An `Authorization` header value that is valid now, refreshing if it is not.
     ///
+    /// Two questions, one method. Ordinarily this asks for a token that is valid *by the
+    /// clock*, and answers from the stored credential when it is — refreshing on every request
+    /// would spend a rotation each time against a provider that rotates.
+    ///
+    /// `forcingRefresh` asks for a token obtained *now*, and is for the case the clock cannot
+    /// see: the provider has stopped honouring a credential that has not expired here, because
+    /// the grant was revoked, the clock drifted, or the dynamic client registration lapsed
+    /// underneath it. The only evidence of any of those is a `401`, so this is the answer to a
+    /// refusal and not something to call before sending.
+    ///
+    /// - Parameter forcingRefresh: Exchange regardless of what the stored expiry says.
     /// - Returns: The header value, or `nil` if this session has not signed in.
-    /// - Throws: `ConnectionError` or `OAuthError` if a refresh was needed and failed.
-    public func authorizationHeader() async throws -> String? {
+    /// - Throws: `ConnectionError` or `OAuthError` if the refresh was needed and failed.
+    public func authorizationHeader(forcingRefresh: Bool = false) async throws -> String? {
         guard let connection else { return nil }
-        return "Bearer \(try await connection.validAccessToken())"
+        let token = forcingRefresh
+            ? try await connection.refreshedAccessToken()
+            : try await connection.validAccessToken()
+        return "Bearer \(token)"
     }
 
     /// Whether this session holds a credential.

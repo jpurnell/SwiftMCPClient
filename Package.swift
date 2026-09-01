@@ -28,7 +28,15 @@ var targets: [Target] = [
     ),
     .testTarget(
         name: "MCPClientTests",
-        dependencies: ["MCPClient"]
+        dependencies: [
+            "MCPClient",
+            // The transports' authorization behaviour is wire behaviour: which header a
+            // request actually carried, and what happened after the server refused one.
+            // Asserting that needs a server, so the tests stand one up on loopback.
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+            .product(name: "NIOHTTP1", package: "swift-nio"),
+        ]
     ),
 ]
 
@@ -86,7 +94,7 @@ let package = Package(
         // OAuth for MCP servers that require it. An MCP client is pointed at a server by a
         // user and has no pre-registered credentials, so it needs discovery and dynamic
         // registration rather than a token someone pasted in.
-        .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.4.0"),
+        .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.6.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.
