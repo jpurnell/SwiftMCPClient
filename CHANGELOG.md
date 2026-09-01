@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A rejected handshake no longer crashes the client.** `MCPClientConnection.initialize`
+  connected the transport but, when the server refused the handshake (Apollo MCP's 401
+  for an unauthenticated `initialize`, first observed live in MCPExplorer), threw without
+  disconnecting. The dropped transport still held a live `HTTPClient`, tripping
+  AsyncHTTPClient's shutdown-before-deinit precondition — `SIGTRAP` in debug builds.
+  `initialize` now releases the transport on the error path and resets connection state,
+  so a failed handshake surfaces as the server's error and the connection is retryable.
+  Three tests written first: failed handshake disconnects the transport, initialize
+  retries after failure, and a failed `connect()` leaves nothing half-open (379 → 382).
 - **DocC articles terminate.** `doc-run` executes each `.docc` article as a
   program. All eight drove a live connection to `mcp.example.com`, a server that
   does not answer: five were killed at the 30-second deadline, one segfaulted
@@ -37,6 +46,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `notifications` needing `await`, since it is actor-isolated.
 
 ### Added
+- `MCPDump` (macOS executable target) — signs in over OAuth, connects over Streamable
+  HTTP, and dumps a server's complete `tools/list` as pretty-printed JSON on stdout.
+  Built because MCPExplorer's tool list is a browsing surface, and auditing a 69-tool
+  catalog (Apollo MCP: 349K of schemas) needs the catalog in a file. ~70 lines reusing
+  `MCPOAuthSession` + `StreamableHTTPTransport`; errors go to the unified log (privacy-
+  annotated) and stderr, keeping stdout a clean JSON stream.
 - `ProcessRunner` — the single site in the package allowed to spawn a subprocess or read its
   pipes. `StdioTransport` now spawns through it.
 - Test support: `String.utf8Data`, `requireURL(_:)`, `loopbackPort(of:)`, `loopbackURL(port:target:)`.

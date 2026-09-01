@@ -16,3 +16,6 @@ development-guidelines/07_LIBRARY/latestReport.json
 CLAUDE.local.md
 /.claude/skills/
 /development-guidelines.pre-v2/
+
+# Local field notes — never committed (career/external context lives here)
+project/notes/

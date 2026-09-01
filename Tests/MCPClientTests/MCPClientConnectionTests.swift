@@ -1489,4 +1489,61 @@ struct MCPClientConnectionTests {
         _ = await client.notifications
         #expect(Bool(true), "Notification stream is accessible")
     }
+
+    // MARK: - Handshake Failure Cleanup
+
+    @Test("failed handshake disconnects the transport it connected")
+    func initializeFailureDisconnectsTransport() async throws {
+        let transport = MockTransport()
+        // No response enqueued: connect() succeeds, then the handshake's
+        // receive() throws invalidResponse — the same shape as a server
+        // rejecting an unauthenticated initialize.
+        let client = MCPClientConnection(transport: transport)
+
+        await #expect(throws: MCPError.self) {
+            _ = try await client.initialize(clientName: "Test", clientVersion: "1.0")
+        }
+
+        #expect(await transport.state.isConnected() == false,
+                "A failed handshake must release the transport, or its HTTP client leaks")
+    }
+
+    @Test("initialize can be retried after a failed handshake")
+    func initializeRetriesAfterFailedHandshake() async throws {
+        let transport = MockTransport()
+        let client = MCPClientConnection(transport: transport)
+
+        await #expect(throws: MCPError.self) {
+            _ = try await client.initialize(clientName: "Test", clientVersion: "1.0")
+        }
+
+        await transport.enqueueResponse("""
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "retry-server", "version": "1.0.0"}
+            }
+        }
+        """)
+
+        let result = try await client.initialize(clientName: "Test", clientVersion: "1.0")
+        #expect(result.serverInfo.name == "retry-server")
+        #expect(await transport.state.isConnected() == true)
+    }
+
+    @Test("failed transport connect leaves nothing to clean up")
+    func initializeConnectFailureThrowsWithoutDisconnect() async throws {
+        let transport = MockTransport()
+        await transport.setConnectError(.connectionFailed(reason: "refused"))
+        let client = MCPClientConnection(transport: transport)
+
+        await #expect(throws: MCPError.self) {
+            _ = try await client.initialize(clientName: "Test", clientVersion: "1.0")
+        }
+
+        #expect(await transport.state.isConnected() == false)
+    }
 }
