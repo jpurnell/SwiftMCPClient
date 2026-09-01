@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **MCPExplorer remembers the last server, and restores its session at launch.** The restore
+  proposal (§15) wanted auto-resume at launch and could not have it: the URL field was empty
+  on every launch, so a session that had survived the restart intact had no address to be
+  restored against, and the user went back through browser consent anyway. `LastServer`
+  persists the one value; whitespace reads as nothing and a cleared field forgets rather than
+  resurrecting the old URL. First tests for the Explorer target, which had none (401 → 406).
+
 ## [0.10.0] - 2026-09-01
 
 ### Added

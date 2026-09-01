@@ -84,7 +84,16 @@ final class MCPViewModel {
     private static let logger = os.Logger(subsystem: "MCPExplorer", category: "MCPViewModel")
 
     // Connection
-    var serverURL: String = ""
+    /// The server to connect to.
+    ///
+    /// Remembered between launches. See ``LastServer`` for why: without it, a session that
+    /// survived the restart had no address to be restored against.
+    var serverURL: String = "" {
+        didSet { lastServer.remember(serverURL) }
+    }
+
+    /// Where ``serverURL`` is remembered.
+    private let lastServer = LastServer()
     var bearerToken: String = "" // SECURITY: empty default, populated by user at runtime
 
     // OAuth. The session holds the credential; nothing here ever holds a code, a verifier or
@@ -363,6 +372,8 @@ final class MCPViewModel {
         // Persistent by default. Making a user authorise on every launch trains them to
         // click through consent screens without reading them, which is the opposite of what
         // consent screens are for.
+        serverURL = lastServer.recalled ?? ""
+
         do {
             oauthSession = try MCPOAuthSession.persistent()
             credentialsPersist = true
@@ -418,6 +429,24 @@ final class MCPViewModel {
             Self.logger.error("OAuth sign-in failed: \(String(describing: error), privacy: .public)")
             oauthState = .failed(Self.describe(error))
         }
+    }
+
+    /// Restores a session at launch, against the server remembered from the last one.
+    ///
+    /// This is what §15 of the restore proposal asked for and could not have: at the time,
+    /// the URL field was empty at launch, so there was nothing to restore against. Silent
+    /// either way — at launch the user has asked for nothing, and the sign-in button is the
+    /// remedy for every reason this can fail.
+    func restoreRememberedSession() async {
+        // The same bar as sign-in: this string names the host an OAuth flow's endpoints were
+        // discovered from, and it came off disk rather than out of the field.
+        guard let components = URLComponents(string: serverURL),
+              components.scheme?.lowercased() == "https",
+              let host = components.host, !host.isEmpty,
+              let url = components.url else {
+            return
+        }
+        await restoreSession(for: url)
     }
 
     /// Restores a session stored on an earlier launch, without opening a browser.

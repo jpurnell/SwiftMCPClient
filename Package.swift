@@ -46,6 +46,17 @@ targets.append(
         ]
     )
 )
+// The Explorer's own logic — what it remembers between launches, and how it decides
+// whether to restore a session — is testable without a window on screen.
+targets.append(
+    .testTarget(
+        name: "MCPExplorerTests",
+        dependencies: ["MCPExplorer"],
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
+    )
+)
 // Survey utility, not a product: connects with the persisted OAuth session and dumps
 // the server's tool catalog as JSON. MCPExplorer's tool list is a browsing surface;
 // auditing 69 tool schemas needs them in a file.

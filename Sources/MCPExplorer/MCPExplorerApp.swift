@@ -20,6 +20,9 @@ struct MCPExplorerApp: App {
         WindowGroup {
             ContentView()
                 .environment(viewModel)
+                // A session that survived the restart is restored before the user touches
+                // anything. Silent when there is nothing to restore, which is most launches.
+                .task { await viewModel.restoreRememberedSession() }
         }
         .defaultSize(width: 1000, height: 700)
         .commands {
