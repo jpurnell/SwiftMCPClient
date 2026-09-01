@@ -6,8 +6,7 @@
 
 ## Current phase
 
-**OAuth session restore — DONE** (roadmap #2). Implemented red-first on
-`feature/oauth-session-restore`, commit `7df8652`. **Not merged, not pushed.**
+**OAuth session restore — DONE** (roadmap #2), merged and pushed, released as **v0.10.0**.
 
 Next up is **OAuth token refresh** (roadmap #3), which was promoted to priority 1 in
 `project/master_plan.md`: a restored session is precisely the thing that needs refreshing,
@@ -15,10 +14,10 @@ and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 
 ## Exact next step (start here)
 
-1. **Decide the merge.** `feature/oauth-session-restore` is one commit ahead of `main`,
-   clean, gate 0/0, 401 tests. Fast-forwards. Then delete the branch and the two older
-   merged ones (`feature/handshake-cleanup-mcpdump`, `feature/streamable-http-phase1`).
-2. **Then token refresh**, design-first per the usual workflow. Read
+1. **Token refresh**, design-first per the usual workflow. (Three fully-merged local
+   branches are still lying around — `feature/oauth-session-restore`,
+   `feature/handshake-cleanup-mcpdump`, `feature/streamable-http-phase1` — deletable
+   whenever.) Read
    `project/summaries/2026-09-01_OAuthSessionRestore.md` first — it records three things
    the refresh work inherits:
    - SwiftOAuth's `OAuthConnection.validAccessToken()` already refreshes internally; what
@@ -30,7 +29,7 @@ and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 
 ## State of the world
 
-- **Branch:** `feature/oauth-session-restore` at `7df8652`; `main` at `aff08f8`, clean tree.
+- **Branch:** `main`, clean, pushed. Session restore is merged; **v0.10.0** is tagged.
 - **Gate:** 0 errors / 0 warnings (`--no-cache`, 40 of 45 checkers, 2026-09-01).
   **Tests:** 401 / 32 suites.
 - **The toolchain moved on 2026-09-01.** The OS update left `xcode-select` on
@@ -55,7 +54,7 @@ and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 6. TransportGuide.md Phase 1 revision (carried three times now)
 7. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
 8. Linux CI verification
-9. Deliberate v1.0.0 tag (after 3, 7, 8 — latest tag is v0.9.0)
+9. Deliberate v1.0.0 tag (after 3, 7, 8 — latest tag is **v0.10.0**, cut 2026-09-01)
 
 ## Blockers / decisions
 

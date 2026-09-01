@@ -17,7 +17,7 @@ A Swift 6 client library for the [Model Context Protocol (MCP)](https://modelcon
 
 - Swift 6.0+
 - macOS 14+ / iOS 17+ / tvOS 17+ / watchOS 10+
-- Linux (Ubuntu 22.04+ tested)
+- Linux (Ubuntu 22.04+) — builds; CI verification is still outstanding, so treat Linux as unproven
 
 ## Installation
 
