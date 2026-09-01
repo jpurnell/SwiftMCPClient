@@ -155,6 +155,12 @@ public actor MCPClientConnection: MCPClientProtocol {
             // We accept any version — the protocol is designed to be forward-compatible
             // at the JSON-RPC level. Log but don't reject newer versions.
 
+            // Told to the transport before anything else is sent. Spec 2025-06-18 requires
+            // `MCP-Protocol-Version` on every request *after* initialization, and the
+            // `notifications/initialized` below is the first of them. Most transports ignore
+            // this; the ones that must echo the header cannot learn it any other way.
+            await transport.didNegotiate(protocolVersion: initResult.protocolVersion)
+
             // Send notifications/initialized per MCP spec (fire-and-forget, no response)
             let notification = JSONRPCNotification(method: "notifications/initialized")
             let notificationData = try JSONEncoder().encode(notification)

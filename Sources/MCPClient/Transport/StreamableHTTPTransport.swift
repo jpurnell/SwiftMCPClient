@@ -43,6 +43,9 @@ public typealias AuthorizationProvider = @Sendable (_ forcingRefresh: Bool) asyn
 /// behavior on macOS and Linux.
 public actor StreamableHTTPTransport: MCPTransport {
     private let url: URL
+    /// Session identity, the negotiated version, and the last event seen on each stream.
+    private let session = StreamableHTTPSession()
+
     private var headers: [String: String]
 
     /// Asked for a current `Authorization` header before each request.
@@ -54,7 +57,14 @@ public actor StreamableHTTPTransport: MCPTransport {
     private var httpClient: HTTPClient?
 
     /// Session ID returned by the server on initialize.
-    public private(set) var sessionId: String?
+    /// The session id the server assigned, if it assigned one.
+    ///
+    /// Derived rather than stored: the session state owns session identity, and a
+    /// second copy here would be a second thing to keep in step. Reading it across the actor
+    /// boundary was already `await`ed, so this is not a change a caller can see.
+    public var sessionId: String? {
+        get async { await session.sessionID }
+    }
 
     /// Queue of received JSON-RPC messages from POST response bodies.
     private var messageQueue: [Data] = []
@@ -108,6 +118,13 @@ public actor StreamableHTTPTransport: MCPTransport {
         }
     }
 
+    /// Adopts the protocol version the server accepted, for every later request to echo.
+    ///
+    /// - Parameter protocolVersion: The version from the initialization result.
+    public func didNegotiate(protocolVersion: String) async {
+        await session.adopt(protocolVersion: protocolVersion)
+    }
+
     /// The headers currently sent with each request. Test visibility only.
     var currentHeaders: [String: String] { headers }
 
@@ -122,7 +139,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         defer { isConnected = false }
 
         // Terminate the session on the server if we have a session ID
-        if let client = httpClient, let sid = sessionId {
+        if let client = httpClient, let sid = await session.sessionID {
             var request = HTTPClientRequest(url: url.absoluteString)
             request.method = .DELETE
             request.headers.add(name: "Mcp-Session-Id", value: sid)
@@ -133,7 +150,7 @@ public actor StreamableHTTPTransport: MCPTransport {
             _ = try? await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
         }
 
-        sessionId = nil
+        await session.clear()
         messageQueue.removeAll()
 
         // Fail any waiting receive() call
@@ -167,6 +184,14 @@ public actor StreamableHTTPTransport: MCPTransport {
             response = try await attempt(data, on: client, forcingRefresh: true)
         }
 
+        // A 404 answering a request that carried a session id is the server saying it has
+        // forgotten the session — not that the endpoint is missing. Holding on to it would
+        // send every later request into the same wall, and the caller cannot re-initialize
+        // while the transport still believes in a session the server has dropped.
+        if response.status.code == 404, await session.sessionID != nil {
+            await session.clear()
+        }
+
         // 202 Accepted = notification acknowledged, no response body
         if response.status.code == 202 {
             return
@@ -180,10 +205,9 @@ public actor StreamableHTTPTransport: MCPTransport {
             )
         }
 
-        // Capture session ID from response headers
-        if let sid = response.headers.first(name: "Mcp-Session-Id") {
-            sessionId = sid
-        }
+        // Capture the session id the server assigned. `adopt` ignores a nil, because a later
+        // response that simply does not repeat the header has not revoked anything.
+        await session.adopt(sessionID: response.headers.first(name: "Mcp-Session-Id"))
 
         // Read response body — the JSON-RPC result, framed either as a single JSON
         // document or as an SSE stream. The `Accept` header above promises to handle both,
@@ -219,8 +243,11 @@ public actor StreamableHTTPTransport: MCPTransport {
         request.method = .POST
         request.headers.add(name: "Content-Type", value: "application/json")
         request.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        if let sid = sessionId {
-            request.headers.add(name: "Mcp-Session-Id", value: sid)
+        // Session id, negotiated protocol version, and a resume marker if one applies — the
+        // session decides which of those a request carries, so the rule lives in one testable
+        // place rather than inline here.
+        for (key, value) in await session.headers() {
+            request.headers.replaceOrAdd(name: key, value: value)
         }
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)

@@ -32,6 +32,8 @@ actor StubHTTPServer {
     struct Received: Sendable {
         let authorization: String?
         let sessionId: String?
+        let protocolVersion: String?
+        let lastEventID: String?
         let body: String
     }
 
@@ -171,6 +173,8 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
             recorder.record(StubHTTPServer.Received(
                 authorization: head.headers.first(name: "Authorization"),
                 sessionId: head.headers.first(name: "Mcp-Session-Id"),
+                protocolVersion: head.headers.first(name: "MCP-Protocol-Version"),
+                lastEventID: head.headers.first(name: "Last-Event-ID"),
                 body: body))
             respond(context: context, reply: recorder.nextReply())
             self.head = nil

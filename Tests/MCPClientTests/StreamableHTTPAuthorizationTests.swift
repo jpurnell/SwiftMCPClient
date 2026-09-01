@@ -301,3 +301,77 @@ private actor ForcingLog {
 private enum TokenTrouble: Error {
     case unavailable
 }
+
+/// What a request carries once a session exists.
+///
+/// The headers themselves are decided by `StreamableHTTPSession` and unit-tested there. What
+/// these check is that the transport actually asks it — the same class of gap that left
+/// `updateAuthorization(_:)` correct and uncalled.
+@Suite("Streamable HTTP — session headers")
+struct StreamableHTTPSessionHeaderTests {
+
+    /// The server assigns a session id on the first response; every later request carries it.
+    @Test("An assigned session id is carried on the next request")
+    func carriesSessionID() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+            return await server.received.map(\.sessionId)
+        }
+
+        #expect(seen == [nil, "stub-session"], "the assigned session id was not carried back")
+    }
+
+    /// `MCP-Protocol-Version` must not appear on the request that negotiates it. Sending a
+    /// version before the server has agreed to one asserts a negotiation that has not happened.
+    @Test("The protocol version is absent until one is negotiated")
+    func protocolVersionAbsentBeforeNegotiation() async throws {
+        let version = try await withStub(replies: [.ok("{}")]) { transport, server in
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+            return await server.received.first?.protocolVersion
+        }
+
+        #expect(version == nil)
+    }
+
+    /// Once the server has accepted a version, every later request echoes it — spec 2025-06-18
+    /// requires the header, and a server enforcing it rejects requests without one.
+    @Test("The negotiated version is echoed on later requests")
+    func echoesNegotiatedVersion() async throws {
+        let version = try await withStub(replies: [.ok("{}")]) { transport, server in
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+
+            await transport.didNegotiate(protocolVersion: "2025-06-18")
+
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.protocolVersion
+        }
+
+        #expect(version == "2025-06-18")
+    }
+
+    /// A `404` answering a request that carried a session id means the server has forgotten
+    /// the session. Keeping it would send every later request into the same wall; the caller
+    /// has to re-initialize, and it cannot do that while the transport still believes.
+    @Test("A 404 against a live session forgets it")
+    func notFoundClearsTheSession() async throws {
+        let stillHeld = try await withStub(
+            replies: [.ok("{}"), .init(status: .notFound, body: "{}")]
+        ) { transport, _ in
+            try await transport.send(Data("{}".utf8))
+            _ = try await transport.receive()
+
+            await #expect(throws: (any Error).self) {
+                try await transport.send(Data("{}".utf8))
+            }
+            return await transport.sessionId
+        }
+
+        #expect(stillHeld == nil, "the transport still holds a session the server has forgotten")
+    }
+}

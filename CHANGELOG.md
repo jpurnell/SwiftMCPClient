@@ -26,6 +26,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **`StreamableHTTPSession` and the `MCP-Protocol-Version` header.** Session identity, the
+  negotiated protocol version, and the last event seen on each stream now live in one actor
+  that decides what every request carries — so the header rules are unit tests rather than
+  something inferred from a request nobody can inspect. Spec 2025-06-18 requires
+  `MCP-Protocol-Version` on every request after initialization, and a server enforcing it was
+  rejecting us; it is now echoed with the version the server **accepted**, which differs from
+  the one requested whenever it negotiates down. `MCPTransport` gained
+  `didNegotiate(protocolVersion:)` with a default no-op, so no conformance broke.
+- **A `404` against a live session now forgets it.** The server saying it has forgotten a
+  session was previously indistinguishable from a missing endpoint, and the transport kept
+  sending an id the server had dropped — every later request into the same wall, with no way
+  for a caller to re-initialize past it.
+
 - **`SSEEventStream`** — decodes a byte stream into Server-Sent Events as they arrive, holding
   parser state across buffer boundaries that fall wherever the network put them, including
   inside a `\r\n`. The first piece of Streamable HTTP Phase 2 (ADR-002); framing rules stay in
