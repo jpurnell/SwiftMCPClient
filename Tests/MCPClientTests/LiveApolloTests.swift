@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 import SwiftOAuthClient
+import AsyncHTTPClient
+import NIOCore
 @testable import MCPClient
 #if canImport(AppKit)
 import AppKit
@@ -110,6 +112,65 @@ struct LiveApolloTests {
             let tools = try await connection.listTools()
             LiveApollo.report("listed \(tools.count) tools with the refreshed token")
             #expect(!tools.isEmpty)
+        }
+    }
+
+    /// Does Apollo offer the server-initiated `GET` channel, and does it hold POST responses
+    /// open?
+    ///
+    /// Both were guesses when Streamable HTTP Phase 2 was designed. The proposal committed to
+    /// building the `GET` channel and to streaming POST bodies without knowing whether the one
+    /// server we can actually test against uses either. Neither answer changes the code — a
+    /// library has to handle both — but an unmeasured assumption in a design document is worth
+    /// converting into a fact while it is cheap.
+    ///
+    /// Asked directly rather than through the transport: what is wanted is the server's raw
+    /// answer, not our interpretation of it.
+    @Test("What Apollo does with the two channels")
+    func measuresServerChannels() async throws {
+        let session = try MCPOAuthSession.persistent()
+        let server = try LiveApollo.serverURL()
+        guard try await session.resume(server: server) else {
+            Issue.record("no stored session; run the restore test first")
+            return
+        }
+        let header = try #require(try await session.authorizationHeader())
+
+        let client = HTTPClient(eventLoopGroupProvider: .singleton)
+        do {
+            // The POST: is the answer one JSON document, or a stream?
+            var post = HTTPClientRequest(url: server.absoluteString)
+            post.method = .POST
+            post.headers.add(name: "Authorization", value: header)
+            post.headers.add(name: "Content-Type", value: "application/json")
+            post.headers.add(name: "Accept", value: "application/json, text/event-stream")
+            post.body = .bytes(ByteBuffer(string:
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"live-check","version":"1.0.0"}}}"#))
+            let postResponse = try await client.execute(post, timeout: .seconds(30))
+            let contentType = postResponse.headers.first(name: "Content-Type") ?? "none"
+            let sessionID = postResponse.headers.first(name: "Mcp-Session-Id")
+            LiveApollo.report("POST answered \(postResponse.status.code), Content-Type: \(contentType)")
+            LiveApollo.report("POST responses are \(contentType.contains("event-stream") ? "SSE STREAMS" : "single JSON documents")")
+            LiveApollo.report("session id assigned: \(sessionID ?? "none")")
+            _ = try await postResponse.body.collect(upTo: 1024 * 1024)
+
+            // The GET: a stream, or a refusal?
+            var get = HTTPClientRequest(url: server.absoluteString)
+            get.method = .GET
+            get.headers.add(name: "Authorization", value: header)
+            get.headers.add(name: "Accept", value: "text/event-stream")
+            if let sessionID {
+                get.headers.add(name: "Mcp-Session-Id", value: sessionID)
+            }
+            let getResponse = try await client.execute(get, timeout: .seconds(30))
+            let offered = getResponse.status.code != 405 && (200...299).contains(getResponse.status.code)
+            LiveApollo.report("GET answered \(getResponse.status.code) — server stream \(offered ? "OFFERED" : "NOT offered")")
+
+            try await client.shutdown()
+        } catch {
+            // `HTTPClient` traps in `deinit` if it is not shut down.
+            try? await client.shutdown()
+            throw error
         }
     }
 
