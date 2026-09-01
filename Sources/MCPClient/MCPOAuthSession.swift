@@ -325,6 +325,14 @@ public actor MCPOAuthSession {
             }
             throw OAuthError.serverError("registration failed: HTTP \(http.statusCode)")
         }
+        // Read before decoding, because decoding discards it: `ClientRegistrationResponse`
+        // does not model `client_secret_expires_at`, and this is the only moment the value
+        // exists. A registration that expires otherwise does so invisibly, surfacing weeks
+        // later as a refresh failing `invalid_client` with nothing to connect it to.
+        let logger = Logger(label: "MCPClient.MCPOAuthSession")
+        // logging: the registration lifetime, observable exactly once and otherwise lost
+        logger.info("registered at \(endpoint.host() ?? "the server"): \(RegistrationLifetime.expiry(from: data))")
+
         return try JSONDecoder().decode(ClientRegistrationResponse.self, from: data)
     }
 }

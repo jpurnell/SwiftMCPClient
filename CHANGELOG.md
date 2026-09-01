@@ -26,6 +26,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **A way to verify the OAuth work against a real server.** `Tests/MCPClientTests/LiveApolloTests.swift`
+  runs only with `MCP_LIVE_APOLLO` set, so the ordinary suite and the quality gate never reach
+  a browser or an account. It restores a session, forces a refresh against a real token
+  endpoint, and drives the retry path by handing the transport a deliberately invalid token
+  until it is asked with `forcingRefresh` — a real `401`, recovered from, without waiting for
+  anything to expire. It reports what it measures: token lifetime, and whether the provider
+  rotates refresh tokens.
+- **`client_secret_expires_at` is read and logged at registration.** RFC 7591 §3.2.1 lets a
+  server say when a client secret expires; `ClientRegistrationResponse` does not model it, so
+  the value was discarded at the one moment it exists. A registration that expires then does
+  so invisibly, surfacing weeks later as a refresh failing `invalid_client` with nothing to
+  connect it to. `RegistrationLifetime` distinguishes "the server said never" from "the server
+  said nothing", because reading silence as a guarantee is how that surprise gets built in.
+
 ### Added
 - **MCPExplorer remembers the last server, and restores its session at launch.** The restore
   proposal (§15) wanted auto-resume at launch and could not have it: the URL field was empty
