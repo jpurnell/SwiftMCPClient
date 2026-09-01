@@ -26,6 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **`SSEEventStream`** — decodes a byte stream into Server-Sent Events as they arrive, holding
+  parser state across buffer boundaries that fall wherever the network put them, including
+  inside a `\r\n`. The first piece of Streamable HTTP Phase 2 (ADR-002); framing rules stay in
+  `SSEParser`, which both the streaming and collected paths share.
+
 - **A way to verify the OAuth work against a real server.** `Tests/MCPClientTests/LiveApolloTests.swift`
   runs only with `MCP_LIVE_APOLLO` set, so the ordinary suite and the quality gate never reach
   a browser or an account. It restores a session, forces a refresh against a real token
