@@ -17,8 +17,12 @@ import AppKit
 /// **Opt in explicitly:**
 ///
 /// ```
-/// MCP_LIVE_APOLLO=1 swift test --filter "Live — Apollo"
+/// MCP_LIVE_APOLLO=1 swift test --filter LiveApolloTests
 /// ```
+///
+/// The filter is the **type** name, not the `@Suite` display name — SwiftPM matches test
+/// identifiers, so `--filter "Live — Apollo"` selects nothing and reports it as "No matching
+/// test cases were run", which reads exactly like a suite that is skipping correctly.
 ///
 /// Skipped otherwise, including by the quality gate. It needs a browser the first time, so it
 /// cannot run unattended, and it signs in against a real account.
