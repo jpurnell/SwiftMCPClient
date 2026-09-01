@@ -33,6 +33,14 @@ import Logging
 public actor HTTPSSETransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]
+
+    /// Asked for a current `Authorization` header before each request.
+    ///
+    /// The stream is the limit here. A header cannot be changed on a request that is already
+    /// open, so a token expiring mid-stream is recoverable only at the next reconnect — which
+    /// is inherent to a long-lived GET, not something this could fix. What it does fix is every
+    /// POST, and the token the stream carries when it is next opened.
+    private let authorization: AuthorizationProvider?
     private let connectionTimeout: TimeInterval
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
@@ -61,6 +69,10 @@ public actor HTTPSSETransport: MCPTransport {
     /// - Parameters:
     ///   - url: The SSE endpoint URL (e.g., `https://mcp.example.com/sse`).
     ///   - headers: Custom HTTP headers sent with all requests (e.g., authentication).
+    ///   - authorization: Asked for a current `Authorization` header before each POST, again
+    ///     after a `401`, and when the stream is opened. Supplying one is how a session that
+    ///     refreshes reaches the wire; without it the header in `headers` is frozen for the
+    ///     life of the transport.
     ///   - connectionTimeout: Maximum time to wait for the initial endpoint event. Default 30s.
     ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop. Default 3.
     ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds. Default 1.0.
@@ -70,6 +82,7 @@ public actor HTTPSSETransport: MCPTransport {
     public init(
         url: URL,
         headers: [String: String] = [:],
+        authorization: AuthorizationProvider? = nil,
         connectionTimeout: TimeInterval = 30.0,
         maxReconnectAttempts: Int = 3,
         reconnectBaseDelay: TimeInterval = 1.0,
@@ -77,6 +90,7 @@ public actor HTTPSSETransport: MCPTransport {
     ) {
         self.url = url
         self.headers = headers
+        self.authorization = authorization
         self.connectionTimeout = connectionTimeout
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
@@ -147,19 +161,14 @@ public actor HTTPSSETransport: MCPTransport {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
         }
 
-        var request = HTTPClientRequest(url: endpointURL.absoluteString)
-        request.method = .POST
-        request.headers.add(name: "Content-Type", value: "application/json")
-        for (key, value) in headers {
-            request.headers.replaceOrAdd(name: key, value: value)
-        }
-        request.body = .bytes(data)
+        var response = try await post(data, to: endpointURL, on: client, forcingRefresh: false)
 
-        let response: HTTPClientResponse
-        do {
-            response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
-        } catch {
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
+        // One retry, and only for a refusal — the same recovery the Streamable HTTP transport
+        // has, for the same reason: a revoked grant or an expired registration is invisible to
+        // a clock, and arrives only as a 401. Once, not in a loop: a server refusing a
+        // just-refreshed token is refusing the grant.
+        if response.status.code == 401, authorization != nil {
+            response = try await post(data, to: endpointURL, on: client, forcingRefresh: true)
         }
 
         guard (200...299).contains(response.status.code) else {
@@ -176,6 +185,52 @@ public actor HTTPSSETransport: MCPTransport {
         let responseData = Data(buffer: body)
         if !responseData.isEmpty {
             enqueueMessage(responseData)
+        }
+    }
+
+    /// Makes one POST, with a freshly resolved `Authorization` header.
+    ///
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made, or
+    ///   whatever the provider threw. A provider that fails **fails the send**: continuing
+    ///   unauthenticated reaches the server as a `401`, which reads as a credential problem at
+    ///   the far end rather than a local one.
+    private func post(
+        _ data: Data,
+        to endpointURL: URL,
+        on client: HTTPClient,
+        forcingRefresh: Bool
+    ) async throws -> HTTPClientResponse {
+        var request = HTTPClientRequest(url: endpointURL.absoluteString)
+        request.method = .POST
+        request.headers.add(name: "Content-Type", value: "application/json")
+        for (key, value) in headers {
+            request.headers.replaceOrAdd(name: key, value: value)
+        }
+        try await applyAuthorization(to: &request, forcingRefresh: forcingRefresh)
+        request.body = .bytes(data)
+
+        do {
+            return try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+        } catch {
+            throw MCPError.connectionFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// Puts a current token on a request, if this transport was given a way to get one.
+    ///
+    /// Applied after the static headers, so a live session wins over a token pasted into
+    /// configuration — both present means the pasted one is the leftover.
+    private func applyAuthorization(
+        to request: inout HTTPClientRequest,
+        forcingRefresh: Bool
+    ) async throws {
+        guard let authorization else { return }
+        if let header = try await authorization(forcingRefresh) {
+            request.headers.replaceOrAdd(name: "Authorization", value: header)
+        } else {
+            // `nil` means not signed in, which is a request with no header — not one carrying
+            // `Bearer` and nothing after it.
+            request.headers.remove(name: "Authorization")
         }
     }
 
@@ -209,6 +264,9 @@ public actor HTTPSSETransport: MCPTransport {
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)
         }
+        // Resolved each time the stream is opened, so a reconnect after a token expired does
+        // not present the token that had already stopped working.
+        try await applyAuthorization(to: &request, forcingRefresh: false)
 
         let response: HTTPClientResponse
         do {
@@ -296,6 +354,13 @@ public actor HTTPSSETransport: MCPTransport {
                         }
                     }
                 }
+            } catch is CancellationError {
+                // A disconnect cancels this task, and a cancelled stream is not a failed one.
+                // Logged at debug because "SSE stream ended with error" on every clean
+                // shutdown trains an operator to ignore the line that matters.
+                let logger = Logger(label: "MCPClient.HTTPSSETransport")
+                // logging: an expected end, kept below warning so a real failure stands out
+                logger.debug("SSE stream cancelled by disconnect")
             } catch {
                 let logger = Logger(label: "MCPClient.HTTPSSETransport")
                 // logging: swift-log Logger does not support privacy annotations

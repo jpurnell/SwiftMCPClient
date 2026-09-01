@@ -26,6 +26,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **`HTTPSSETransport` keeps its session authorised too.** It had the same frozen-header
+  defect the Streamable transport just lost: a token read once at construction, under a session
+  that refreshes. It now takes the same `AuthorizationProvider`, asked before every POST, again
+  after a `401`, and each time the stream is opened — so a reconnect never presents the token
+  that had already stopped working. The limit that remains is inherent: a header cannot change
+  on a request already open, so a token expiring mid-stream is recoverable only at the next
+  reconnect. Its inline reconnect backoff also moved to `StreamBackoff`, which bounded it —
+  raising `maxReconnectAttempts` had been quietly buying delays that doubled without limit.
+- **A clean disconnect no longer logs as a failure.** Cancelling the SSE stream reported
+  "SSE stream ended with error" at warning level on every shutdown, which trains an operator to
+  ignore the line that matters.
+
 - **Streamable HTTP is a multiplexer (ADR-002).** Two gaps closed together, because they are
   the same architectural change.
 
