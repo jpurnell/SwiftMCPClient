@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import AsyncHTTPClient
 import NIOCore
 import NIOHTTP1
@@ -17,25 +18,41 @@ public typealias AuthorizationProvider = @Sendable (_ forcingRefresh: Bool) asyn
 
 /// Connects to a remote MCP server via Streamable HTTP (MCP spec 2025-03-26).
 ///
-/// All communication flows through a single `POST /mcp` endpoint. The server
-/// returns JSON-RPC responses directly in the POST response body. Session
-/// continuity is maintained via the `Mcp-Session-Id` header.
+/// Requests go out as `POST /mcp`; the server answers either with one JSON document or with an
+/// SSE stream it may hold open while it works. Alongside them runs a single client-initiated
+/// `GET` to the same endpoint, carrying the messages the *server* originates — progress,
+/// log messages, sampling requests, list-changed notifications. Both feed the same
+/// ``receive()`` queue, which is what makes this a multiplexer rather than a request/response
+/// client (ADR-002).
+///
+/// Session continuity is the `Mcp-Session-Id` header, and every request after initialization
+/// also carries the negotiated `MCP-Protocol-Version`.
 ///
 /// ## Protocol Flow
 ///
 /// 1. **Connect:** Creates the HTTP client (no network call needed).
-/// 2. **Send:** POSTs JSON-RPC to `/mcp`. Captures `Mcp-Session-Id` from
-///    the response headers. Enqueues the response body for ``receive()``.
-/// 3. **Receive:** Returns the next queued response, or suspends until one
-///    arrives from a ``send(_:)`` call.
-/// 4. **Disconnect:** Sends `DELETE /mcp` with session ID to terminate the
-///    session, then shuts down the HTTP client.
+/// 2. **Send:** POSTs JSON-RPC to `/mcp`. A JSON response is queued whole; an SSE response is
+///    consumed as it arrives, so ``send(_:)`` returns once the request is answered rather than
+///    when the work finishes — a progress notification delivered after the response closes is
+///    not a progress notification.
+/// 3. **Server stream:** once initialization completes, a `GET` opens the server-initiated
+///    channel. A `405` means the server originates nothing, which is not an error; a dropped
+///    stream reconnects with `Last-Event-ID` and a deliberately gentle backoff, because
+///    nothing is blocked on it.
+/// 4. **Receive:** Returns the next queued message from either source, or suspends until one
+///    arrives.
+/// 5. **Disconnect:** Cancels the server stream and every in-flight response, sends
+///    `DELETE /mcp` to terminate the session, then shuts down the HTTP client.
 ///
-/// ## Advantages Over Legacy SSE
+/// ## Compared with legacy HTTP+SSE
 ///
-/// - No long-lived SSE connection to maintain
-/// - Each request is self-contained (better for ephemeral/serverless environments)
-/// - Session survives connection drops (server tracks state via session ID)
+/// The difference is what a dead stream costs. Legacy HTTP+SSE dies with its stream, because
+/// that is its only channel for responses. Here, request and response keep working when the
+/// server stream is gone — only server-initiated messages stop. That is why the two transports
+/// are separate types rather than one with a mode flag: the failure modes differ, and a flag
+/// hides exactly the difference that matters.
+///
+/// A caller that wants the earlier POST-only behaviour passes `openServerStream: false`.
 ///
 /// ## Cross-Platform
 ///
@@ -45,6 +62,21 @@ public actor StreamableHTTPTransport: MCPTransport {
     private let url: URL
     /// Session identity, the negotiated version, and the last event seen on each stream.
     private let session = StreamableHTTPSession()
+
+    /// Whether the server-initiated stream should be opened after initialization.
+    private let opensServerStream: Bool
+
+    /// The one server-initiated stream, while it is running.
+    ///
+    /// One at a time: the specification permits a single `GET` stream, and a client that opens
+    /// another on every prompt leaks them server-side.
+    private var serverStreamTask: Task<Void, Never>?
+
+    /// Tasks draining SSE response bodies into the receive queue.
+    ///
+    /// One per in-flight streaming response. They outlive `send(_:)` deliberately — that is
+    /// what lets a response be consumed while the server is still writing it.
+    private var responsePumps: [Task<Void, Never>] = []
 
     private var headers: [String: String]
 
@@ -84,6 +116,11 @@ public actor StreamableHTTPTransport: MCPTransport {
     ///     and again after a `401`. Supplying one is how a session that refreshes reaches the
     ///     wire; without it the header in `headers` is sent unchanged for the life of the
     ///     transport, which outlives the token on any provider that expires them.
+    ///   - openServerStream: Whether to open the specification's client-initiated `GET`
+    ///     stream once initialization completes. Defaults to `true`. A server that offers no
+    ///     such channel answers `405`, which is not an error — the client simply has no
+    ///     server-initiated messages. Passing `false` restores the POST-only behaviour of
+    ///     ADR-001 exactly.
     ///   - connectionTimeout: Maximum time to wait for each HTTP request. Default 30s.
     ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
     ///     **Use only for development/testing** — this disables certificate validation.
@@ -91,12 +128,14 @@ public actor StreamableHTTPTransport: MCPTransport {
         url: URL,
         headers: [String: String] = [:],
         authorization: AuthorizationProvider? = nil,
+        openServerStream: Bool = true,
         connectionTimeout: TimeInterval = 30.0,
         trustSelfSignedCertificates: Bool = false
     ) {
         self.url = url
         self.headers = headers
         self.authorization = authorization
+        self.opensServerStream = openServerStream
         self.connectionTimeout = connectionTimeout
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
@@ -123,6 +162,101 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// - Parameter protocolVersion: The version from the initialization result.
     public func didNegotiate(protocolVersion: String) async {
         await session.adopt(protocolVersion: protocolVersion)
+        // Opened here rather than in `connect()`, because this is the moment the transport
+        // learns initialization happened. Opening it earlier asks a server to start a
+        // session-scoped channel for a session that does not exist yet.
+        startServerStream()
+    }
+
+    /// Opens the server-initiated stream, if it is wanted and not already running.
+    private func startServerStream() {
+        guard opensServerStream, serverStreamTask == nil, isConnected else { return }
+        // lifecycle: cancelled in `disconnect()`.
+        serverStreamTask = Task { await self.runServerStream() }
+    }
+
+    /// Keeps the server-initiated stream open, reconnecting when it drops.
+    ///
+    /// Losing this stream is not fatal — request and response keep working without it — so it
+    /// backs off gently rather than hammering a server to restore a channel nothing is
+    /// blocked on. A `405` ends the loop for good: the server has said it has no such channel,
+    /// and asking again on a schedule would be asking the same question forever.
+    private func runServerStream() async {
+        var attempt = 0
+
+        while !Task.isCancelled {
+            let delay = StreamBackoff.serverStream.delay(forAttempt: attempt)
+            if delay > .zero {
+                // silent: a cancelled sleep is the disconnect path, checked on the next line
+                try? await Task.sleep(for: delay)
+            }
+            guard !Task.isCancelled else { return }
+
+            do {
+                guard let body = try await openServerStream(resuming: attempt > 0) else {
+                    return
+                }
+                var delivered = false
+                for try await event in SSEEventStream.events(from: body) {
+                    guard !Task.isCancelled else { return }
+                    if let id = event.id {
+                        await session.record(eventID: id, for: .get)
+                    }
+                    enqueueMessage(Data(event.data.utf8))
+                    delivered = true
+                }
+
+                // A cancelled stream ends the same way a finished one does — quietly — so the
+                // reason has to be established before anything acts on it. Without this, a
+                // disconnect is scored as a server that closed early and feeds the backoff.
+                guard !Task.isCancelled else { return }
+
+                // A stream that delivered something and then ended is a healthy stream that
+                // finished; start over promptly. One that ended having delivered nothing is
+                // more likely a server declining, so it keeps its place in the backoff.
+                attempt = delivered ? 0 : attempt + 1
+            } catch {
+                attempt += 1
+                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+                // logging: why the server stream dropped, which no caller is awaiting
+                logger.debug("server stream dropped: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Asks the server to open its stream.
+    ///
+    /// - Parameter resuming: Whether to carry `Last-Event-ID` and pick up where the previous
+    ///   stream stopped.
+    /// - Returns: The stream body, or `nil` if the server offers no such channel.
+    private func openServerStream(resuming: Bool) async throws -> HTTPClientResponse.Body? {
+        guard let client = httpClient else { return nil }
+
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = .GET
+        request.headers.add(name: "Accept", value: "text/event-stream")
+        for (key, value) in await session.headers(resuming: resuming ? .get : nil) {
+            request.headers.replaceOrAdd(name: key, value: value)
+        }
+        for (key, value) in headers {
+            request.headers.replaceOrAdd(name: key, value: value)
+        }
+        if let authorization, let header = try await authorization(false) {
+            request.headers.replaceOrAdd(name: "Authorization", value: header)
+        }
+
+        let response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+
+        // 405 is a conformant server saying it originates no messages. Not a failure, and not
+        // something to retry: the answer will not change.
+        guard response.status.code != 405 else { return nil }
+        guard (200...299).contains(response.status.code) else {
+            throw MCPError.requestFailed(
+                code: Int(response.status.code),
+                message: "HTTP \(response.status.code) opening the server stream",
+                data: nil)
+        }
+        return response.body
     }
 
     /// The headers currently sent with each request. Test visibility only.
@@ -149,6 +283,16 @@ public actor StreamableHTTPTransport: MCPTransport {
             // silent: best-effort session termination during disconnect
             _ = try? await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
         }
+
+        serverStreamTask?.cancel()
+        serverStreamTask = nil
+
+        // lifecycle: every response pump started by `send(_:)` is cancelled here, which is
+        // what stops a task reading a body nobody is waiting for.
+        for pump in responsePumps {
+            pump.cancel()
+        }
+        responsePumps.removeAll()
 
         await session.clear()
         messageQueue.removeAll()
@@ -209,18 +353,84 @@ public actor StreamableHTTPTransport: MCPTransport {
         // response that simply does not repeat the header has not revoked anything.
         await session.adopt(sessionID: response.headers.first(name: "Mcp-Session-Id"))
 
-        // Read response body — the JSON-RPC result, framed either as a single JSON
-        // document or as an SSE stream. The `Accept` header above promises to handle both,
-        // so the body cannot be assumed to be JSON just because a POST was sent.
+        let contentType = response.headers.first(name: "Content-Type")
+
+        // An SSE response may be held open while the server works, emitting events as it goes.
+        // Consumed incrementally and in the background, so `send(_:)` returns once the request
+        // has been answered rather than when the work finishes — a progress notification
+        // delivered after the response closes is not a progress notification.
+        if StreamableHTTPBodyDecoder.isEventStream(contentType) {
+            let requestID = Self.requestID(of: data)
+            let pump = Task {
+                // Captured strongly: these tasks are owned by this transport and cancelled in
+                // `disconnect()`, so there is no cycle to break — and a `weak self` here would
+                // let a body be abandoned mid-response rather than drained or cancelled.
+                await self.consume(response.body, forRequest: requestID)
+            }
+            // lifecycle: cancelled in `disconnect()`, along with every other response pump.
+            responsePumps.append(pump)
+            prunePumps()
+            return
+        }
+
+        // A single JSON document has nothing to stream, and routing it through the incremental
+        // path would be machinery for no gain.
         let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB limit
         let payloads = try StreamableHTTPBodyDecoder.decode(
             body: Data(buffer: body),
-            contentType: response.headers.first(name: "Content-Type"))
+            contentType: contentType)
 
-        // One SSE response may carry several messages; each is a separate `receive()`.
         for payload in payloads {
             enqueueMessage(payload)
         }
+    }
+
+    /// Feeds an SSE response body into the receive queue, event by event.
+    ///
+    /// Errors are logged rather than thrown: nothing is awaiting this task, and a body that
+    /// died mid-response has already delivered whatever it delivered. The caller learns about
+    /// it the way it learns about any missing response — the request it is waiting on does not
+    /// arrive — which is the same outcome the collected path produced.
+    private func consume(_ body: HTTPClientResponse.Body, forRequest requestID: String?) async {
+        do {
+            for try await event in SSEEventStream.events(from: body) {
+                // Recorded before the payload is delivered: a consumer that acts on the
+                // message and then drops the connection should resume after this event, not
+                // before it.
+                if let id = event.id, let requestID {
+                    await session.record(eventID: id, for: .post(requestID: requestID))
+                }
+                enqueueMessage(Data(event.data.utf8))
+            }
+        } catch {
+            let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+            // logging: a response stream that died, which the waiting caller sees only as silence
+            logger.warning("response stream ended in failure: \(error.localizedDescription)")
+        }
+    }
+
+    /// Forgets pumps that have finished, so a long session does not accumulate them.
+    private func prunePumps() {
+        responsePumps.removeAll { $0.isCancelled }
+    }
+
+    /// The JSON-RPC id of an outgoing request, for keying its response stream.
+    ///
+    /// A notification carries none, and its response stream is not resumable — there is
+    /// nothing to correlate a replay with.
+    private static func requestID(of data: Data) -> String? {
+        // silent: a body that will not parse has no id to key a stream by
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any],
+              let id = fields["id"] else { return nil }
+        if let text = id as? String { return text }
+        if let number = id as? NSNumber { return number.stringValue }
+        return nil
+    }
+
+    /// The last event seen on a request's response stream. Test visibility only.
+    func lastEventID(forRequest requestID: String) async -> String? {
+        await session.lastEventID(for: .post(requestID: requestID))
     }
 
     /// Makes one attempt, with a freshly resolved `Authorization` header.

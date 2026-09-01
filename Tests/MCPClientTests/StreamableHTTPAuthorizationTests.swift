@@ -253,7 +253,7 @@ struct StreamableHTTPRefusalTests {
 ///   - authorization: The provider under test, if any.
 ///   - body: The test, given the connected transport and the server.
 /// - Returns: Whatever `body` returned.
-private func withStub<T>(
+func withStub<T>(
     replies: [StubHTTPServer.Reply],
     headers: [String: String] = [:],
     authorization: AuthorizationProvider? = nil,

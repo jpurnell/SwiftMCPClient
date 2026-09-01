@@ -48,7 +48,7 @@ struct StreamableHTTPBodyDecoder: Sendable {
     ///
     /// - Parameter contentType: The raw header value, if present.
     /// - Returns: `true` when the type is `text/event-stream`.
-    private static func isEventStream(_ contentType: String?) -> Bool {
+    static func isEventStream(_ contentType: String?) -> Bool {
         guard let contentType else { return false }
         let essence = contentType
             .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)

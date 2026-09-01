@@ -34,8 +34,17 @@ actor FlushProbeServer {
     }
 
     /// Starts the probe server on loopback.
-    static func start() async throws -> FlushProbeServer {
-        let recorder = ProbeRecorder()
+    ///
+    /// - Parameters:
+    ///   - first: The `data:` payload flushed immediately.
+    ///   - second: The payload flushed once the client signals, or the wait expires.
+    ///   - firstID: An `id:` for the first event, when a test needs one recorded.
+    static func start(
+        first: String = "first",
+        second: String = "second",
+        firstID: String? = nil
+    ) async throws -> FlushProbeServer {
+        let recorder = ProbeRecorder(first: first, second: second, firstID: firstID)
         let server = FlushProbeServer(recorder: recorder)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -101,6 +110,17 @@ private final class ProbeRecorder: @unchecked Sendable {
     private var secondFlushed = false
     private var order: Bool?
     private var release: (@Sendable () -> Void)?
+
+    /// The payloads to flush, and an optional id for the first.
+    let first: String
+    let second: String
+    let firstID: String?
+
+    init(first: String, second: String, firstID: String?) {
+        self.first = first
+        self.second = second
+        self.firstID = firstID
+    }
 
     /// Records the client's signal, and releases a waiting probe response.
     func signal() {
@@ -195,7 +215,7 @@ private final class ProbeHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
-        write(event: "first", context: context)
+        write(event: recorder.first, id: recorder.firstID, context: context)
         context.flush()
 
         // `Channel` is safe to use from any thread, unlike `ChannelHandlerContext`, so the
@@ -203,8 +223,8 @@ private final class ProbeHandler: ChannelInboundHandler, @unchecked Sendable {
         let channel = context.channel
         let finish: @Sendable () -> Void = { [recorder] in
             recorder.markSecondFlush()
-            var buffer = channel.allocator.buffer(capacity: 32)
-            buffer.writeString("data: second\n\n")
+            var buffer = channel.allocator.buffer(capacity: 64)
+            buffer.writeString("data: \(recorder.second)\n\n")
             channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
             channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { _ in
                 channel.close(promise: nil)
@@ -219,8 +239,11 @@ private final class ProbeHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func write(event: String, context: ChannelHandlerContext) {
-        var buffer = context.channel.allocator.buffer(capacity: 32)
+    private func write(event: String, id: String?, context: ChannelHandlerContext) {
+        var buffer = context.channel.allocator.buffer(capacity: 64)
+        if let id {
+            buffer.writeString("id: \(id)\n")
+        }
         buffer.writeString("data: \(event)\n\n")
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
     }

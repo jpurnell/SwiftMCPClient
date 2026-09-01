@@ -28,6 +28,23 @@ actor StubHTTPServer {
         }
     }
 
+    /// How the server answers a `GET` — the client-initiated server stream.
+    struct ServerStream: Sendable {
+        /// The status to answer with. `.methodNotAllowed` says "no such channel here".
+        let status: HTTPResponseStatus
+        /// SSE payloads to emit before closing the stream.
+        let events: [String]
+        /// An `id:` for the first event, so resumption can be checked.
+        let firstID: String?
+
+        static func serving(_ events: [String], firstID: String? = nil) -> ServerStream {
+            ServerStream(status: .ok, events: events, firstID: firstID)
+        }
+
+        static let unsupported = ServerStream(
+            status: .methodNotAllowed, events: [], firstID: nil)
+    }
+
     /// One request as it arrived.
     struct Received: Sendable {
         let authorization: String?
@@ -48,8 +65,11 @@ actor StubHTTPServer {
     ///
     /// - Parameter replies: The scripted responses, in order.
     /// - Returns: The running server.
-    static func start(replies: [Reply]) async throws -> StubHTTPServer {
-        let recorder = Recorder(replies: replies)
+    static func start(
+        replies: [Reply],
+        serverStream: ServerStream? = nil
+    ) async throws -> StubHTTPServer {
+        let recorder = Recorder(replies: replies, serverStream: serverStream)
         let server = StubHTTPServer(recorder: recorder)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -86,8 +106,11 @@ actor StubHTTPServer {
         }
     }
 
-    /// Every request received, in arrival order.
+    /// Every POST received, in arrival order.
     var received: [Received] { recorder.received }
+
+    /// Every GET received — the server-stream opens, including reconnects.
+    var serverStreamOpens: [Received] { recorder.serverStreamOpens }
 
     /// Stops listening.
     func stop() async {
@@ -112,15 +135,32 @@ private final class Recorder: @unchecked Sendable {
     private let lock = NSLock()
     private var replies: [StubHTTPServer.Reply]
     private var storage: [StubHTTPServer.Received] = []
+    private var opens: [StubHTTPServer.Received] = []
 
-    init(replies: [StubHTTPServer.Reply]) {
+    /// How to answer a GET, if this server offers a server stream at all.
+    let serverStream: StubHTTPServer.ServerStream?
+
+    init(replies: [StubHTTPServer.Reply], serverStream: StubHTTPServer.ServerStream?) {
         self.replies = replies
+        self.serverStream = serverStream
     }
 
     var received: [StubHTTPServer.Received] {
         lock.lock()
         defer { lock.unlock() }
         return storage
+    }
+
+    var serverStreamOpens: [StubHTTPServer.Received] {
+        lock.lock()
+        defer { lock.unlock() }
+        return opens
+    }
+
+    func recordOpen(_ request: StubHTTPServer.Received) {
+        lock.lock()
+        defer { lock.unlock() }
+        opens.append(request)
     }
 
     func record(_ request: StubHTTPServer.Received) {
@@ -162,22 +202,78 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
             body += buffer.readString(length: buffer.readableBytes) ?? ""
         case .end:
             guard let head else { return }
-            // Only the POSTs. `disconnect()` sends a DELETE to end the session, which is
-            // teardown rather than anything under test here, and recording it would make
-            // every count assertion depend on when a test happened to tear down.
+            // A GET is the client opening the server stream, which is its own concern and
+            // its own record.
+            if head.method == .GET {
+                recorder.recordOpen(received(from: head))
+                respondToServerStream(context: context)
+                self.head = nil
+                return
+            }
+            // `disconnect()` sends a DELETE to end the session, which is teardown rather than
+            // anything under test, and recording it would make every count assertion depend
+            // on when a test happened to tear down.
             guard head.method == .POST else {
                 respond(context: context, reply: .ok("{}"))
                 self.head = nil
                 return
             }
-            recorder.record(StubHTTPServer.Received(
-                authorization: head.headers.first(name: "Authorization"),
-                sessionId: head.headers.first(name: "Mcp-Session-Id"),
-                protocolVersion: head.headers.first(name: "MCP-Protocol-Version"),
-                lastEventID: head.headers.first(name: "Last-Event-ID"),
-                body: body))
+            recorder.record(received(from: head))
             respond(context: context, reply: recorder.nextReply())
             self.head = nil
+        }
+    }
+
+    /// The record of one request as it arrived.
+    private func received(from head: HTTPRequestHead) -> StubHTTPServer.Received {
+        StubHTTPServer.Received(
+            authorization: head.headers.first(name: "Authorization"),
+            sessionId: head.headers.first(name: "Mcp-Session-Id"),
+            protocolVersion: head.headers.first(name: "MCP-Protocol-Version"),
+            lastEventID: head.headers.first(name: "Last-Event-ID"),
+            body: body)
+    }
+
+    /// Answers a GET: either an SSE stream of scripted events, or a refusal.
+    private func respondToServerStream(context: ChannelHandlerContext) {
+        guard let stream = recorder.serverStream, stream.status == .ok else {
+            // No server stream here. A conformant client treats this as "no such channel"
+            // rather than as a failure.
+            let status = recorder.serverStream?.status ?? .methodNotAllowed
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Length", value: "0")
+            // This handler closes the connection after every response. Without saying so, a
+            // client keeping it alive reuses a socket the server is tearing down — which
+            // surfaces as a dropped request only once a GET runs concurrently with POSTs.
+            headers.add(name: "Connection", value: "close")
+            let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+            context.write(wrapOutboundOut(.head(head)), promise: nil)
+            let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+                bound.value.close(promise: nil)
+            }
+            return
+        }
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-cache")
+        headers.add(name: "Connection", value: "close")
+        let responseHead = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+
+        for (index, event) in stream.events.enumerated() {
+            var buffer = context.channel.allocator.buffer(capacity: event.utf8.count + 32)
+            if index == 0, let firstID = stream.firstID {
+                buffer.writeString("id: \(firstID)\n")
+            }
+            buffer.writeString("data: \(event)\n\n")
+            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        }
+        // Closed after the scripted events, so a reconnect can be observed.
+        let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+            bound.value.close(promise: nil)
         }
     }
 
@@ -185,6 +281,7 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: String(reply.body.utf8.count))
+        headers.add(name: "Connection", value: "close")
         // A session id the client is expected to carry on every later request, so a test can
         // check that replacing a token did not cost the session the server is tracking.
         headers.add(name: "Mcp-Session-Id", value: "stub-session")

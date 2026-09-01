@@ -26,6 +26,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **Streamable HTTP is a multiplexer (ADR-002).** Two gaps closed together, because they are
+  the same architectural change.
+
+  *POST responses stream.* An SSE response is consumed as it arrives rather than collected, so
+  `send(_:)` returns once the request is answered instead of when the work finishes. Progress
+  notifications on a long call now arrive during it — the one moment they are worth anything —
+  and a response no longer fails for exceeding a 10MB buffer.
+
+  *The server-initiated `GET` channel exists.* `MCPClientConnection`'s notification stream was
+  permanently empty over this transport; server-originated messages now arrive on it. Opened
+  once initialization completes, because that is when the session exists to open it for. A
+  `405` means the server originates nothing and is not an error. Exactly one stream at a time,
+  per the specification, reconnecting with `Last-Event-ID` under a deliberately gentle backoff
+  — request and response keep working without it, so hammering to restore it spends requests
+  on something nothing is blocked on.
+
+  `StreamBackoff` makes that delay a pure policy rather than arithmetic inside a `Task.sleep`,
+  which is the only way it can be tested without sleeping — including the overflow that turns
+  doubling nanoseconds negative somewhere past attempt 60.
+
+  **Behavioural, and deliberate:** applications begin receiving notifications that previously
+  never arrived. `openServerStream: false` restores the earlier POST-only behaviour exactly.
+  15 tests written first (449 → 464).
+
 - **`StreamableHTTPSession` and the `MCP-Protocol-Version` header.** Session identity, the
   negotiated protocol version, and the last event seen on each stream now live in one actor
   that decides what every request carries — so the header rules are unit tests rather than
