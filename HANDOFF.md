@@ -58,8 +58,10 @@ missing was a transport that asked twice. See
 1. ~~Privacy decision on pushed history~~ — done: rewritten + force-pushed.
 2. ~~OAuth session restore~~ — **done 2026-09-01**, `7df8652`, unmerged.
 3. ~~OAuth token refresh~~ — **done 2026-09-01**
-4. **Live verification against Apollo** ← YOU ARE HERE (new; the OAuth work is unmeasured)
-5. AsyncHTTPClient chunk-flushing spike (timeboxed; can shrink Phase 2's scope)
+4. ~~Live verification against Apollo~~ — **done 2026-09-01**: refresh, rotation and the 401
+   retry all confirmed live
+5. AsyncHTTPClient chunk-flushing spike (timeboxed; can shrink Phase 2's scope) ← YOU ARE HERE
+   is arguably #8 instead; see the note below
 6. Explorer tools pane: height + JSON export
 7. TransportGuide.md Phase 1 revision (carried three times now)
 8. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
@@ -74,7 +76,13 @@ missing was a transport that asked twice. See
 - ~~Should MCPExplorer persist the last server URL?~~ **Decided 2026-09-01: yes.**
   `LastServer` persists it, and `restoreRememberedSession()` runs at launch, so §15 of the
   restore proposal is now true rather than aspirational.
-- **Nothing blocking.** The open items are measurements, not decisions.
+- **Nothing blocking.**
+- **Worth knowing before the next OAuth decision:** Apollo issues **30-day** access tokens.
+  The proactive half of the refresh work — asking the provider before each request — protects
+  against an expiry that will not happen on this server; it earns its place by enabling the
+  `401` retry and by being right for providers with hour-long tokens. Apollo **rotates**
+  refresh tokens, so never race a refresh. Apollo states **no** `client_secret_expires_at`,
+  so registration lifetime is unknown and cannot be predicted — only reacted to.
 - External context for this work (deadline, artifacts) lives in session memory
   (`apollo-pm-opportunity`), **not** in this repo. Keep it that way.
 
