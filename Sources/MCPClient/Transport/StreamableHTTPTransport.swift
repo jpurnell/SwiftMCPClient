@@ -183,6 +183,12 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// and asking again on a schedule would be asking the same question forever.
     private func runServerStream() async {
         var attempt = 0
+        // Tracked apart from `attempt`, because they answer different questions. The attempt
+        // count decides how long to wait and resets whenever a stream delivered something; a
+        // reconnect is a reconnect regardless. Deriving one from the other drops
+        // `Last-Event-ID` from exactly the reconnect that most needs it — the one following a
+        // healthy stream that ended.
+        var isReconnect = false
 
         while !Task.isCancelled {
             let delay = StreamBackoff.serverStream.delay(forAttempt: attempt)
@@ -193,9 +199,10 @@ public actor StreamableHTTPTransport: MCPTransport {
             guard !Task.isCancelled else { return }
 
             do {
-                guard let body = try await openServerStream(resuming: attempt > 0) else {
+                guard let body = try await openServerStream(resuming: isReconnect) else {
                     return
                 }
+                isReconnect = true
                 var delivered = false
                 for try await event in SSEEventStream.events(from: body) {
                     guard !Task.isCancelled else { return }

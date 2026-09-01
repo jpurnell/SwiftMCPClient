@@ -6,13 +6,12 @@
 
 ## Current phase
 
-**OAuth token refresh — DONE** (roadmap #3), on `main`. Session restore (#2) shipped earlier
-the same day as **v0.10.0**. The OAuth arc is now feature-complete and **unverified against a
-live server**, which is the next thing worth doing.
+**Streamable HTTP Phase 2 — DONE** (roadmap #7), on `main`, unreleased. The transport is now a
+multiplexer over POST response streams and one server-initiated `GET`, both feeding one receive
+queue. All four gaps closed: streaming bodies, the `GET` channel, `Last-Event-ID` resumption,
+and the `MCP-Protocol-Version` header. ADR-002 recorded; ADR-001 entered late and says so.
 
-Refresh turned out not to be missing: SwiftOAuth already exchanged and deduped, and what was
-missing was a transport that asked twice. See
-`project/summaries/2026-09-01_OAuthTokenRefresh.md`.
+The OAuth arc (#2, #3) shipped earlier the same day and is verified live against Apollo.
 
 ## Exact next step (start here)
 
@@ -32,15 +31,21 @@ missing was a transport that asked twice. See
 ## State of the world
 
 - **Branch:** `main`, clean. **v0.10.0** is tagged; the refresh work sits after it, unreleased.
-- **Gate:** 0 errors / 0 warnings (`--no-cache`, 2026-09-01). **Tests:** 420 across two
-  targets — 415 in `MCPClientTests`, 5 in the new `MCPExplorerTests`.
+- **Gate:** 0 errors / 0 warnings (`--no-cache`, 2026-09-01). **Tests:** 474 across two
+  targets — 469 in `MCPClientTests`, 5 in `MCPExplorerTests`.
 - **Depends on SwiftOAuth 0.6.0**, which was cut today specifically for this
   (`refreshedAccessToken()`). Both repos are pushed and tagged; they move together now.
-- **`StubHTTPServer`** (`Tests/MCPClientTests/`) is new and reusable: a loopback NIO server
-  that records what a request actually carried. Any future transport work that needs to assert
-  wire behaviour should use it rather than reading `currentHeaders`. Tests using it **must**
-  go through the `withStub` harness — `HTTPClient` traps in `deinit` if it is not shut down,
-  and that kills the suite rather than failing a test.
+- **Test servers, and the rule for using them.** `StubHTTPServer` records what a request
+  actually carried and can serve the `GET` channel; `FlushProbeServer` holds a response open
+  until the client signals, which is how "delivered before the response closed" is asserted as
+  an ordering rather than a duration. Any transport work that needs wire behaviour should use
+  them rather than reading `currentHeaders`. Tests **must** disconnect the transport and shut
+  down any `HTTPClient` on both paths — it traps in `deinit`, killing the suite rather than
+  failing a test. `withStub` does this for you.
+- **Assert reconnect behaviour on the wire, not through the session.** A mechanism that is
+  correct and uncalled has now happened three times here (`updateAuthorization`,
+  `didNegotiate`, and `Last-Event-ID` on reconnect). The session's unit tests passed while the
+  transport was not sending the header.
 - **The toolchain moved on 2026-09-01.** The OS update left `xcode-select` on
   `/Library/Developer/CommandLineTools`, which ships no `Testing.swiftmodule` — every
   `import Testing` failed to compile until it was pointed at Xcode-beta 27.0:
@@ -64,8 +69,8 @@ missing was a transport that asked twice. See
    is arguably #8 instead; see the note below
 6. Explorer tools pane: height + JSON export
 7. TransportGuide.md Phase 1 revision (carried three times now)
-8. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
-9. Linux CI verification
+8. ~~Streamable HTTP full compliance~~ — **done 2026-09-01**
+9. **Linux CI verification** ← the last item before v1.0.0 is defensible
 10. `HTTPSSETransport` has the same frozen-header defect the Streamable transport just lost,
     and no `updateAuthorization(_:)` at all — a long-lived stream cannot re-authenticate
     without reconnecting (OAuthTokenRefresh.md §15.2)
@@ -94,4 +99,4 @@ never gets committed. Auditor tripwires: catch blocks log or rethrow; logger int
 needs `privacy:` annotations in the app targets (os.Logger) and a `// logging:` marker in
 MCPClient (swift-log); `import os` goes inside `#if canImport(os)`.
 
-Session summaries: latest is `project/summaries/2026-09-01_OAuthTokenRefresh.md`.
+Session summaries: latest is `project/summaries/2026-09-01_StreamableHTTPPhase2.md`.

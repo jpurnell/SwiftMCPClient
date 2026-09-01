@@ -88,10 +88,16 @@ public actor HTTPSSETransport: MCPTransport {
         let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
 
+        // The same policy the Streamable HTTP server stream uses, rather than a second copy
+        // of the arithmetic. Inline, it could only be checked by sleeping, and it grew without
+        // bound — a caller raising `maxReconnectAttempts` was quietly buying delays measured
+        // in hours.
+        let backoff = StreamBackoff(base: .seconds(reconnectBaseDelay), ceiling: .seconds(30))
+
         for attempt in 0...maxReconnectAttempts {
-            if attempt > 0 {
-                let delay = reconnectBaseDelay * pow(2.0, Double(attempt - 1))
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            let delay = backoff.delay(forAttempt: attempt)
+            if delay > .zero {
+                try await Task.sleep(for: delay)
             }
 
             do {

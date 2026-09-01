@@ -165,3 +165,70 @@ struct StreamableHTTPServerStreamTests {
         }
     }
 }
+
+/// Picking a dropped stream back up where it stopped.
+///
+/// The session records event ids and its unit tests prove it builds the right header. That
+/// proves nothing about whether the transport *sends* it — which is the same gap that left
+/// `updateAuthorization(_:)` correct and uncalled for months. This asserts it on the wire.
+@Suite("Streamable HTTP — resumption")
+struct StreamableHTTPResumptionTests {
+
+    /// A stream that delivered an event and then ended is reopened, and the reopen says where
+    /// to continue from. Without the header the server replays from the beginning or not at
+    /// all, and either way the messages between the drop and the reconnect are lost.
+    @Test("A reconnect carries the last event id", .timeLimit(.minutes(1)))
+    func reconnectCarriesLastEventID() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.ok("{}")],
+            serverStream: .serving([#"{"jsonrpc":"2.0","method":"tick"}"#], firstID: "evt-1"))
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+
+        do {
+            await transport.didNegotiate(protocolVersion: "2025-06-18")
+
+            // Two deliveries means the stream ended and was reopened at least once.
+            _ = try await transport.receive()
+            _ = try await transport.receive()
+
+            let opens = await server.serverStreamOpens
+            #expect(opens.count >= 2, "the stream was not reopened after it ended")
+            #expect(opens.first?.lastEventID == nil,
+                    "the first open asked to resume a stream that had never run")
+            #expect(opens.dropFirst().first?.lastEventID == "evt-1",
+                    "the reconnect did not say where to continue from")
+
+            try await transport.disconnect()
+            await server.stop()
+        } catch {
+            try? await transport.disconnect()
+            await server.stop()
+            throw error
+        }
+    }
+
+    /// Disconnecting stops the stream rather than leaving it reconnecting against a server
+    /// nobody is talking to any more.
+    @Test("Disconnecting stops the reconnect loop", .timeLimit(.minutes(1)))
+    func disconnectStopsReconnecting() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.ok("{}")],
+            serverStream: .serving([#"{"jsonrpc":"2.0","method":"tick"}"#]))
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+
+        await transport.didNegotiate(protocolVersion: "2025-06-18")
+        _ = try await transport.receive()
+        try await transport.disconnect()
+
+        let afterDisconnect = await server.serverStreamOpens.count
+        // Long enough that a live reconnect loop would have opened several more.
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(await server.serverStreamOpens.count == afterDisconnect,
+                "the stream kept reconnecting after disconnect")
+
+        await server.stop()
+    }
+}

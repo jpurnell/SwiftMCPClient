@@ -74,3 +74,38 @@ struct StreamBackoffTests {
         #expect(delay > .zero)
     }
 }
+
+/// The legacy transport's reconnect delays, which had no test at all before the policy was
+/// separated from the sleeping.
+@Suite("Stream backoff — legacy SSE")
+struct LegacySSEBackoffTests {
+
+    /// The delays a default `HTTPSSETransport` waits, in order. Its base is 1 second and it
+    /// makes three attempts, so this is the whole schedule.
+    @Test("The default schedule is immediate, then 1s, 2s, 4s")
+    func defaultSchedule() {
+        let backoff = StreamBackoff(base: .seconds(1.0), ceiling: .seconds(30))
+
+        #expect((0...3).map { backoff.delay(forAttempt: $0) }
+                == [.zero, .seconds(1), .seconds(2), .seconds(4)])
+    }
+
+    /// A fractional base is honoured rather than truncated — the transport takes a
+    /// `TimeInterval`, and a caller asking for half a second should get half a second.
+    @Test("A fractional base survives")
+    func fractionalBase() {
+        let backoff = StreamBackoff(base: .seconds(0.5), ceiling: .seconds(30))
+
+        #expect(backoff.delay(forAttempt: 1) == .milliseconds(500))
+        #expect(backoff.delay(forAttempt: 2) == .seconds(1))
+    }
+
+    /// The bound this gained. A caller raising `maxReconnectAttempts` used to buy delays that
+    /// doubled without limit; attempt 20 was over a week.
+    @Test("A large attempt count no longer buys an unbounded wait")
+    func largeAttemptCountIsBounded() {
+        let backoff = StreamBackoff(base: .seconds(1.0), ceiling: .seconds(30))
+
+        #expect(backoff.delay(forAttempt: 20) == .seconds(30))
+    }
+}
