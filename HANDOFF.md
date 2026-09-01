@@ -1,74 +1,69 @@
 # HANDOFF — resume point for the next session
 
-**Written:** 2026-09-01, immediately before an OS update. Expected gap: ~20 minutes.
+**Written:** 2026-09-01, after OAuth session restore landed on a feature branch.
 **Working directory note:** launch Claude from the Swift root
 (`~/Dropbox/Computer/Development/Swift`) so the session memory loads, then work here.
 
 ## Current phase
 
-**OAuth Session Restore — Phase 0 complete, Phase 1 (RED) not started.**
-The design proposal is **approved** and lives at
-`project/plans/upcoming/OAuthSessionRestore.md`. Read it before writing anything —
-it contains the full architecture, API, test strategy, and the adversarial review.
+**OAuth session restore — DONE** (roadmap #2). Implemented red-first on
+`feature/oauth-session-restore`, commit `7df8652`. **Not merged, not pushed.**
+
+Next up is **OAuth token refresh** (roadmap #3), which was promoted to priority 1 in
+`project/master_plan.md`: a restored session is precisely the thing that needs refreshing,
+and `StreamableHTTPTransport.updateAuthorization(_:)` still has no caller.
 
 ## Exact next step (start here)
 
-TDD RED phase for the approved proposal, in this order:
-
-1. **`RegistrationRecordStore`** (new: `Sources/MCPClient/RegistrationRecordStore.swift`):
-   write failing tests first —
-   - round-trip: store → read a `ClientRegistrationResponse` across two store instances
-     sharing one key (fresh-process simulation)
-   - nothing stored → nil; remove works
-   - truncated/corrupted `registrations.enc` → **named error**, not nil
-   - wrong key → named error
-   Protocol + AES-GCM encrypted-file implementation (reuse `CredentialStoreKey`,
-   swift-crypto — both already in the package) + in-memory test double, mirroring how
-   credential storage is split.
-2. **`MCPOAuthSession.resume(server:tenant:)`** — tests per proposal §10:
-   golden path via injected `MCPOAuthSetup` (no network, no browser), half-stored →
-   `false`, nothing → `false`, corruption → throws, and **assert resume never calls the
-   registration endpoint** (that would orphan the refresh token — see proposal §2).
-3. **`signIn` persists the registration** only after `completeAuthorization` succeeds.
-4. Integrate: MCPExplorer auto-resume at launch (silent fallback to sign-in button);
-   MCPDump tries resume before signIn.
-5. Gate to 0/0, tests green, CHANGELOG + summary, commit on a feature branch
-   (`feature/oauth-session-restore`), merge to main.
-
-Known auditor tripwires for this work (hit all three on 2026-09-01 in MCPDump):
-catch blocks must log or rethrow; logger interpolation needs `privacy:` annotations
-(os.Logger style); `import os` must be wrapped in `#if canImport(os)`.
+1. **Decide the merge.** `feature/oauth-session-restore` is one commit ahead of `main`,
+   clean, gate 0/0, 401 tests. Fast-forwards. Then delete the branch and the two older
+   merged ones (`feature/handshake-cleanup-mcpdump`, `feature/streamable-http-phase1`).
+2. **Then token refresh**, design-first per the usual workflow. Read
+   `project/summaries/2026-09-01_OAuthSessionRestore.md` first — it records three things
+   the refresh work inherits:
+   - SwiftOAuth's `OAuthConnection.validAccessToken()` already refreshes internally; what
+     is missing is telling a live transport about the new token.
+   - `ClientRegistrationResponse` carries no `client_secret_expires_at`, so a registration
+     that expires server-side cannot be predicted yet — only reacted to.
+   - Apollo's real behaviour on both points is unverified. Worth one live run before
+     designing around assumptions.
 
 ## State of the world
 
-- **Branch:** `main` at `8cd45cb`+ (docs commits follow), **clean tree**, pushed.
-  Feature branch `feature/handshake-cleanup-mcpdump` is merged; safe to delete.
-- **Gate:** 0 errors / 0 warnings (verified `--no-cache` 2026-09-01). **Tests:** 382 / 29 suites.
-- **History was rewritten and force-pushed 2026-09-01** (sensitive strings removed;
-  old SHAs invalid). Backup: `../SwiftMCPClient-prerewrite-2026-09-01.bundle` — private,
-  delete when confident. Do not reintroduce content from the bundle.
+- **Branch:** `feature/oauth-session-restore` at `7df8652`; `main` at `aff08f8`, clean tree.
+- **Gate:** 0 errors / 0 warnings (`--no-cache`, 40 of 45 checkers, 2026-09-01).
+  **Tests:** 401 / 32 suites.
+- **The toolchain moved on 2026-09-01.** The OS update left `xcode-select` on
+  `/Library/Developer/CommandLineTools`, which ships no `Testing.swiftmodule` — every
+  `import Testing` failed to compile until it was pointed at Xcode-beta 27.0:
+  `sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer`. Same Swift 6.4,
+  but local builds now use a **beta** SDK while the deployment server is on 6.3.3. If a fresh
+  session sees "no such module 'Testing'", this is why.
+- **History was rewritten and force-pushed 2026-09-01** (sensitive strings removed; old
+  SHAs invalid). Backup: `../SwiftMCPClient-prerewrite-2026-09-01.bundle` — private, delete
+  when confident. Do not reintroduce content from the bundle.
 - **`project/notes/` is gitignored, local-only, by design.** Field notes (Apollo survey
   delta log, 69-tool catalog JSON, teardown draft) live there. Do not un-ignore.
-- The 2026-08-26 Apollo survey findings are in
-  `project/notes/2026-08-26_ApolloToolSurvey.md` — cite it, don't re-derive.
 
-## Approved roadmap (ranked 2026-09-01)
+## Approved roadmap (re-ranked 2026-09-01)
 
-1. ~~Privacy decision on pushed history~~ — **done**: rewritten + force-pushed.
-2. **OAuth session restore** ← YOU ARE HERE (proposal approved)
-3. OAuth token refresh — pairs with #2; observe the live Apollo credential's lifetime
-   to size it; `StreamableHTTPTransport.updateAuthorization(_:)` awaits a caller
+1. ~~Privacy decision on pushed history~~ — done: rewritten + force-pushed.
+2. ~~OAuth session restore~~ — **done 2026-09-01**, `7df8652`, unmerged.
+3. **OAuth token refresh** ← YOU ARE HERE
 4. AsyncHTTPClient chunk-flushing spike (timeboxed; can shrink Phase 2's scope)
 5. Explorer tools pane: height + JSON export
-6. TransportGuide.md Phase 1 revision (carried twice)
+6. TransportGuide.md Phase 1 revision (carried three times now)
 7. Streamable HTTP full compliance (`project/plans/upcoming/StreamableHTTPFullCompliance.md`)
 8. Linux CI verification
-9. Deliberate v1.0.0 tag (after 2, 3, 7, 8 — latest tag is v0.9.0)
+9. Deliberate v1.0.0 tag (after 3, 7, 8 — latest tag is v0.9.0)
 
 ## Blockers / decisions
 
-- None technical. Open question from the proposal (§15): Explorer auto-resume at launch
-  is assumed — flag to the user only if implementation surfaces a reason not to.
+- **Open decision:** should MCPExplorer persist the last server URL? The restore proposal
+  (§15) assumed auto-resume *at launch*; that is impossible as built, because `serverURL`
+  is empty on every launch. Restore now happens at `connect()` and before a browser opens.
+  Persisting the URL is the only route to literal launch-time restore, and it is new
+  persisted state nobody asked for — hence left open.
 - External context for this work (deadline, artifacts) lives in session memory
   (`apollo-pm-opportunity`), **not** in this repo. Keep it that way.
 
@@ -76,5 +71,8 @@ catch blocks must log or rethrow; logger interpolation needs `privacy:` annotati
 
 Design-first TDD (red → green → refactor), quality gate 0/0 with **no** suppressions or
 override comments, CHANGELOG + session summary ride the feature commit, `project/notes/`
-never gets committed. Session summaries: latest is
-`project/summaries/2026-09-01_ApolloSurvey_CrashFix_MCPDump.md`.
+never gets committed. Auditor tripwires: catch blocks log or rethrow; logger interpolation
+needs `privacy:` annotations in the app targets (os.Logger) and a `// logging:` marker in
+MCPClient (swift-log); `import os` goes inside `#if canImport(os)`.
+
+Session summaries: latest is `project/summaries/2026-09-01_OAuthSessionRestore.md`.
