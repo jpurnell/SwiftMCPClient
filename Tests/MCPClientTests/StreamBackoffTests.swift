@@ -109,3 +109,38 @@ struct LegacySSEBackoffTests {
         #expect(backoff.delay(forAttempt: 20) == .seconds(30))
     }
 }
+
+/// How a server stream that simply closes should be treated.
+///
+/// 2025-11-25 (SEP-1699) allows a server to disconnect an SSE stream at will and expects the
+/// client to poll. A stream that closes having said nothing is therefore ordinary behaviour,
+/// not evidence of trouble — and treating it as trouble means every quiet server is punished
+/// with an ever-longer wait until it is effectively unwatched.
+@Suite("Stream backoff — polling")
+struct PollingBackoffTests {
+
+    /// A clean close returns to a steady cadence rather than climbing.
+    @Test("A quiet close polls at the base interval, not an escalating one")
+    func quietCloseKeepsASteadyCadence() {
+        let policy = StreamBackoff.serverStream
+
+        #expect(policy.delay(forAttempt: StreamBackoff.pollingAttempt) == policy.base)
+    }
+
+    /// It is a cadence, not an immediate retry: reconnecting the instant a server closes turns
+    /// polling into a busy loop against a server that has just said it has nothing.
+    @Test("A quiet close does not reconnect immediately")
+    func quietCloseIsNotImmediate() {
+        #expect(StreamBackoff.serverStream.delay(forAttempt: StreamBackoff.pollingAttempt) > .zero)
+    }
+
+    /// A failure still escalates. Polling covers a server choosing to close; it does not cover
+    /// a server that cannot be reached.
+    @Test("A failure still climbs above the polling interval")
+    func failureStillEscalates() {
+        let policy = StreamBackoff.serverStream
+        let polling = policy.delay(forAttempt: StreamBackoff.pollingAttempt)
+
+        #expect(policy.delay(forAttempt: 4) > polling)
+    }
+}

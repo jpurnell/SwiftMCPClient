@@ -22,9 +22,28 @@ actor StubHTTPServer {
         let status: HTTPResponseStatus
         let body: String
 
+        /// An SSE response that is cut off mid-stream, as a dropped connection would be.
+        ///
+        /// The payload is delivered and then the connection is closed without the chunked
+        /// terminator, so the client sees a failure rather than a clean end. That distinction
+        /// is what a resumable transport has to act on.
+        let abortsAfter: (event: String, id: String)?
+
+        init(status: HTTPResponseStatus, body: String,
+             abortsAfter: (event: String, id: String)? = nil) {
+            self.status = status
+            self.body = body
+            self.abortsAfter = abortsAfter
+        }
+
         static func ok(_ body: String) -> Reply { Reply(status: .ok, body: body) }
         static func unauthorized() -> Reply {
             Reply(status: .unauthorized, body: #"{"error":"invalid_token"}"#)
+        }
+
+        /// Streams one event with an id, then drops the connection.
+        static func droppedAfter(_ event: String, id: String) -> Reply {
+            Reply(status: .ok, body: "", abortsAfter: (event, id))
         }
     }
 
@@ -278,6 +297,26 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func respond(context: ChannelHandlerContext, reply: StubHTTPServer.Reply) {
+        // A stream the server cuts off: SSE head, one event, then the connection goes away
+        // without a terminator. The client must see this as a failure, not a clean end.
+        if let abort = reply.abortsAfter {
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Mcp-Session-Id", value: "stub-session")
+            let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+            context.write(wrapOutboundOut(.head(head)), promise: nil)
+
+            var buffer = context.channel.allocator.buffer(capacity: abort.event.utf8.count + 32)
+            buffer.writeString("id: \(abort.id)\ndata: \(abort.event)\n\n")
+            let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer)))).whenComplete { _ in
+                // No `.end`, so the response is truncated rather than finished.
+                bound.value.close(mode: .all, promise: nil)
+            }
+            return
+        }
+
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: String(reply.body.utf8.count))

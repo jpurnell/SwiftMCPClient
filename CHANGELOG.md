@@ -26,6 +26,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **A dropped response stream is now recovered.** 2025-11-25 (SEP-1699) settles how:
+  resumption is always via `GET`, whichever stream dropped — the request is never re-issued,
+  since that would run the work twice. This package recorded per-request event ids from the day
+  the streaming path landed and never used them, so a response stream cut off mid-flight simply
+  lost its response and the caller saw a request that never answered. One attempt: a resume that
+  fails leaves the caller exactly where it already was, and retrying a stream the server has
+  stopped feeding turns a lost response into a loop.
+- **A server that closes a stream is no longer treated as a server in trouble.** SEP-1699 lets a
+  server disconnect at will and expects clients to poll. A quiet close now returns to a steady
+  cadence rather than climbing the backoff, which had meant a healthy but idle server was
+  checked progressively less often until it was effectively unwatched. Failures still escalate.
+
 - **Credentials are keyed by the authorization server that issued them.** MCP 2026-07-28
   (SEP-2352) requires a client to key persisted credentials by the **issuer identifier**, never
   reuse them with a different authorization server, and re-register when it changes. This

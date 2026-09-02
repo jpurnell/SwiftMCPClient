@@ -199,7 +199,7 @@ public actor StreamableHTTPTransport: MCPTransport {
             guard !Task.isCancelled else { return }
 
             do {
-                guard let body = try await openServerStream(resuming: isReconnect) else {
+                guard let body = try await openServerStream(resuming: isReconnect ? .get : nil) else {
                     return
                 }
                 isReconnect = true
@@ -218,10 +218,15 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // disconnect is scored as a server that closed early and feeds the backoff.
                 guard !Task.isCancelled else { return }
 
-                // A stream that delivered something and then ended is a healthy stream that
-                // finished; start over promptly. One that ended having delivered nothing is
-                // more likely a server declining, so it keeps its place in the backoff.
-                attempt = delivered ? 0 : attempt + 1
+                // A clean close is the server exercising its right to disconnect, which
+                // 2025-11-25 (SEP-1699) explicitly permits and expects clients to poll
+                // through. Whether it delivered anything first does not change what happened:
+                // scoring a quiet close as trouble climbs the backoff until a healthy but
+                // idle server is checked once an hour.
+                //
+                // Failures escalate — that is the `catch` below. This path is only ever a
+                // stream that ended without error.
+                attempt = delivered ? 0 : StreamBackoff.pollingAttempt
             } catch {
                 attempt += 1
                 let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
@@ -236,13 +241,13 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// - Parameter resuming: Whether to carry `Last-Event-ID` and pick up where the previous
     ///   stream stopped.
     /// - Returns: The stream body, or `nil` if the server offers no such channel.
-    private func openServerStream(resuming: Bool) async throws -> HTTPClientResponse.Body? {
+    private func openServerStream(resuming stream: StreamableHTTPSession.StreamKind?) async throws -> HTTPClientResponse.Body? {
         guard let client = httpClient else { return nil }
 
         var request = HTTPClientRequest(url: url.absoluteString)
         request.method = .GET
         request.headers.add(name: "Accept", value: "text/event-stream")
-        for (key, value) in await session.headers(resuming: resuming ? .get : nil) {
+        for (key, value) in await session.headers(resuming: stream) {
             request.headers.replaceOrAdd(name: key, value: value)
         }
         for (key, value) in headers {
@@ -413,6 +418,44 @@ public actor StreamableHTTPTransport: MCPTransport {
             let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
             // logging: a response stream that died, which the waiting caller sees only as silence
             logger.warning("response stream ended in failure: \(error.localizedDescription)")
+
+            // Picked back up rather than abandoned. 2025-11-25 (SEP-1699) is specific about
+            // how: resumption is always via `GET`, whichever stream dropped — the request is
+            // *not* re-issued, because that would run the work a second time. The `GET` carries
+            // the last event id seen here, and the server continues from it.
+            //
+            // A clean end is not a drop and never reaches this path: the response completed,
+            // and asking to resume it would ask for a replay of something already delivered.
+            await resumeResponseStream(forRequest: requestID)
+        }
+    }
+
+    /// Reconnects a response stream that was cut off, continuing from its last event.
+    ///
+    /// Silent when there is nothing to resume from. A stream that dropped before delivering
+    /// anything has no id to continue from, and a `GET` without one asks the server to start
+    /// something it has no way to relate to the request that died.
+    private func resumeResponseStream(forRequest requestID: String?) async {
+        guard let requestID else { return }
+        let stream = StreamableHTTPSession.StreamKind.post(requestID: requestID)
+        guard await session.lastEventID(for: stream) != nil else { return }
+
+        do {
+            guard let body = try await openServerStream(resuming: stream) else { return }
+            for try await event in SSEEventStream.events(from: body) {
+                if Task.isCancelled { return }
+                if let id = event.id {
+                    await session.record(eventID: id, for: stream)
+                }
+                enqueueMessage(Data(event.data.utf8))
+            }
+        } catch {
+            // One attempt. A resume that fails leaves the caller where it already was — a
+            // request with no answer — and retrying a stream the server has stopped feeding is
+            // how a lost response becomes a loop.
+            let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+            // logging: the second failure, after which the request is genuinely lost
+            logger.warning("resuming a dropped response stream failed: \(error.localizedDescription)")
         }
     }
 

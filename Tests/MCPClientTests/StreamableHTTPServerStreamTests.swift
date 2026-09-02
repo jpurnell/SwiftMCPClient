@@ -232,3 +232,96 @@ struct StreamableHTTPResumptionTests {
         await server.stop()
     }
 }
+
+/// Recovering a response stream the server cut off.
+///
+/// 2025-11-25 (SEP-1699) settles how: **resumption is always via `GET`, regardless of which
+/// stream dropped.** A broken response stream is not re-issued as a new POST — that would run
+/// the work twice — it is picked back up with a `GET` carrying the last event id seen on it.
+///
+/// This package recorded those event ids from the day the streaming path landed and never used
+/// them. A dropped response stream simply lost its response, and the caller saw a request that
+/// never answered.
+@Suite("Streamable HTTP — response stream resumption")
+struct StreamableHTTPResponseResumptionTests {
+
+    /// The recovery, end to end: the response stream dies after one event, and the rest arrives
+    /// over a `GET` that says where to continue from.
+    @Test("A dropped response stream is resumed with a GET", .timeLimit(.minutes(1)))
+    func droppedResponseStreamResumes() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.droppedAfter(#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+                                    id: "evt-4")],
+            serverStream: .serving([#"{"jsonrpc":"2.0","id":1,"result":{}}"#]))
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+
+        do {
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
+
+            // What arrived before the drop.
+            let progress = try await transport.receive()
+            #expect(String(decoding: progress, as: UTF8.self).contains("progress"))
+
+            // Waited for at the *server*, not by awaiting `receive()`. `receive()` parks on a
+            // continuation that is not cancellation-aware, so an unimplemented resume would
+            // hang the whole suite rather than fail this test — which is exactly what it did
+            // the first time this was written.
+            let resumed = await waitForServerStreamOpen(on: server)
+            let resume = try #require(resumed, "no GET was opened; the dropped stream was not resumed")
+            #expect(resume.lastEventID == "evt-4",
+                    "the resume did not say where the dropped stream stopped")
+
+            // Only now is it safe to wait for the rest of the response.
+            let result = try await transport.receive()
+            #expect(String(decoding: result, as: UTF8.self).contains(#""id":1"#))
+
+            try await transport.disconnect()
+            await server.stop()
+        } catch {
+            try? await transport.disconnect()
+            await server.stop()
+            throw error
+        }
+    }
+
+    /// A stream that ends *cleanly* is a finished stream, not a dropped one. Resuming it would
+    /// ask the server to replay a response it has already delivered in full.
+    @Test("A response stream that ends cleanly is not resumed", .timeLimit(.minutes(1)))
+    func cleanEndIsNotResumed() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.ok(#"{"jsonrpc":"2.0","id":1,"result":{}}"#)],
+            serverStream: .serving(["{}"]))
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
+        _ = try await transport.receive()
+
+        #expect(await server.serverStreamOpens.isEmpty,
+                "a completed response was resumed as though it had been cut off")
+
+        try await transport.disconnect()
+        await server.stop()
+    }
+}
+
+// MARK: - Bounded waiting
+
+/// Waits, briefly and with a bound, for the client to open a server stream.
+///
+/// Polls the server rather than awaiting the transport. Anything that awaits `receive()` for a
+/// message that may never arrive cannot be timed out — the continuation it parks on does not
+/// observe cancellation — so a missing feature presents as a hung suite instead of a failed
+/// test.
+private func waitForServerStreamOpen(
+    on server: StubHTTPServer,
+    attempts: Int = 40
+) async -> StubHTTPServer.Received? {
+    for _ in 0..<attempts {
+        if let first = await server.serverStreamOpens.first { return first }
+        // silent: a cancelled sleep just ends the wait early, and the caller handles nil
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+    return nil
+}

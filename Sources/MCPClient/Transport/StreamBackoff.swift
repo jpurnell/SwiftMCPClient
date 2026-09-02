@@ -36,6 +36,15 @@ struct StreamBackoff: Sendable, Equatable {
     /// that hammers it is spending requests to restore something no caller is blocked on.
     static let serverStream = StreamBackoff(base: .seconds(2), ceiling: .seconds(120))
 
+    /// The attempt number standing for "the server closed the stream, as it may".
+    ///
+    /// 2025-11-25 (SEP-1699) lets a server disconnect a stream whenever it likes and expects
+    /// the client to poll. A quiet close is therefore not a failure, and scoring it as one
+    /// climbs the backoff until a perfectly healthy server is barely watched. Naming the
+    /// steady cadence here keeps that distinction out of the reconnect loop, where it would
+    /// read as an arbitrary number.
+    static let pollingAttempt = 1
+
     /// How long to wait before an attempt.
     ///
     /// - Parameter attempt: Which attempt this is. `0` is the first and does not wait: a
