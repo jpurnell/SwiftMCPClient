@@ -1,12 +1,15 @@
-# Linux is the reason this exists. macOS is covered by the local quality gate on every commit;
-# Linux is not built anywhere else, and the parts of this package that cannot work there —
-# anything reaching a Keychain — are guarded rather than ported. Only CI notices when a guard
-# is missed.
+# Linux is the reason this exists. macOS is covered by the local quality gate on every commit,
+# which runs the same build and the same suite plus twenty-odd static checkers; Linux is not
+# built anywhere else, and the parts of this package that cannot work there — anything reaching
+# a Keychain — are guarded rather than ported. Only this notices when a guard is missed.
 #
-# Neither job uses swift-actions/setup-swift. It resolves versions from its own list, and a
-# version missing from that list fails the run before a single line is compiled — which is how
-# this workflow spent its first run after being re-enabled. The official container and the
-# runner's own toolchain are both authoritative about what they contain.
+# There is deliberately no macOS job. GitHub's newest macOS image ships Swift 6.1, and this
+# package declares tools version 6.2, so that job could only ever report a toolchain that is
+# older than the one every commit is already built against locally.
+#
+# No swift-actions/setup-swift either. It resolves versions from its own table, and a version
+# missing from that table fails a run before a line is compiled. The official container is
+# authoritative about what it contains.
 name: CI
 
 on:
@@ -16,32 +19,38 @@ on:
     branches: [main]
 
 jobs:
-  macos:
-    name: macOS
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v5
-      # Whatever the runner's Xcode ships. Pinning here would assert a toolchain this
-      # workflow cannot install, which is the failure it exists to avoid.
-      - name: Swift version
-        run: swift --version
-      - name: Build
-        run: swift build
-      - name: Test
-        run: swift test
-
   linux:
     name: Linux
     runs-on: ubuntu-latest
     container: swift:6.2
     steps:
       - uses: actions/checkout@v5
-      - name: Swift version
-        run: swift --version
+
+      # SwiftOAuth is a private repository, so an anonymous clone fails at dependency
+      # resolution with an error that reads like the network. This rewrites the HTTPS remote to
+      # carry a token. The step is skipped when no secret is configured, so the failure that
+      # follows is the honest one — "could not clone" — rather than a confusing auth error.
+      - name: Authenticate private dependencies
+        if: env.DEPS_TOKEN != ''
+        env:
+          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Preflight
+        env:
+          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          swift --version
+          if [ -z "${DEPS_TOKEN}" ]; then
+            echo "::warning::No DEPS_TOKEN secret. SwiftOAuth is private, so resolution will fail."
+          fi
+
       - name: Build
         run: swift build
-      # The Keychain-backed conveniences are compiled out here, so what runs is the portable
-      # core: transports, framing, session state, and the encrypted stores minus their key
-      # source.
+
+      # What runs here is the portable core: transports, SSE framing, session state, backoff,
+      # and the encrypted stores minus their key source. The Keychain-backed conveniences are
+      # compiled out.
       - name: Test
         run: swift test
