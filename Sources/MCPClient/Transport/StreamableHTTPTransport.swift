@@ -63,6 +63,13 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Session identity, the negotiated version, and the last event seen on each stream.
     private let session = StreamableHTTPSession()
 
+    /// Which tool parameters are mirrored into headers, by tool name.
+    ///
+    /// Learned from tool definitions, which only the connection sees — so it installs them
+    /// here. The mirroring itself stays in the transport, next to the other headers derived
+    /// from the body, because that is what keeps header and body in agreement.
+    private var parameterHeaders: [String: [String: String]] = [:]
+
     /// Whether the server-initiated stream should be opened after initialization.
     private let opensServerStream: Bool
 
@@ -155,6 +162,14 @@ public actor StreamableHTTPTransport: MCPTransport {
         } else {
             headers.removeValue(forKey: "Authorization")
         }
+    }
+
+    /// Records which tool parameters carry `x-mcp-header` annotations.
+    ///
+    /// - Parameter headers: Header name by parameter name, keyed by tool name — as the tool
+    ///   definitions declared it.
+    public func useParameterHeaders(_ headers: [String: [String: String]]) {
+        parameterHeaders = headers
     }
 
     /// Adopts the protocol version the server accepted, for every later request to echo.
@@ -492,6 +507,47 @@ public actor StreamableHTTPTransport: MCPTransport {
         return headers
     }
 
+    /// The `Mcp-Param-*` headers for a `tools/call`, from the annotations the tool declared.
+    ///
+    /// An argument the call omits produces no header: an empty header is a *value*, and the
+    /// server compares headers against the body. Only the annotated arguments are mirrored —
+    /// mirroring the rest would put tool inputs in front of every intermediary on the path.
+    ///
+    /// - Parameter data: The request as it will be sent.
+    /// - Returns: The headers to add.
+    private func mirroredParameters(of data: Data) -> [String: String] {
+        // A body that will not parse has no arguments to mirror, and the server receives those
+        // same bytes and reports the problem far better than this could.
+        // silent: an unparseable body has no arguments to mirror; the server reports it
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any],
+              fields["method"] as? String == "tools/call",
+              let params = fields["params"] as? [String: Any],
+              let tool = params["name"] as? String,
+              let annotations = parameterHeaders[tool],
+              let arguments = params["arguments"] as? [String: Any] else {
+            return [:]
+        }
+
+        var headers: [String: String] = [:]
+        for (parameter, headerName) in annotations {
+            guard let value = arguments[parameter], !(value is NSNull) else { continue }
+            headers["Mcp-Param-\(headerName)"] = MCPHeaderValue.encode(Self.headerText(value))
+        }
+        return headers
+    }
+
+    /// A primitive argument as the specification says to spell it in a header.
+    ///
+    /// Booleans are lowercase and integers are decimal, because a server compares this against
+    /// the body value and `true` is not `1`.
+    private static func headerText(_ value: Any) -> String {
+        if let text = value as? String { return text }
+        if let flag = value as? Bool { return flag ? "true" : "false" }
+        if let number = value as? NSNumber { return number.stringValue }
+        return String(describing: value)
+    }
+
     /// The JSON-RPC id of an outgoing request, for keying its response stream.
     ///
     /// A notification carries none, and its response stream is not resumable — there is
@@ -549,6 +605,9 @@ public actor StreamableHTTPTransport: MCPTransport {
         // them.
         if await session.mirrorsRequestMetadata {
             for (key, value) in Self.mirroredHeaders(of: data) {
+                request.headers.replaceOrAdd(name: key, value: value)
+            }
+            for (key, value) in mirroredParameters(of: data) {
                 request.headers.replaceOrAdd(name: key, value: value)
             }
         }

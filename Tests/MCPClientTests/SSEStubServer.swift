@@ -143,6 +143,7 @@ private final class SSEStubHandler: ChannelInboundHandler, @unchecked Sendable {
                 lastEventID: head.headers.first(name: "Last-Event-ID"),
                 method: head.headers.first(name: "Mcp-Method"),
                 name: head.headers.first(name: "Mcp-Name"),
+                parameterHeaders: [:],
                 body: body)
 
             if head.method == .GET {

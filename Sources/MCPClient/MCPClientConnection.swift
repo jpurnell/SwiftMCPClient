@@ -203,7 +203,59 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server returns an error.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
     public func listTools() async throws -> [MCPTool] {
-        try await paginatedList(method: "tools/list", key: "tools")
+        let tools: [MCPTool] = try await paginatedList(method: "tools/list", key: "tools")
+        return rejectingMalformedHeaderAnnotations(tools)
+    }
+
+    /// Drops tools whose `x-mcp-header` annotations break the specification's rules.
+    ///
+    /// A conforming client **MUST** exclude such a tool from the result — and only that tool.
+    /// Failing the whole listing would let one malformed definition deny a client every other
+    /// tool the server offers, which is a poor trade for a rule about header names.
+    ///
+    /// The rules themselves belong to the shared SDK, which both this client and SwiftMCPServer
+    /// read, so a definition one accepts is not one the other rejects.
+    ///
+    /// - Parameter tools: The tools as the server listed them.
+    /// - Returns: The ones a client may use.
+    private func rejectingMalformedHeaderAnnotations(_ tools: [MCPTool]) -> [MCPTool] {
+        var kept: [MCPTool] = []
+        var annotations: [String: [String: String]] = [:]
+
+        for tool in tools {
+            guard let schema = tool.inputSchema else {
+                kept.append(tool)
+                continue
+            }
+            do {
+                let headers = try XMCPHeaderPolicy.headerNames(in: Self.schemaValue(schema))
+                if !headers.isEmpty { annotations[tool.name] = headers }
+                kept.append(tool)
+            } catch {
+                let logger = Logger(label: "MCPClient.MCPClientConnection")
+                // logging: which tool was dropped and why, since it silently disappears
+                logger.warning(
+                    "excluding tool \(tool.name): invalid x-mcp-header annotation — \(error)")
+            }
+        }
+
+        // The transport does the mirroring, next to the other headers it derives from the body;
+        // only this layer ever sees the definitions that say which parameters to mirror.
+        let installed = annotations
+        Task { [transport] in await (transport as? StreamableHTTPTransport)?.useParameterHeaders(installed) }
+
+        return kept
+    }
+
+    /// Carries a schema across into the shape the shared policy reads.
+    private static func schemaValue(_ schema: AnyCodableValue) -> Value {
+        // silent: a schema that will not round-trip carries no annotations to find, and the
+        // policy's answer for "nothing here" is the same as for "nothing readable"
+        guard let data = try? JSONEncoder().encode(schema),
+              let value = try? JSONDecoder().decode(Value.self, from: data) else {
+            return .object([:])
+        }
+        return value
     }
 
     // MARK: - Tasks extension
@@ -289,6 +341,28 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// against the server running it.
     static let defaultPollInterval: Duration = .milliseconds(1_000)
 
+    /// Sends a request and returns whatever came back, interim results included.
+    ///
+    /// ``sendRequest(method:params:)`` refuses an interim result, because a caller that has not
+    /// asked to answer questions must not receive one as though it were content. Multi
+    /// Round-Trip Requests is the caller that *has* asked, so it needs the unrefused result.
+    private func sendRequestAllowingInterim(
+        method: String,
+        params: AnyCodableValue?
+    ) async throws -> AnyCodableValue {
+        do {
+            return try await sendRequest(method: method, params: params)
+        } catch let error as MCPError {
+            // The refusal carries the result it refused, which is the thing this caller wants.
+            guard case .requestFailed(let code, _, let data) = error,
+                  code == Self.interimResultCode,
+                  let interim = data else {
+                throw error
+            }
+            return interim
+        }
+    }
+
     /// Refuses a result that is not the final one.
     ///
     /// MCP 2026-07-28 tags every result: `complete` for content, `input_required` for a server
@@ -327,6 +401,201 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// From the implementation-defined range, deliberately: this is not a protocol error the
     /// server sent, it is this client declining to pretend an interim result is an answer.
     static let interimResultCode = -32000
+
+    /// Which shape of MCP a server speaks.
+    ///
+    /// Two eras, not five versions. `2025-03-26` through `2025-11-25` share one transport —
+    /// handshake, sessions, a standalone `GET` stream, resumable streams — and `2026-07-28`
+    /// shares none of it. Everything about talking to a server follows from which of the two it
+    /// belongs to.
+    public enum Era: Sendable, Hashable {
+        /// `initialize` first, then a session. 2025-03-26 through 2025-11-25.
+        case handshake
+        /// No handshake; every request states its own version. 2026-07-28 onward.
+        case stateless
+    }
+
+    /// What a refusal says about which era a server belongs to.
+    ///
+    /// The specification's procedure is to attempt a modern request and, on `400`, **inspect
+    /// the body before falling back**. This is that inspection.
+    ///
+    /// The trap it exists to avoid: modern servers answer `400` for an unsupported version, a
+    /// missing capability, or a header mismatch — all of which mean "you are talking to a
+    /// modern server and got something wrong", not "this server is old". A client that read any
+    /// `400` as an old server would downgrade and then send `initialize` to a server that
+    /// removed the method.
+    ///
+    /// Implementation-defined codes (`-32000` to `-32019`) are deliberately *not* evidence.
+    /// They are grandfathered for SDK use and both eras emit them, so treating one as a signal
+    /// reads a coincidence as a fact.
+    ///
+    /// - Parameter code: The JSON-RPC error code the refusal carried, if it carried one.
+    /// - Returns: The era the refusal implies.
+    public static func era(forRefusalCode code: Int?) -> Era {
+        guard let code, Self.statelessEraErrorCodes.contains(code) else { return .handshake }
+        return .stateless
+    }
+
+    /// The errors only a server implementing 2026-07-28 produces.
+    ///
+    /// From the range the specification reserved for itself in that revision — which is why
+    /// they are usable as an era signal at all, and why the implementation-defined range below
+    /// them is not.
+    private static let statelessEraErrorCodes: Set<Int> = [
+        -32020, // HeaderMismatch
+        -32021, // MissingRequiredClientCapability
+        unsupportedProtocolVersionCode  // -32022
+    ]
+
+    /// Calls a tool, answering anything the server asks for along the way.
+    ///
+    /// Multi Round-Trip Requests replaced server-initiated requests in 2026-07-28. Rather than
+    /// sending its own JSON-RPC request over a stream, a server returns an interim result
+    /// naming what it needs, and the client **retries the original request** with the answers
+    /// attached. The retry is the continuation — there is no "continue" method, which is what
+    /// keeps the exchange stateless.
+    ///
+    /// - Parameters:
+    ///   - name: The tool to call.
+    ///   - arguments: Its arguments.
+    ///   - maximumRounds: How many times to answer before giving up. A server that keeps asking
+    ///     would otherwise loop a client indefinitely.
+    ///   - fulfil: Answers the server's requests, keyed by the identifiers it used. Returning
+    ///     nothing means "I cannot answer this", and ends the exchange rather than retrying
+    ///     into the same gap.
+    /// - Returns: The final result.
+    /// - Throws: ``MCPError`` — including when the rounds are exhausted, or when the client
+    ///   answered nothing.
+    public func callToolFulfillingInput(
+        name: String,
+        arguments: [String: AnyCodableValue]?,
+        maximumRounds: Int = 8,
+        fulfil: ([String: InputRequest]) async -> [String: InputResponse]
+    ) async throws -> AnyCodableValue {
+        var params: [String: AnyCodableValue] = ["name": .string(name)]
+        if let arguments { params["arguments"] = .object(arguments) }
+
+        for _ in 0..<max(maximumRounds, 1) {
+            let outcome = try await sendRequestAllowingInterim(
+                method: "tools/call", params: .object(params))
+
+            guard let interim = Self.interimResult(in: outcome) else {
+                return outcome
+            }
+
+            let answers = await fulfil(interim.inputRequests ?? [:])
+            guard !answers.isEmpty else {
+                throw MCPError.requestFailed(
+                    code: Self.interimResultCode,
+                    message: "the server asked for input this client did not answer",
+                    data: outcome)
+            }
+
+            // Answers keyed by the server's own identifiers, and its opaque state echoed back
+            // untouched — the correspondence is the only thing tying an answer to its question,
+            // and the state is how the server avoids redoing work it has already done.
+            params["inputResponses"] = try Self.parameters(answers)
+            if let requestState = interim.requestState {
+                params["requestState"] = .string(requestState)
+            }
+        }
+
+        throw MCPError.requestFailed(
+            code: Self.interimResultCode,
+            message: "the server kept asking for input after \(maximumRounds) rounds",
+            data: nil)
+    }
+
+    /// Whether a result is a server asking for input rather than answering.
+    ///
+    /// Exposed because "the exchange finished" and "the exchange stopped" are different
+    /// outcomes, and only this tells them apart.
+    public static func isInterim(_ result: AnyCodableValue) -> Bool {
+        interimResult(in: result) != nil
+    }
+
+    /// Reads an interim result, if that is what came back.
+    private static func interimResult(in result: AnyCodableValue) -> InputRequiredResult? {
+        guard case .object(let fields) = result,
+              case .string(let tag)? = fields["resultType"],
+              ResultType(rawValue: tag) == .inputRequired else {
+            return nil
+        }
+        // silent: a payload tagged interim that will not decode is handled as "not interim",
+        // and the caller receives it as an ordinary result to judge for itself
+        guard let data = try? JSONEncoder().encode(result),
+              let interim = try? JSONDecoder().decode(InputRequiredResult.self, from: data) else {
+            return nil
+        }
+        return interim
+    }
+
+    /// Asks the server what it supports, before speaking to it.
+    ///
+    /// `server/discover` is the stateless revision's alternative to guessing a protocol version
+    /// and learning from the rejection. Servers **MUST** implement it; clients **MAY** call it,
+    /// and doing so is what turns version selection into a choice rather than a retry loop.
+    ///
+    /// - Returns: What the server supports, and who it says it is.
+    /// - Throws: ``MCPError`` — including from a server too old to know the method, which is
+    ///   itself an answer about which era it belongs to.
+    public func discoverServer() async throws -> Discover.Result {
+        let response = try await sendRequest(method: Discover.name, params: nil)
+        let data = try JSONEncoder().encode(response)
+        return try JSONDecoder().decode(Discover.Result.self, from: data)
+    }
+
+    /// Opens the stream of change notifications this client asked for.
+    ///
+    /// 2026-07-28 replaced the standalone `GET` stream with `subscriptions/listen`: one
+    /// long-lived POST whose response stream carries the notification types opted in to.
+    /// Request-scoped messages — progress, logging — are **not** delivered here; they travel on
+    /// the response stream of the request they relate to.
+    ///
+    /// - Parameter filter: What the client wants to hear about.
+    /// - Returns: What the server agreed to send, which may be less. A server with no resources
+    ///   to watch declines that subscription, and a client that assumed otherwise waits forever
+    ///   for a notification nobody is going to send.
+    /// - Throws: ``MCPError``.
+    @discardableResult
+    public func listen(for filter: SubscriptionFilter) async throws -> SubscriptionFilter {
+        let params = try Self.parameters(SubscriptionsListen.Parameters(notifications: filter))
+        let response = try await sendRequest(method: SubscriptionsListen.name, params: params)
+
+        let data = try JSONEncoder().encode(response)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let granted = fields["notifications"] else {
+            throw MCPError.requestFailed(
+                code: -32602,
+                message: "the server acknowledged no subscriptions",
+                data: nil)
+        }
+        let grantedData = try JSONSerialization.data(withJSONObject: granted)
+        return try JSONDecoder().decode(SubscriptionFilter.self, from: grantedData)
+    }
+
+    /// The revisions this client can speak, newest last.
+    ///
+    /// Ordered rather than a set: choosing between what both sides know requires knowing which
+    /// is newer, and dated revisions sort lexicographically.
+    static let supportedProtocolVersions = [
+        "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"
+    ]
+
+    /// The newest revision both this client and a server understand.
+    ///
+    /// Not the newest the *server* named — that may be one this client cannot write. Not this
+    /// client's newest either, which would ignore what the server just said. The intersection,
+    /// and the newest of it.
+    ///
+    /// - Parameter serverSupports: The versions the server named.
+    /// - Returns: The version to speak, or `nil` when there is no overlap — in which case a
+    ///   guess would produce a request the server refuses, and the refusal would read as a bug
+    ///   here rather than an incompatibility.
+    public static func bestMutualVersion(serverSupports: [String]) -> String? {
+        Set(serverSupports).intersection(supportedProtocolVersions).max()
+    }
 
     /// Begins a session with a server that has no handshake.
     ///

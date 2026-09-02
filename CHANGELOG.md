@@ -26,6 +26,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **The rest of MCP 2026-07-28.** `server/discover` with `bestMutualVersion(serverSupports:)` —
+  the newest revision *both* sides know, which is neither the server's newest (this client may
+  not be able to write it) nor ours (which ignores what the server just said).
+  `subscriptions/listen`, returning what the server **granted** rather than what was asked for,
+  since a server with nothing to watch declines and a client that assumed otherwise waits
+  forever. Multi Round-Trip Requests, where the client answers a server's questions by retrying
+  its own request — bounded, with `requestState` echoed untouched, and answering nothing ends
+  the exchange rather than retrying into the same gap. `x-mcp-header` mirroring, where a
+  malformed annotation costs only its own tool and never the whole listing.
+
+  And era detection: a `400` carrying a **recognised modern** error means a modern server
+  correcting you, not an old one. A client that read every `400` as "this must be an old server"
+  would downgrade and then send `initialize` to a server that removed the method.
+  Implementation-defined codes are deliberately not a signal — both eras emit them, so reading
+  one would be reading a coincidence.
+
 - **A session can begin without a handshake.** MCP 2026-07-28 removed `initialize`, so
   `beginStateless(protocolVersion:clientName:clientVersion:)` connects, records what every
   request will declare, and starts routing responses. There is nothing to negotiate: a client

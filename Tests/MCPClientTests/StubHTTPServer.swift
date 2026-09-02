@@ -74,6 +74,8 @@ actor StubHTTPServer {
         let method: String?
         /// The `Mcp-Name` header, still encoded as it arrived.
         let name: String?
+        /// Every `Mcp-Param-*` header, by full header name.
+        let parameterHeaders: [String: String]
         let body: String
     }
 
@@ -256,6 +258,10 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
             lastEventID: head.headers.first(name: "Last-Event-ID"),
             method: head.headers.first(name: "Mcp-Method"),
             name: head.headers.first(name: "Mcp-Name"),
+            parameterHeaders: Dictionary(
+                head.headers.filter { $0.name.lowercased().hasPrefix("mcp-param-") }
+                    .map { ($0.name, $0.value) },
+                uniquingKeysWith: { first, _ in first }),
             body: body)
     }
 
