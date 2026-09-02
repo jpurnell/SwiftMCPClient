@@ -23,6 +23,11 @@ jobs:
     name: Linux
     runs-on: ubuntu-latest
     container: swift:6.2
+    # Job scope, not step scope. A step-level `env:` is not visible to that same step's `if:`,
+    # so the guard below would have skipped authentication even once the secret existed —
+    # failing identically whether or not it was configured, which is the worst kind of guard.
+    env:
+      DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
     steps:
       - uses: actions/checkout@v5
 
@@ -32,14 +37,10 @@ jobs:
       # follows is the honest one — "could not clone" — rather than a confusing auth error.
       - name: Authenticate private dependencies
         if: env.DEPS_TOKEN != ''
-        env:
-          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
         run: |
           git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Preflight
-        env:
-          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
         run: |
           swift --version
           if [ -z "${DEPS_TOKEN}" ]; then
