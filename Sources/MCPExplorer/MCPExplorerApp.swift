@@ -9,10 +9,15 @@ struct MCPExplorerApp: App {
 
     init() {
         #if os(macOS)
-        // SwiftPM executables don't have an app bundle, so macOS won't
-        // show a Dock icon or bring the window to front by default.
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        // A bare SwiftPM executable has no bundle, so macOS gives it no Dock icon and leaves
+        // its window behind whatever was in front. Both are worth correcting when running
+        // from `.build`, and neither is when running from `MCPExplorer.app` — a bundled app
+        // that seizes focus on every launch is one that interrupts whatever you were doing,
+        // and the bundle already supplies the Dock icon.
+        if Bundle.main.bundleIdentifier == nil {
+            NSApplication.shared.setActivationPolicy(.regular)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
         #endif
     }
 

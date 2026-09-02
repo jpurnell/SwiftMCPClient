@@ -238,12 +238,34 @@ do {
 
 The package includes **MCPExplorer**, a SwiftUI macOS app for interactively connecting to MCP servers, browsing tools/resources/prompts, and watching notifications in real time.
 
-Build and run:
+### Install it as an application
+
+```bash
+./Scripts/build-app.sh --install     # builds, signs, and puts it in /Applications
+```
+
+This produces `MCPExplorer.app` — a normal double-clickable Mac app with a Dock icon, a
+version, and a Developer ID signature.
+
+The signature is not decoration. `MCPOAuthSession` seals its credentials with a key from the
+Keychain, and the Keychain decides what may read that key by the program's code identity. An
+unsigned build has a new identity every time it is compiled, so every rebuild would lose the
+saved OAuth tokens. A signed one keeps them.
+
+The first Developer ID signing on a machine raises a system dialog asking to use the key, so
+run that command from a terminal you are sitting at and choose **Always Allow**. It is
+unattended after that. `ADHOC=1 ./Scripts/build-app.sh` skips signing when you only want
+something that launches.
+
+### Or run it from the build directory
 
 ```bash
 swift build --product MCPExplorer
 .build/debug/MCPExplorer
 ```
+
+Fine for development. The app detects that it has no bundle and claims a Dock icon for
+itself, but the Keychain will re-prompt after each rebuild.
 
 ## Architecture
 
