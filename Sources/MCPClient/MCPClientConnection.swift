@@ -289,6 +289,107 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// against the server running it.
     static let defaultPollInterval: Duration = .milliseconds(1_000)
 
+    /// Refuses a result that is not the final one.
+    ///
+    /// MCP 2026-07-28 tags every result: `complete` for content, `input_required` for a server
+    /// that cannot finish until the client supplies something. Handing an interim result back
+    /// as content is the failure the tag exists to prevent — the caller would read an empty
+    /// payload as "the work is done" and act on it.
+    ///
+    /// **An absent tag is `complete`.** A server on an earlier revision omits the field
+    /// entirely, and reading that as "unknown" would break every 2025-era server the moment
+    /// this client started looking. `ResultType.resolving(_:)` is where that rule lives.
+    ///
+    /// Fulfilling an input request is Multi Round-Trip Requests, which this client does not do
+    /// yet; until it does, an interim result is an error carrying the server's request, so a
+    /// caller can see what was asked rather than an empty success.
+    ///
+    /// - Parameter result: The result as the server sent it.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the result is interim.
+    private func refusingInterimResult(_ result: AnyCodableValue) throws -> AnyCodableValue {
+        guard case .object(let fields) = result,
+              case .string(let tag)? = fields["resultType"] else {
+            // No tag at all: an earlier revision, and the specification says complete.
+            return result
+        }
+
+        guard ResultType.resolving(ResultType(rawValue: tag)) == .complete else {
+            throw MCPError.requestFailed(
+                code: Self.interimResultCode,
+                message: "the server needs input before it can finish this request",
+                data: result)
+        }
+        return result
+    }
+
+    /// The code an interim result is reported under until MRTR can fulfil one.
+    ///
+    /// From the implementation-defined range, deliberately: this is not a protocol error the
+    /// server sent, it is this client declining to pretend an interim result is an answer.
+    static let interimResultCode = -32000
+
+    /// Begins a session with a server that has no handshake.
+    ///
+    /// MCP 2026-07-28 removed `initialize`: a client declares its protocol version on every
+    /// request rather than agreeing one up front. There is nothing to negotiate here, so this
+    /// connects the transport and records what every later request will state.
+    ///
+    /// A server that cannot speak the declared version refuses the *first request* with
+    /// `-32022` and lists what it does support — see ``supportedVersions(from:)``. That is the
+    /// only discovery a stateless client gets, which is why the error must be readable rather
+    /// than merely thrown.
+    ///
+    /// - Parameters:
+    ///   - protocolVersion: The revision to declare.
+    ///   - clientName: This client's name, reported on every request.
+    ///   - clientVersion: This client's version.
+    /// - Throws: Whatever connecting the transport threw.
+    public func beginStateless(
+        protocolVersion: String,
+        clientName: String,
+        clientVersion: String
+    ) async throws {
+        try await transport.connect()
+        await transport.didNegotiate(protocolVersion: protocolVersion)
+
+        self.negotiatedVersion = protocolVersion
+        self.clientIdentity = ClientIdentity(name: clientName, version: clientVersion)
+
+        // The dispatcher is what routes responses to their requests; without a handshake there
+        // is no other moment to start it.
+        let newDispatcher = MCPMessageDispatcher(transport: transport)
+        await newDispatcher.start()
+        self.dispatcher = newDispatcher
+    }
+
+    /// The protocol versions a server named when refusing one.
+    ///
+    /// A stateless client has no handshake in which to discover what a server speaks, so a
+    /// refusal is the discovery. The list travels in the error's `data`, and a client that
+    /// cannot reach it can only guess again.
+    ///
+    /// - Parameter error: The error a request failed with.
+    /// - Returns: The versions the server named, or empty when it named none — which is a
+    ///   different thing from supporting none, and is left to the caller to tell apart.
+    public static func supportedVersions(from error: MCPError) -> [String] {
+        guard case .requestFailed(let code, _, let data) = error,
+              code == unsupportedProtocolVersionCode,
+              case .object(let fields)? = data,
+              case .array(let supported)? = fields["supported"] else {
+            return []
+        }
+        return supported.compactMap { value in
+            if case .string(let version) = value { return version }
+            return nil
+        }
+    }
+
+    /// The code a server uses to refuse a protocol version, as renumbered by 2026-07-28.
+    ///
+    /// The revision moved the protocol's own errors into `-32020` and beyond, leaving
+    /// `-32000`–`-32019` implementation-defined; this one was `-32004` in the draft.
+    static let unsupportedProtocolVersionCode = -32022
+
     /// Who this client says it is, once initialization has established it.
     private struct ClientIdentity: Sendable {
         let name: String
@@ -825,6 +926,8 @@ public actor MCPClientConnection: MCPClientProtocol {
 
         let request = JSONRPCRequest(
             id: requestID, method: method, params: protocolMeta(attachedTo: params))
+        // The result is checked for an interim tag before it reaches a caller — see
+        // `refusingInterimResult(_:)`.
         let requestData = try JSONEncoder().encode(request)
 
         try await transport.send(requestData)
@@ -852,7 +955,7 @@ public actor MCPClientConnection: MCPClientProtocol {
             throw MCPError.invalidResponse
         }
 
-        return result
+        return try refusingInterimResult(result)
     }
 
     /// Races an async operation against a timeout.

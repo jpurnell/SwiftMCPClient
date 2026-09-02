@@ -26,6 +26,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **A session can begin without a handshake.** MCP 2026-07-28 removed `initialize`, so
+  `beginStateless(protocolVersion:clientName:clientVersion:)` connects, records what every
+  request will declare, and starts routing responses. There is nothing to negotiate: a client
+  declares a version and finds out.
+- **`resultType` is honoured, including the rule that protects older servers.** A result tagged
+  `input_required` is a server saying it cannot finish until the client supplies something, and
+  handing that back as content would have a caller read an empty payload as "the work is done".
+  It is refused, carrying the server's request, until Multi Round-Trip Requests can fulfil one.
+
+  A result with **no** tag is `complete`. Servers on earlier revisions omit the field, and
+  reading its absence as "unknown" would have broken every one of them the moment this client
+  started looking for it.
+- **A refused protocol version is readable.** Without a handshake, a `-32022` refusal is the
+  only way a client learns what a server speaks, so `supportedVersions(from:)` reaches the list
+  in the error's `data`. A refusal naming nothing yields an empty list rather than a failure —
+  "the server did not say" and "the server supports none" are different problems.
+
 - **Requests carry what MCP 2026-07-28 requires of them.** The stateless revision removed the
   handshake, so every request states its own protocol version, client identity and capabilities
   in `_meta`, and mirrors `Mcp-Method` and `Mcp-Name` into HTTP headers so intermediaries can
