@@ -129,7 +129,7 @@ struct MCPOAuthSessionResumeTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let file = directory.appending(path: "registrations.enc")
-        let key = freshKeyBytes()
+        let key = keyBytes()
         let written = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await written.store(storedRegistration(), for: storedConnection())
 

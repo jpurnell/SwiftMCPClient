@@ -23,7 +23,7 @@ struct RegistrationRecordStoreTests {
     func roundTripsAcrossInstances() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = freshKeyBytes()
+        let key = keyBytes()
 
         let written = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await written.store(registration(), for: connection())
@@ -40,7 +40,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes()))
 
         #expect(try await store.record(for: connection()) == nil)
     }
@@ -52,7 +52,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes()))
         try await store.store(registration(), for: connection())
 
         let other = ConnectionID(
@@ -67,7 +67,7 @@ struct RegistrationRecordStoreTests {
     func storingReplacesPreviousRecord() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = freshKeyBytes()
+        let key = keyBytes()
 
         let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
@@ -85,7 +85,7 @@ struct RegistrationRecordStoreTests {
     func removeForgetsTheRecord() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = freshKeyBytes()
+        let key = keyBytes()
 
         let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
@@ -102,7 +102,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes()))
         try await store.remove(connection())
 
         #expect(try await store.record(for: connection()) == nil)
@@ -115,7 +115,7 @@ struct RegistrationRecordStoreTests {
     func truncatedFileThrows() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = freshKeyBytes()
+        let key = keyBytes()
 
         let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
@@ -137,10 +137,10 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes(1)))
         try await store.store(registration(), for: connection())
 
-        let other = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let other = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes(2)))
         await #expect(throws: StorageError.cannotDecrypt) {
             try await other.record(for: connection())
         }
@@ -153,7 +153,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: keyBytes()))
         try await store.store(registration(), for: connection())
 
         let bytes = try Data(contentsOf: file)
@@ -201,8 +201,15 @@ private func registration(clientId: String = "client-1") -> ClientRegistrationRe
 /// actor boundary twice — and `SymmetricKey` is `Sendable` on Apple platforms but not under
 /// swift-crypto on Linux, where passing one to an actor initialiser is a data race. `Data` is
 /// `Sendable` everywhere, so the bytes travel and each store builds its own key.
-func freshKeyBytes() -> Data {
-    SymmetricKey(size: .bits256).withUnsafeBytes(Data.init)
+func keyBytes(_ label: UInt8 = 1) -> Data {
+    // A constant, and distinct per label. These tests are about key *identity* — the same key
+    // across two stores, or a different one — never about key content, so naming which key is
+    // meant says more than a random value would and is deterministic besides.
+    //
+    // Bytes rather than a `SymmetricKey`: one shared between two stores crosses an actor
+    // initialiser twice, and `SymmetricKey` is `Sendable` on Apple platforms but not under
+    // swift-crypto on Linux. `Data` is `Sendable` everywhere.
+    Data(repeating: label, count: 32)
 }
 
 /// A path in a fresh directory, for a file the test will create.
