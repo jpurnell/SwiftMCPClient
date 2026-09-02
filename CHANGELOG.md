@@ -25,6 +25,13 @@ and Linux.
   talking to a modern server and got something wrong" rather than "this server is old". Only an
   unrecognised refusal justifies falling back to `initialize` — which a modern server has removed.
 
+- **A conformance suite for the stateless era**, opt-in through `MCP_STATELESS_SERVER`, run
+  against SwiftMCPServer's conformance target. The reference implementation stops at
+  `2025-11-25`, so until now every claim this client made about `2026-07-28` was checked only
+  against stubs written from the same reading of the same document. The stateless revision is
+  where that gap matters most: there is no handshake to fail loudly, so a client that gets
+  `_meta` wrong looks like one whose requests are merely being rejected.
+
 
 ### Added
 - **A refreshed token now reaches the wire.** `StreamableHTTPTransport` takes an
