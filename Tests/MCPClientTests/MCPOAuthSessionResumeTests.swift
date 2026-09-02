@@ -76,7 +76,9 @@ struct MCPOAuthSessionResumeTests {
 
         #expect(try await session.resume(server: resumeServerURL()) == false)
         #expect(await session.isSignedIn == false)
-        #expect(await requested.urls.isEmpty, "the network was reached for a resume that cannot succeed")
+        // Discovery happens regardless now — see `nothingStored` for why the earlier
+        // "no network" guarantee could not survive keying by issuer.
+        #expect(!(await requested.urls.isEmpty))
     }
 
     /// The mirror image: a registration whose credential has been signed out or expired away.
@@ -96,9 +98,13 @@ struct MCPOAuthSessionResumeTests {
         #expect(await session.isSignedIn == false)
     }
 
-    /// A first launch. `false`, without a network round trip — there is nothing discovery
-    /// could tell this session that would change the answer.
-    @Test("Nothing stored does not resume, and does not reach the network")
+    /// A first launch resumes nothing — but it does discover first, which is a change.
+    ///
+    /// This test previously asserted that nothing reached the network, because both halves
+    /// were read before discovery. Keying by issuer removed that option: the key is not
+    /// knowable until the server names its authorization server. The round trip is the price
+    /// of not guessing which issuer a stored credential came from.
+    @Test("Nothing stored does not resume, though discovery is attempted")
     func nothingStored() async throws {
         let requested = RequestedURLs()
         let session = MCPOAuthSession(
@@ -107,7 +113,7 @@ struct MCPOAuthSessionResumeTests {
             registrations: InMemoryRegistrationStore())
 
         #expect(try await session.resume(server: resumeServerURL()) == false)
-        #expect(await requested.urls.isEmpty)
+        #expect(!(await requested.urls.isEmpty), "the issuer cannot be known without asking")
     }
 
     /// A store that cannot be opened must not arrive as `false`. `false` means "sign in
@@ -164,9 +170,14 @@ private func resumeServerURL() -> URL {
 }
 
 /// The connection the stored halves belong to — the same identity `signIn` files them under.
+///
+/// The provider slot is the **issuer**, not the MCP server's host: MCP 2026-07-28 requires
+/// credentials to be keyed by the authorization server that issued them.
 private func storedConnection() -> ConnectionID {
     ConnectionID(
-        tenant: "local", provider: "mcp.example.com", account: "https://mcp.example.com")
+        tenant: "local",
+        provider: "https://auth.example.com",
+        account: "https://mcp.example.com")
 }
 
 /// A registration as a server issued it on some earlier launch.
@@ -201,14 +212,15 @@ private actor RequestedURLs {
 /// Serves canned discovery documents, optionally recording what was requested.
 private func metadataFetch(
     recordingInto recorder: RequestedURLs? = nil,
-    issuer: String = "https://auth.example.com"
+    issuer: String = "https://auth.example.com",
+    resource: String = "https://mcp.example.com"
 ) -> MCPOAuthSetup.Fetch {
     { requested in
         await recorder?.record(requested)
 
         if requested.path.contains("oauth-protected-resource") {
             return try JSONEncoder().encode(ProtectedResourceMetadata(
-                resource: "https://mcp.example.com",
+                resource: resource,
                 authorizationServers: [issuer],
                 scopesSupported: ["mcp:tools"]))
         }
@@ -351,5 +363,147 @@ private struct StubTokenTransport: TokenTransport {
             expiresIn: 3_600,
             refreshToken: "rotated-refresh-token",
             scope: "mcp:tools")
+    }
+}
+
+/// Which authorization server a stored credential belongs to.
+///
+/// MCP 2026-07-28 (SEP-2352) requires that a client key persisted credentials by the **issuer
+/// identifier**, never reuse them with a different authorization server, and re-register when
+/// the authorization server changes.
+///
+/// This package keyed by the *MCP server's* host and URL, which is a different thing. Two MCP
+/// servers behind one authorization server were filed as if they were separate registrations,
+/// and — the case that actually loses credentials — one MCP server that moves to a new
+/// authorization server kept presenting a `client_id` the new server never issued.
+@Suite("MCP OAuth session — credentials are keyed by issuer")
+struct MCPOAuthIssuerKeyingTests {
+
+    /// The key names the issuer. Everything else follows from this.
+    @Test("A stored session is filed under the issuer, not the MCP host")
+    func filedUnderTheIssuer() async throws {
+        let storage = InMemoryClientStorage()
+        let registrations = InMemoryRegistrationStore()
+        let issuerKeyed = ConnectionID(
+            tenant: "local",
+            provider: "https://auth.example.com",
+            account: "https://mcp.example.com")
+        try await storage.store(storedCredential(), for: issuerKeyed)
+        try await registrations.store(storedRegistration(), for: issuerKeyed)
+
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: metadataFetch()),
+            storage: storage,
+            registrations: registrations)
+
+        #expect(try await session.resume(server: resumeServerURL()),
+                "a session filed under the issuer was not found")
+    }
+
+    /// The mirror image, and the requirement stated as a prohibition: a record filed under the
+    /// old key is **not** reused. It names the MCP host, which says nothing about which
+    /// authorization server issued it, so the only conformant answer is to sign in again.
+    @Test("A record keyed by the MCP host is not reused")
+    func hostKeyedRecordIsNotReused() async throws {
+        let storage = InMemoryClientStorage()
+        let registrations = InMemoryRegistrationStore()
+        let hostKeyed = ConnectionID(
+            tenant: "local",
+            provider: "mcp.example.com",
+            account: "https://mcp.example.com")
+        try await storage.store(storedCredential(), for: hostKeyed)
+        try await registrations.store(storedRegistration(), for: hostKeyed)
+
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: metadataFetch()),
+            storage: storage,
+            registrations: registrations)
+
+        #expect(try await session.resume(server: resumeServerURL()) == false,
+                "a credential of unknown provenance was presented to an authorization server")
+    }
+
+    /// The case the requirement exists for. The same MCP server, now protected by a different
+    /// authorization server, must not present the old client's credentials — that `client_id`
+    /// means nothing to the new issuer, and the refresh token is bound to it.
+    @Test("Moving to a different authorization server forces a fresh sign-in")
+    func changedIssuerForcesSignIn() async throws {
+        let storage = InMemoryClientStorage()
+        let registrations = InMemoryRegistrationStore()
+        let old = ConnectionID(
+            tenant: "local",
+            provider: "https://old-auth.example.com",
+            account: "https://mcp.example.com")
+        try await storage.store(storedCredential(), for: old)
+        try await registrations.store(storedRegistration(), for: old)
+
+        // The server now names a different authorization server.
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: metadataFetch(issuer: "https://new-auth.example.com")),
+            storage: storage,
+            registrations: registrations)
+
+        #expect(try await session.resume(server: resumeServerURL()) == false,
+                "credentials from the previous authorization server were reused")
+    }
+
+    /// Two MCP servers behind one authorization server share an issuer and must not share a
+    /// registration: the resource differs, and under RFC 8707 so does the audience of the token.
+    @Test("Two servers behind one issuer are filed separately")
+    func separateServersUnderOneIssuer() async throws {
+        let storage = InMemoryClientStorage()
+        let registrations = InMemoryRegistrationStore()
+        let first = ConnectionID(
+            tenant: "local",
+            provider: "https://auth.example.com",
+            account: "https://mcp.example.com")
+        try await storage.store(storedCredential(), for: first)
+        try await registrations.store(storedRegistration(), for: first)
+
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: metadataFetch(resource: "https://other.example.com")),
+            storage: storage,
+            registrations: registrations)
+
+        let other = try #require(URL(string: "https://other.example.com"))
+        #expect(try await session.resume(server: other) == false,
+                "one server's registration was used for another behind the same issuer")
+    }
+}
+
+/// The cheap "is there anything stored?" check, under issuer keying.
+@Suite("MCP OAuth session — stored-credential check")
+struct MCPOAuthStoredCredentialTests {
+
+    /// It has to look where the credential actually is. Keyed by issuer, that means asking the
+    /// server which issuer protects it first — a lookup by host finds nothing and reports
+    /// "sign in", which is the wrong answer for a user who is already signed in.
+    @Test("A credential stored under the issuer is found")
+    func findsIssuerKeyedCredential() async throws {
+        let storage = InMemoryClientStorage()
+        try await storage.store(storedCredential(), for: storedConnection())
+
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: metadataFetch()),
+            storage: storage,
+            registrations: InMemoryRegistrationStore())
+
+        #expect(await session.hasStoredCredential(server: resumeServerURL()))
+    }
+
+    /// A server that cannot be reached, or that names a different issuer, reports nothing
+    /// stored. Both lead a caller to the same place — the sign-in button — and neither is an
+    /// error worth surfacing from a question this cheap.
+    @Test("An unreachable server reports nothing stored rather than failing")
+    func unreachableServerReportsNothing() async throws {
+        let storage = InMemoryClientStorage()
+        try await storage.store(storedCredential(), for: storedConnection())
+
+        let session = MCPOAuthSession(
+            setup: MCPOAuthSetup(fetch: { _ in throw MCPOAuthError.noAuthorizationServer }),
+            storage: storage,
+            registrations: InMemoryRegistrationStore())
+
+        #expect(await session.hasStoredCredential(server: resumeServerURL()) == false)
     }
 }

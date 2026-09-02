@@ -193,9 +193,17 @@ public struct MCPOAuthSetup: Sendable {
         }
 
         do {
+            // The **issuer** identifies the configuration, not the MCP server's host. MCP
+            // 2026-07-28 (SEP-2352) requires a client to key persisted credentials by the
+            // issuer, never reuse them with a different authorization server, and re-register
+            // when it changes — and a key naming the MCP host says nothing about which
+            // authorization server issued what it holds.
+            //
+            // The passed identifier survives only as a fallback for a server whose metadata
+            // states no issuer, which is malformed but need not be fatal here.
             return (
                 try metadata.configuration(
-                    identifier: identifier,
+                    identifier: metadata.issuer.isEmpty ? identifier : metadata.issuer,
                     scope: resource.scopesSupported?.joined(separator: " ")),
                 try metadata.registrationURL())
         } catch let error as DiscoveryError {

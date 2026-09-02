@@ -26,6 +26,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **Credentials are keyed by the authorization server that issued them.** MCP 2026-07-28
+  (SEP-2352) requires a client to key persisted credentials by the **issuer identifier**, never
+  reuse them with a different authorization server, and re-register when it changes. This
+  package keyed by the *MCP server's* host and URL, which says nothing about which authorization
+  server issued what it held — so an MCP server that moved to a new authorization server kept
+  presenting a `client_id` that server never issued, and two MCP servers behind one
+  authorization server were filed as if unrelated.
+
+  A record filed under the old key is deliberately **not** migrated: its provenance is unknown,
+  and the only conformant response to a credential of unknown provenance is to sign in again.
+
+  One consequence, stated because it reverses a decision made the same day: `resume` and
+  `hasStoredCredential` now discover **before** reading storage. The key is not knowable until
+  the server names its authorization server, so the earlier "no network when nothing is stored"
+  saving is not available. Guessing the key from the host is exactly what SEP-2352 forbids.
+
 - **Verified against an independent implementation.** Every other test in this package checks
   the client against a stub written from the same reading of the same specification, by the
   same author, on the same day — which catches mistakes in the code and not in the reading.

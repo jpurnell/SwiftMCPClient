@@ -153,8 +153,10 @@ public actor MCPOAuthSession {
             scope: discovered.scope,
             authenticationMethod: registration.authenticationMethod)
 
+        // Keyed by the issuer that discovery reported, not by the host that was asked. See
+        // `MCPOAuthSetup.discover`.
         let id = ConnectionID(
-            tenant: tenant, provider: identifier, account: server.absoluteString)
+            tenant: tenant, provider: discovered.identifier, account: server.absoluteString)
         let connection = OAuthConnection(
             configuration: configuration,
             credentials: registration.credentials(environment: identifier),
@@ -213,16 +215,26 @@ public actor MCPOAuthSession {
     @discardableResult
     public func resume(server: URL, tenant: String = "local") async throws -> Bool {
         let identifier = server.host() ?? "mcp"
-        let id = ConnectionID(
-            tenant: tenant, provider: identifier, account: server.absoluteString)
 
-        // Both halves are read before anything reaches the network. Discovery cannot change
-        // the answer when either is missing, and a launch with nothing stored is the common
-        // case — it should not cost a round trip to the server to find that out.
+        // Discovery comes first, because the connection cannot be named without it. Keying by
+        // issuer means the key is not knowable until the server says which authorization
+        // server protects it.
+        //
+        // This reverses an earlier optimisation — reading both halves before touching the
+        // network, so a launch with nothing stored cost no round trip. That saving is not
+        // available under a key derived from discovery, and the conformance requirement wins:
+        // a client that guesses the key from the host reuses credentials across authorization
+        // servers, which is precisely what SEP-2352 forbids.
+        let (discovered, _) = try await setup.discover(server: server, identifier: identifier)
+
+        let id = ConnectionID(
+            tenant: tenant, provider: discovered.identifier, account: server.absoluteString)
+
+        // A record filed under a different issuer is not this connection's record, and a miss
+        // here is how "the authorization server changed" surfaces: the caller signs in again,
+        // which re-registers.
         guard let registration = try await registrations.record(for: id) else { return false }
         guard try await storage.credential(for: id) != nil else { return false }
-
-        let (discovered, _) = try await setup.discover(server: server, identifier: identifier)
 
         // The *stored* authentication method, not one derived from what discovery returned.
         // It has to match what this client registered as: presenting `client_secret_basic`
@@ -283,9 +295,20 @@ public actor MCPOAuthSession {
     ///   - tenant: Who the connection belongs to.
     /// - Returns: `true` if a credential is on file.
     public func hasStoredCredential(server: URL, tenant: String = "local") async -> Bool {
-        let identifier = server.host() ?? "mcp"
+        // Discovery first, for the same reason `resume` needs it: credentials are keyed by the
+        // issuer, and only the server can say which issuer protects it. A lookup by host finds
+        // nothing and reports "sign in" — the wrong answer, given confidently, to a user who is
+        // already signed in.
+        // silent: an unreachable server and an empty store lead a caller to the same place
+        guard let discovered = try? await setup.discover(
+            server: server, identifier: server.host() ?? "mcp") else {
+            return false
+        }
+
         let id = ConnectionID(
-            tenant: tenant, provider: identifier, account: server.absoluteString)
+            tenant: tenant,
+            provider: discovered.configuration.identifier,
+            account: server.absoluteString)
         // An unreadable store and an empty one mean the same thing to a caller deciding
         // whether to offer a sign-in button: offer it.
         // silent: both outcomes lead to the same UI, and the store logs its own reason
