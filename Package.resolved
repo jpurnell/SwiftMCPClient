@@ -1,5 +1,5 @@
 {
-  "originHash" : "b073204ede292072c60b3eac07c5b659b2a096b85a9e954c999066bfe4634fa1",
+  "originHash" : "134d457615eccbcfaa9b4c48a8f1c67ffab8ec873aaede67f5a458e1b3583e18",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -146,6 +146,15 @@
       }
     },
     {
+      "identity" : "swift-mcp-sdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpurnell/swift-mcp-sdk",
+      "state" : {
+        "revision" : "56dc4a930d6501048d67c11467ee10235c8305ba",
+        "version" : "2026.7.28"
+      }
+    },
+    {
       "identity" : "swift-nio",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
@@ -200,12 +209,12 @@
       }
     },
     {
-      "identity" : "swift-sdk",
+      "identity" : "swift-oauth",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jpurnell/swift-sdk",
+      "location" : "https://github.com/jpurnell/swift-oauth",
       "state" : {
-        "revision" : "fa1761df65296c859d6d94d289cdd69726df6e08",
-        "version" : "2.0.0-alpha.1"
+        "revision" : "2e28437faa60c05522746870b3d396981f55dead",
+        "version" : "0.7.1"
       }
     },
     {
@@ -233,15 +242,6 @@
       "state" : {
         "revision" : "7c6ad0fc39d0763e0b699210e4124afd5041c5df",
         "version" : "1.6.4"
-      }
-    },
-    {
-      "identity" : "swiftoauth",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jpurnell/SwiftOAuth",
-      "state" : {
-        "revision" : "efa98b49a8bd56645a5f1a7c304646d12e71b0c0",
-        "version" : "0.7.0"
       }
     },
     {

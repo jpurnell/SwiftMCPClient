@@ -6,10 +6,10 @@ var targets: [Target] = [
     .target(
         name: "MCPClient",
         dependencies: [
-            .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
-            .product(name: "MCP", package: "swift-sdk"),
+            .product(name: "SwiftOAuthClient", package: "swift-oauth"),
+            .product(name: "MCP", package: "swift-mcp-sdk"),
             .product(name: "Crypto", package: "swift-crypto"),
-            .product(name: "SwiftOAuthCore", package: "SwiftOAuth"),
+            .product(name: "SwiftOAuthCore", package: "swift-oauth"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
@@ -47,8 +47,8 @@ targets.append(
         name: "MCPExplorer",
         dependencies: [
             "MCPClient",
-            .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
-            .product(name: "SwiftOAuthCore", package: "SwiftOAuth")
+            .product(name: "SwiftOAuthClient", package: "swift-oauth"),
+            .product(name: "SwiftOAuthCore", package: "swift-oauth")
         ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
@@ -95,15 +95,24 @@ let package = Package(
         // OAuth for MCP servers that require it. An MCP client is pointed at a server by a
         // user and has no pre-registered credentials, so it needs discovery and dynamic
         // registration rather than a token someone pasted in.
-        .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.6.0"),
+        //
+        // `swift-oauth`, not `SwiftOAuth`. SwiftPM takes a package's identity from the last
+        // path component of its URL, so the two repositories are two packages holding one
+        // library — and a dependency graph reaching both fails to resolve. This is the public
+        // export, and it is the one SwiftMCPServer resolves.
+        .package(url: "https://github.com/jpurnell/swift-oauth", from: "0.7.1"),
         // The protocol surface, shared with SwiftMCPServer rather than written twice. The
         // wire types are where duplication costs most: every specification revision would
         // otherwise be implemented once here and once there, and the two would drift in ways
         // only a live server would reveal.
         //
-        // Pinned exactly, and to a pre-release. 2.0.0 is where this is going and it is not
-        // there; tracking a branch would let a build change because the SDK moved.
-        .package(url: "https://github.com/jpurnell/swift-sdk", exact: "2.0.0-alpha.1"),
+        // Pinned exactly. Tracking a branch would let a build change because the SDK moved.
+        //
+        // `swift-mcp-sdk`, not `swift-sdk` — the same identity problem as above. Both are
+        // public and both carry this tag, so the choice is not about access: it is that a
+        // package can only be one of them, and anything depending on this client and on
+        // SwiftMCPServer together must agree on which.
+        .package(url: "https://github.com/jpurnell/swift-mcp-sdk", exact: "2026.7.28"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.
