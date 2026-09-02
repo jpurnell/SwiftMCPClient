@@ -50,11 +50,17 @@ jobs:
       - name: Preflight
         run: |
           swift --version
+          # Every dependency now resolves over a public URL, so a missing token is no longer
+          # a failure — this says so rather than warning about a private SwiftOAuth that is
+          # no longer depended on. The secret and the step above are kept because the cost of
+          # keeping them is a skipped step, and the cost of needing them again is a red run
+          # that reads like a network problem.
           if [ -z "${DEPS_TOKEN}" ]; then
-            echo "::warning::No DEPS_TOKEN secret. SwiftOAuth is private, so resolution will fail."
+            echo "No DEPS_TOKEN. Expected: all dependencies are public."
           else
-            echo "DEPS_TOKEN present. Note that fine-grained tokens expire — an expired one"
-            echo "fails as 'could not clone', which reads like a network problem."
+            echo "DEPS_TOKEN present but not required — every dependency is public. Note that"
+            echo "fine-grained tokens expire, and an expired one fails as 'could not clone',"
+            echo "which reads like a network problem."
           fi
 
       - name: Build

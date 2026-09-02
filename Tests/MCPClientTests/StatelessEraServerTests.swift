@@ -23,9 +23,15 @@ import AsyncHTTPClient
 /// **Opt in explicitly**, after starting the server:
 ///
 /// ```
-/// swift run ConformanceServer          # in SwiftMCPServer, listens on 3002
+/// git clone --branch 2.0.0 https://github.com/jpurnell/swift-mcp-server.git
+/// cd swift-mcp-server && PORT=3002 swift run conformance-server
 /// MCP_STATELESS_SERVER=http://127.0.0.1:3002/mcp swift test --filter StatelessEraServerTests
 /// ```
+///
+/// The product is `conformance-server`; `ConformanceServer` is the target it builds from, and
+/// naming that instead fails with "no executable product named". Pointing at the published
+/// repository rather than a local SwiftMCPServer checkout keeps this suite reproducible —
+/// a working tree moves, and it moved out from under this suite the day it was written.
 ///
 /// Skipped otherwise. It needs a process this suite does not start, so it cannot run
 /// unattended — but it costs nothing and needs no account.
