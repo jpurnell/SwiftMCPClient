@@ -240,8 +240,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/jpurnell/SwiftOAuth",
       "state" : {
-        "revision" : "3ce6e2da31b790da8f7400764c9f4a2cfddfacaf",
-        "version" : "0.6.0"
+        "revision" : "efa98b49a8bd56645a5f1a7c304646d12e71b0c0",
+        "version" : "0.7.0"
       }
     },
     {
