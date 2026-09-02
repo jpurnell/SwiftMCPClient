@@ -198,6 +198,92 @@ public actor MCPClientConnection: MCPClientProtocol {
         try await paginatedList(method: "tools/list", key: "tools")
     }
 
+    // MARK: - Tasks extension
+
+    /// Reads a task's current state.
+    ///
+    /// - Parameter id: The task identifier the server issued.
+    /// - Returns: The task as the server now sees it.
+    /// - Throws: ``MCPError`` if the request failed, or if the server does not implement the
+    ///   `io.modelcontextprotocol/tasks` extension.
+    public func getTask(id: String) async throws -> MCPTask {
+        let params = try Self.parameters(TasksExtension.getParameters(taskId: id))
+        let response = try await sendRequest(method: TasksExtension.get, params: params)
+        return try Self.task(from: response)
+    }
+
+    /// Supplies input to a task, or nudges one along.
+    ///
+    /// - Parameters:
+    ///   - id: The task identifier.
+    ///   - inputResponses: Answers to what the task asked for, keyed by request. Omitting them
+    ///     is legitimate — an update with nothing to say is how a client nudges a task.
+    /// - Returns: The task after the update.
+    /// - Throws: ``MCPError``.
+    @discardableResult
+    public func updateTask(
+        id: String,
+        inputResponses: [String: AnyCodableValue]? = nil
+    ) async throws -> MCPTask {
+        let params = try Self.parameters(
+            TasksExtension.updateParameters(taskId: id, inputResponses: inputResponses))
+        let response = try await sendRequest(method: TasksExtension.update, params: params)
+        return try Self.task(from: response)
+    }
+
+    /// Polls a task until it stops moving on its own.
+    ///
+    /// Stops on any terminal status **and** on `input_required`, because a task waiting for the
+    /// client will not move until the client answers it — continuing to poll one is how a
+    /// caller waits forever for something it was itself holding up.
+    ///
+    /// A failed task is *returned*, not thrown: "the work failed" is an answer, and the caller
+    /// needs the status message that came with it. Only a transport or protocol failure throws.
+    ///
+    /// - Parameters:
+    ///   - id: The task identifier.
+    ///   - maximumPolls: How many times to ask before giving up. A bound, so a task that never
+    ///     finishes ends the wait rather than the process.
+    /// - Returns: The task in its last observed state.
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the bound is reached, or
+    ///   whatever the transport threw.
+    public func awaitTask(id: String, maximumPolls: Int = 600) async throws -> MCPTask {
+        for _ in 0..<max(maximumPolls, 1) {
+            let task = try await getTask(id: id)
+            if task.status.isTerminal || task.status == .inputRequired {
+                return task
+            }
+            // The server's own preference, where it stated a usable one. Polling as fast as
+            // the loop allows turns a long-running task into a denial of service against the
+            // server running it.
+            try await Task.sleep(for: task.pollInterval)
+        }
+
+        throw MCPError.requestFailed(
+            code: -32000,
+            message: "task \(id) did not finish within \(maximumPolls) polls",
+            data: nil)
+    }
+
+    /// Carries a typed parameter value into the request encoding this connection speaks.
+    private static func parameters(_ value: some Encodable) throws -> AnyCodableValue {
+        try JSONDecoder().decode(AnyCodableValue.self, from: JSONEncoder().encode(value))
+    }
+
+    /// Reads the task out of a `tasks/get` or `tasks/update` result.
+    private static func task(from response: AnyCodableValue) throws -> MCPTask {
+        let data = try JSONEncoder().encode(response)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let taskFields = fields["task"] else {
+            throw MCPError.requestFailed(
+                code: -32602,
+                message: "the result carried no task",
+                data: nil)
+        }
+        let taskData = try JSONSerialization.data(withJSONObject: taskFields)
+        return try JSONDecoder().decode(MCPTask.self, from: taskData)
+    }
+
     /// Send a ping to the MCP server and await the response.
     ///
     /// Sends a `ping` request per the MCP specification. The server must

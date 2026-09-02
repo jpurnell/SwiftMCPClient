@@ -26,6 +26,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **The `io.modelcontextprotocol/tasks` extension, client side.** A task is how a server
+  answers a request it cannot finish now: it returns a handle, and the work outlives the request
+  that started it. `getTask(id:)`, `updateTask(id:inputResponses:)`, and `awaitTask(id:)` which
+  polls until the task stops moving on its own.
+
+  Field names and the `MCPTask` spelling match SwiftMCPServer's implementation of the same
+  extension deliberately — two implementations of one extension that disagree about field names
+  interoperate with nobody. `MCPTask` rather than `Task` because Swift concurrency has that name.
+
+  The polling loop stops on `input_required` as well as the terminal states: a task waiting for
+  the client will not move until the client answers it, and polling one is how a caller waits
+  forever for something it is itself holding up. A failed task is **returned, not thrown** —
+  "the work failed" is an answer, and the caller needs the status message that came with it. The
+  server's stated poll interval is honoured unless it is zero or negative, which would spin, and
+  the loop is bounded so a task that never finishes ends the wait rather than the process.
+
 - **A dropped response stream is now recovered.** 2025-11-25 (SEP-1699) settles how:
   resumption is always via `GET`, whichever stream dropped — the request is never re-issued,
   since that would run the work twice. This package recorded per-request event ids from the day
