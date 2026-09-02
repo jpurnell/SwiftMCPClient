@@ -143,3 +143,83 @@ private actor EraStubTransport: MCPTransport {
         throw MCPClient.MCPError.connectionFailed(reason: "nothing queued")
     }
 }
+
+/// What version the handshake fallback asks for.
+///
+/// A handshake negotiates *down*: the client names the newest revision it speaks and the server
+/// answers with the newest it shares. Asking for an old one therefore does not "play safe" — it
+/// caps the result, and the server has no way to offer better.
+@Suite("Connection factory — handshake version")
+struct HandshakeVersionTests {
+
+    /// The fallback asks for this client's newest, not for whatever `initialize` defaults to.
+    ///
+    /// This is why a server supporting 2025-11-25 was negotiating 2024-11-05: the default is
+    /// four revisions old and the fallback never overrode it.
+    @Test("The handshake asks for the newest version this client speaks", .timeLimit(.minutes(1)))
+    func asksForNewest() async throws {
+        let transport = NegotiatingStubTransport(supports: "2025-11-25")
+        _ = try await MCPConnectionFactory.connect(
+            transport: transport, clientName: "probe", clientVersion: "1.0")
+
+        #expect(await transport.requestedVersion == MCPClientConnection.supportedProtocolVersions.last,
+                "the fallback asked for something other than this client's newest")
+    }
+
+    /// And takes what the server answers with, which is what negotiating down means.
+    @Test("The server's answer is what the connection uses", .timeLimit(.minutes(1)))
+    func usesTheServersAnswer() async throws {
+        let transport = NegotiatingStubTransport(supports: "2025-11-25")
+        let connected = try await MCPConnectionFactory.connect(
+            transport: transport, clientName: "probe", clientVersion: "1.0")
+
+        #expect(connected.protocolVersion == "2025-11-25")
+    }
+}
+
+/// A handshake-era server that negotiates down to what it supports.
+private actor NegotiatingStubTransport: MCPTransport {
+
+    private let supports: String
+    private var pending: [Data] = []
+    private(set) var requestedVersion: String?
+
+    init(supports: String) {
+        self.supports = supports
+    }
+
+    func connect() async throws {}
+    func disconnect() async throws {}
+
+    func send(_ data: Data) async throws {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = object["id"] else { return }
+        let method = object["method"] as? String ?? ""
+
+        var response: [String: Any] = ["jsonrpc": "2.0", "id": id]
+        if method == "server/discover" {
+            response["error"] = ["code": -32601, "message": "Method not found"]
+        } else if method == "initialize" {
+            let params = object["params"] as? [String: Any]
+            requestedVersion = params?["protocolVersion"] as? String
+            // Negotiating down: the server answers with what it supports, whatever was asked.
+            response["result"] = [
+                "protocolVersion": supports,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "stub", "version": "1.0.0"]
+            ]
+        } else {
+            response["result"] = ["resultType": "complete"]
+        }
+        pending.append(try JSONSerialization.data(withJSONObject: response))
+    }
+
+    func receive() async throws -> Data {
+        for _ in 0..<200 {
+            if !pending.isEmpty { return pending.removeFirst() }
+            // silent: a cancelled sleep ends the wait, and the throw below reports it
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        throw MCPClient.MCPError.connectionFailed(reason: "nothing queued")
+    }
+}

@@ -358,11 +358,13 @@ public actor HTTPSSETransport: MCPTransport {
                     let events = parser.append(text)
 
                     for event in events {
-                        if event.event == "message" || event.event == nil {
-                            if let data = event.data.data(using: .utf8) {
-                                await self.enqueueMessage(data)
-                            }
-                        }
+                        guard event.event == "message" || event.event == nil else { continue }
+                        // An event carrying no data is a keep-alive, not a message. Handing an
+                        // empty payload to a JSON-RPC decoder reports the response as invalid
+                        // when the server did nothing wrong.
+                        guard !event.data.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              let data = event.data.data(using: .utf8) else { continue }
+                        await self.enqueueMessage(data)
                     }
                 }
             } catch is CancellationError {

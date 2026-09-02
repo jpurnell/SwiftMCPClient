@@ -109,3 +109,30 @@ struct StreamableHTTPStreamingTests {
         }
     }
 }
+
+/// Events that carry nothing.
+///
+/// A server may send an SSE event with an id and an empty `data:` line — a keep-alive, or a
+/// priming event before the real one. The reference implementation does exactly that once a
+/// 2025-11-25 session is negotiated.
+///
+/// An event carrying no data is not a message. Handing one to a JSON-RPC decoder produces a
+/// failure that names the response as invalid, when in fact the server did nothing wrong and
+/// the real response arrived immediately afterwards.
+@Suite("Streamable HTTP — empty events")
+struct StreamableHTTPEmptyEventTests {
+
+    /// The message after the empty one is what a caller receives.
+    @Test("An empty-data event is not delivered as a message", .timeLimit(.minutes(1)))
+    func emptyEventIsNotAMessage() async throws {
+        let received = try await withStub(
+            replies: [.primedSSE(#"{"jsonrpc":"2.0","id":1,"result":{}}"#)]
+        ) { transport, _ in
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
+            return try await transport.receive()
+        }
+
+        #expect(String(decoding: received, as: UTF8.self).contains(#""id":1"#),
+                "the priming event was delivered instead of the response")
+    }
+}

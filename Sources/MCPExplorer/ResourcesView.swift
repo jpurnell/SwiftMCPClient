@@ -78,7 +78,10 @@ struct ResourcesView: View {
                     }
                 }
             }
-            .frame(minWidth: 250)
+            // `maxHeight: .infinity` is what makes the pane fill the split view. Without it
+            // `HSplitView` sizes a child to its ideal height, so the list sat at content
+            // height in the middle of the pane until a click forced a re-layout.
+            .frame(minWidth: 250, maxHeight: .infinity)
 
             // Detail
             VStack {
@@ -92,7 +95,7 @@ struct ResourcesView: View {
                     )
                 }
             }
-            .frame(minWidth: 400)
+            .frame(minWidth: 400, maxHeight: .infinity)
         }
         .navigationTitle("Resources")
     }

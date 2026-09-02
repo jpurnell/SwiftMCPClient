@@ -37,7 +37,13 @@ struct StreamableHTTPBodyDecoder: Sendable {
         }
 
         var parser = SSEParser()
-        return parser.append(text).map { Data($0.data.utf8) }
+        // Events carrying no data are dropped. A server may send one as a keep-alive or as a
+        // priming event before the real message — the reference implementation does exactly
+        // that — and handing an empty payload to a JSON-RPC decoder reports the response as
+        // invalid when the server did nothing wrong.
+        return parser.append(text)
+            .filter { !$0.data.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { Data($0.data.utf8) }
     }
 
     /// Whether a `Content-Type` names the SSE media type.

@@ -105,7 +105,8 @@ public enum MCPConnectionFactory {
                 clientName: clientName,
                 clientVersion: clientVersion,
                 capabilities: capabilities,
-                requestTimeout: requestTimeout)
+                requestTimeout: requestTimeout,
+                preferred: preferred)
         }
     }
 
@@ -139,7 +140,8 @@ public enum MCPConnectionFactory {
         clientName: String,
         clientVersion: String,
         capabilities: ClientCapabilities,
-        requestTimeout: Duration
+        requestTimeout: Duration,
+        preferred: String
     ) async throws -> Connected {
         let code: Int?
         if case .requestFailed(let failed, _, _) = error { code = failed } else { code = nil }
@@ -165,8 +167,15 @@ public enum MCPConnectionFactory {
 
             let handshake = MCPClientConnection(
                 transport: transport, requestTimeout: requestTimeout)
+            // The newest this client speaks, not `initialize`'s default. A handshake negotiates
+            // *down* — the client names its best and the server answers with the best it
+            // shares — so asking for an old revision does not play safe, it caps the result and
+            // leaves the server no way to offer better.
             let result = try await handshake.initialize(
-                clientName: clientName, clientVersion: clientVersion, capabilities: capabilities)
+                clientName: clientName,
+                clientVersion: clientVersion,
+                capabilities: capabilities,
+                protocolVersion: preferred)
             return Connected(
                 connection: handshake,
                 era: .handshake,

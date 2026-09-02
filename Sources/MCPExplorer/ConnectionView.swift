@@ -67,6 +67,22 @@ struct ConnectionView: View {
 
             Section("Status") {
                 statusRow
+
+                // Which protocol was actually settled on. Two servers that both connect can be
+                // speaking materially different protocols, and questions like "why are there no
+                // notifications" have a different answer in each — so it is worth showing rather
+                // than leaving to be inferred.
+                if let version = viewModel.negotiatedVersion, let era = viewModel.negotiatedEra {
+                    LabeledContent("Protocol") {
+                        HStack(spacing: 8) {
+                            Text(version)
+                                .font(.body.monospaced())
+                            Text(era == .stateless ? "stateless" : "handshake")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
 
             Section {

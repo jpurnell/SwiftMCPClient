@@ -224,7 +224,7 @@ public actor StreamableHTTPTransport: MCPTransport {
                     if let id = event.id {
                         await session.record(eventID: id, for: .get)
                     }
-                    enqueueMessage(Data(event.data.utf8))
+                    enqueue(event)
                     delivered = true
                 }
 
@@ -423,6 +423,21 @@ public actor StreamableHTTPTransport: MCPTransport {
         }
     }
 
+    /// Queues an event's payload, unless the event carries none.
+    ///
+    /// A server may send an event with an id and an empty `data:` line — a keep-alive, or a
+    /// priming event before the real one. The reference implementation does exactly that once a
+    /// 2025-11-25 session is negotiated. Such an event is not a message: handing it to a
+    /// JSON-RPC decoder reports the response as invalid when the server did nothing wrong and
+    /// the real response arrives a moment later.
+    ///
+    /// - Parameter event: The event as decoded.
+    private func enqueue(_ event: SSEEvent) {
+        let payload = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !payload.isEmpty else { return }
+        enqueueMessage(Data(event.data.utf8))
+    }
+
     /// Feeds an SSE response body into the receive queue, event by event.
     ///
     /// Errors are logged rather than thrown: nothing is awaiting this task, and a body that
@@ -438,7 +453,7 @@ public actor StreamableHTTPTransport: MCPTransport {
                 if let id = event.id, let requestID {
                     await session.record(eventID: id, for: .post(requestID: requestID))
                 }
-                enqueueMessage(Data(event.data.utf8))
+                enqueue(event)
             }
         } catch {
             let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
@@ -473,7 +488,7 @@ public actor StreamableHTTPTransport: MCPTransport {
                 if let id = event.id {
                     await session.record(eventID: id, for: stream)
                 }
-                enqueueMessage(Data(event.data.utf8))
+                enqueue(event)
             }
         } catch {
             // One attempt. A resume that fails leaves the caller where it already was — a

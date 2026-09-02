@@ -28,12 +28,16 @@ actor StubHTTPServer {
         /// terminator, so the client sees a failure rather than a clean end. That distinction
         /// is what a resumable transport has to act on.
         let abortsAfter: (event: String, id: String)?
+        /// Whether to send an id-bearing event with no data before the real one.
+        let leadsWithEmptyEvent: Bool
 
         init(status: HTTPResponseStatus, body: String,
-             abortsAfter: (event: String, id: String)? = nil) {
+             abortsAfter: (event: String, id: String)? = nil,
+             leadsWithEmptyEvent: Bool = false) {
             self.status = status
             self.body = body
             self.abortsAfter = abortsAfter
+            self.leadsWithEmptyEvent = leadsWithEmptyEvent
         }
 
         static func ok(_ body: String) -> Reply { Reply(status: .ok, body: body) }
@@ -44,6 +48,12 @@ actor StubHTTPServer {
         /// Streams one event with an id, then drops the connection.
         static func droppedAfter(_ event: String, id: String) -> Reply {
             Reply(status: .ok, body: "", abortsAfter: (event, id))
+        }
+
+        /// An SSE response that leads with an empty-data event, as the reference server does
+        /// once a 2025-11-25 session is negotiated, before the message itself.
+        static func primedSSE(_ body: String) -> Reply {
+            Reply(status: .ok, body: body, leadsWithEmptyEvent: true)
         }
     }
 
@@ -309,6 +319,28 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func respond(context: ChannelHandlerContext, reply: StubHTTPServer.Reply) {
+        // An SSE response led by an empty-data event, which is what a real server sends as a
+        // keep-alive and what this client used to hand to a decoder as though it were a message.
+        if reply.leadsWithEmptyEvent {
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Mcp-Session-Id", value: "stub-session")
+            headers.add(name: "Connection", value: "close")
+            let head = HTTPResponseHead(version: .http1_1, status: reply.status, headers: headers)
+            context.write(wrapOutboundOut(.head(head)), promise: nil)
+
+            var buffer = context.channel.allocator.buffer(capacity: reply.body.utf8.count + 96)
+            buffer.writeString("id: priming-event\ndata: \n\n")
+            buffer.writeString("event: message\nid: real\ndata: \(reply.body)\n\n")
+            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+
+            let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+                bound.value.close(promise: nil)
+            }
+            return
+        }
+
         // A stream the server cuts off: SSE head, one event, then the connection goes away
         // without a terminator. The client must see this as a failure, not a clean end.
         if let abort = reply.abortsAfter {
