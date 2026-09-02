@@ -55,6 +55,7 @@ public actor MCPOAuthSession {
         self.tokenTransport = tokenTransport
     }
 
+    #if canImport(Security)
     /// Creates a session that keeps its credential across launches.
     ///
     /// The credential file is sealed with a key from the Keychain — one small key there, and
@@ -66,6 +67,12 @@ public actor MCPOAuthSession {
     ///   - directory: Where the credential file lives. Defaults to the user's application
     ///     support directory.
     ///   - setup: How discovery is performed. Injected for tests.
+    /// Available only where a Keychain is: the encrypted stores themselves are portable, but
+    /// *where the key lives* is a platform decision and this convenience makes it. On Linux,
+    /// construct the session directly with `EncryptedFileClientStorage` and
+    /// ``EncryptedFileRegistrationStore``, supplying a key from whatever secret store that
+    /// deployment already has — which is the decision this method takes on an Apple platform.
+    ///
     /// - Returns: A session backed by encrypted storage.
     /// - Throws: ``CredentialKeyError`` if the Keychain refused, or a file error.
     public static func persistent(
@@ -91,6 +98,7 @@ public actor MCPOAuthSession {
                 url: base.appending(path: "registrations.enc"),
                 key: key))
     }
+    #endif
 
     /// Runs the whole flow and stores the resulting credential.
     ///

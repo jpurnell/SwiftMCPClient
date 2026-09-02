@@ -1,3 +1,4 @@
+#if canImport(Security)
 import Foundation
 import Testing
 import SwiftOAuthClient
@@ -300,3 +301,4 @@ private actor AttemptLog {
     private(set) var flags: [Bool] = []
     func record(_ forcing: Bool) { flags.append(forcing) }
 }
+#endif

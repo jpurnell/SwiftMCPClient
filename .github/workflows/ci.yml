@@ -1,3 +1,10 @@
+# Linux is the reason this exists. macOS is covered by the local quality gate on every
+# commit; Linux is not built anywhere else, and the parts of this package that cannot work
+# there — anything reaching a Keychain — are guarded rather than ported. Only CI notices when
+# a guard is missed.
+#
+# Pinned to 6.3 to match the deployment server, which is where anything built on this deploys. Local
+# development runs 6.4, so this is also where that drift shows up.
 name: CI
 
 on:
@@ -8,13 +15,13 @@ on:
 
 jobs:
   macos:
-    name: macOS (Swift 6.2)
+    name: macOS (Swift 6.3)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: swift-actions/setup-swift@v2
         with:
-          swift-version: '6.2'
+          swift-version: '6.3'
       - name: Verify Swift version
         run: swift --version
       - name: Build
@@ -23,13 +30,13 @@ jobs:
         run: swift test
 
   linux:
-    name: Linux (Swift 6.2)
+    name: Linux (Swift 6.3)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: swift-actions/setup-swift@v2
         with:
-          swift-version: '6.2'
+          swift-version: '6.3'
       - name: Build
         run: swift build
       - name: Test

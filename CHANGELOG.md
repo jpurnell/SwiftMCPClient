@@ -26,6 +26,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **Verified against an independent implementation.** Every other test in this package checks
+  the client against a stub written from the same reading of the same specification, by the
+  same author, on the same day — which catches mistakes in the code and not in the reading.
+  `ConformanceServerTests` runs against `@modelcontextprotocol/server-everything`, the
+  reference server published by the specification's authors.
+
+  It settles what Apollo could not. Apollo answers the server-initiated `GET` with `405`, so
+  the largest piece of Phase 2 had never run against anything but a stub. The reference server
+  accepts it — and proves our transport opened one, because a *second* `GET` is answered
+  `409 Conflict` while ours is open, and `200` when `openServerStream: false`. Neither of those
+  is observable from inside the client: a refused stream and an accepted quiet one look
+  identical from here.
+
+- **`MCPOAuthSession.persistent()` is now `#if canImport(Security)`.** It reaches for a
+  Keychain, so it never could have compiled on Linux; the encrypted stores it builds are
+  portable and can be constructed directly with a key from whatever secret store a deployment
+  already has. This is what "Linux CI" was actually protecting against, and nothing was
+  noticing: **GitHub Actions had been disabled at the repository level since 2026-07-04**, so
+  ten pushes produced no runs.
+
 - **`HTTPSSETransport` keeps its session authorised too.** It had the same frozen-header
   defect the Streamable transport just lost: a token read once at construction, under a session
   that refreshes. It now takes the same `AuthorizationProvider`, asked before every POST, again
