@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 import Logging
 
 /// An actor that manages communication with an MCP server.
@@ -207,8 +208,8 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Throws: ``MCPError`` if the request failed, or if the server does not implement the
     ///   `io.modelcontextprotocol/tasks` extension.
     public func getTask(id: String) async throws -> MCPTask {
-        let params = try Self.parameters(TasksExtension.getParameters(taskId: id))
-        let response = try await sendRequest(method: TasksExtension.get, params: params)
+        let params = try Self.parameters(GetTask.Parameters(taskId: id))
+        let response = try await sendRequest(method: GetTask.name, params: params)
         return try Self.task(from: response)
     }
 
@@ -223,11 +224,11 @@ public actor MCPClientConnection: MCPClientProtocol {
     @discardableResult
     public func updateTask(
         id: String,
-        inputResponses: [String: AnyCodableValue]? = nil
+        inputResponses: [String: InputResponse]? = nil
     ) async throws -> MCPTask {
         let params = try Self.parameters(
-            TasksExtension.updateParameters(taskId: id, inputResponses: inputResponses))
-        let response = try await sendRequest(method: TasksExtension.update, params: params)
+            UpdateTask.Parameters(taskId: id, inputResponses: inputResponses))
+        let response = try await sendRequest(method: UpdateTask.name, params: params)
         return try Self.task(from: response)
     }
 
@@ -256,7 +257,7 @@ public actor MCPClientConnection: MCPClientProtocol {
             // The server's own preference, where it stated a usable one. Polling as fast as
             // the loop allows turns a long-running task into a denial of service against the
             // server running it.
-            try await Task.sleep(for: task.pollInterval)
+            try await Task.sleep(for: Self.pollInterval(for: task))
         }
 
         throw MCPError.requestFailed(
@@ -264,6 +265,22 @@ public actor MCPClientConnection: MCPClientProtocol {
             message: "task \(id) did not finish within \(maximumPolls) polls",
             data: nil)
     }
+
+    /// How long to wait before polling a task again.
+    ///
+    /// A client-side decision over data the protocol carries: the SDK models what the server
+    /// *said*, and how long to actually wait is this client's business. A stated interval of
+    /// zero or less is replaced rather than obeyed, because honouring it would spin.
+    static func pollInterval(for task: MCPTask) -> Duration {
+        guard let stated = task.pollIntervalMs, stated > 0 else { return defaultPollInterval }
+        return .milliseconds(stated)
+    }
+
+    /// How often to poll when the server states no preference.
+    ///
+    /// Polling as fast as a loop allows turns a long-running task into a denial of service
+    /// against the server running it.
+    static let defaultPollInterval: Duration = .milliseconds(1_000)
 
     /// Carries a typed parameter value into the request encoding this connection speaks.
     private static func parameters(_ value: some Encodable) throws -> AnyCodableValue {

@@ -7,6 +7,7 @@ var targets: [Target] = [
         name: "MCPClient",
         dependencies: [
             .product(name: "SwiftOAuthClient", package: "SwiftOAuth"),
+            .product(name: "MCP", package: "swift-sdk"),
             .product(name: "Crypto", package: "swift-crypto"),
             .product(name: "SwiftOAuthCore", package: "SwiftOAuth"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
@@ -95,6 +96,14 @@ let package = Package(
         // user and has no pre-registered credentials, so it needs discovery and dynamic
         // registration rather than a token someone pasted in.
         .package(url: "https://github.com/jpurnell/SwiftOAuth", from: "0.6.0"),
+        // The protocol surface, shared with SwiftMCPServer rather than written twice. The
+        // wire types are where duplication costs most: every specification revision would
+        // otherwise be implemented once here and once there, and the two would drift in ways
+        // only a live server would reveal.
+        //
+        // Pinned exactly, and to a pre-release. 2.0.0 is where this is going and it is not
+        // there; tracking a branch would let a build change because the SDK moved.
+        .package(url: "https://github.com/jpurnell/swift-sdk", exact: "2.0.0-alpha.1"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.

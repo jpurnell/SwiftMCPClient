@@ -26,14 +26,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **The protocol surface comes from the shared SDK now, not a second copy here.** This package
+  depends on `jpurnell/swift-sdk` at `2.0.0-alpha.1`, pinned exactly, for the MCP wire types —
+  the same source SwiftMCPServer uses. The transports, OAuth discovery, loopback listener,
+  credential and registration storage, and the two applications remain this package's own.
+
+  The duplication was found the way these things usually are: by writing some. The tasks
+  extension was implemented here in full before anyone noticed it already existed in the SDK,
+  along with `ProtocolMeta`, `Discover`, `Subscriptions`, `MultiRoundTrip`, `ResultType` and
+  `CacheableResult` — which between them are most of the remaining 2026-07-28 work.
+
 - **The `io.modelcontextprotocol/tasks` extension, client side.** A task is how a server
   answers a request it cannot finish now: it returns a handle, and the work outlives the request
   that started it. `getTask(id:)`, `updateTask(id:inputResponses:)`, and `awaitTask(id:)` which
   polls until the task stops moving on its own.
 
-  Field names and the `MCPTask` spelling match SwiftMCPServer's implementation of the same
-  extension deliberately — two implementations of one extension that disagree about field names
-  interoperate with nobody. `MCPTask` rather than `Task` because Swift concurrency has that name.
+  The types are the SDK's, so there is one definition rather than two that agree by hand.
+  `MCPTask` rather than `Task` because Swift concurrency has that name.
 
   The polling loop stops on `input_required` as well as the terminal states: a task waiting for
   the client will not move until the client answers it, and polling one is how a caller waits
