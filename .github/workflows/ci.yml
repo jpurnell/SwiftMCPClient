@@ -38,13 +38,20 @@ jobs:
       - name: Authenticate private dependencies
         if: env.DEPS_TOKEN != ''
         run: |
-          git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          # `x-access-token:` is the documented username form and works for both classic and
+          # fine-grained tokens. A bare `https://TOKEN@github.com/` works for classic ones and
+          # fails for fine-grained, which reads as "repository not found" rather than as an
+          # authentication problem.
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Preflight
         run: |
           swift --version
           if [ -z "${DEPS_TOKEN}" ]; then
             echo "::warning::No DEPS_TOKEN secret. SwiftOAuth is private, so resolution will fail."
+          else
+            echo "DEPS_TOKEN present. Note that fine-grained tokens expire — an expired one"
+            echo "fails as 'could not clone', which reads like a network problem."
           fi
 
       - name: Build
