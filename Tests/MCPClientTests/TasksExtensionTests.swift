@@ -114,3 +114,122 @@ private actor ScriptedTaskTransport: MCPTransport {
         return pending.removeFirst()
     }
 }
+
+/// The `_meta` a 2026-07-28 client attaches to every request.
+///
+/// The revision is stateless: there is no handshake, so each request carries the protocol
+/// version and the client's identity and capabilities itself. The version in `_meta` **MUST**
+/// match the `MCP-Protocol-Version` header — a server that finds them different rejects the
+/// request with `HeaderMismatch`, so the two cannot be produced independently.
+@Suite("Request metadata — _meta")
+struct RequestMetaTests {
+
+    /// Attached once a 2026-era version is negotiated, and carrying what the revision names.
+    @Test("A 2026-era request carries protocol version, client info and capabilities")
+    func attachesMeta() async throws {
+        let transport = RecordingBodyTransport(negotiated: "2026-07-28")
+        let connection = MCPClientConnection(transport: transport)
+        _ = try await connection.initialize(clientName: "probe", clientVersion: "2.1")
+        _ = try? await connection.listTools()
+
+        let meta = try #require(requestMeta(of: await transport.lastRequest))
+        #expect(meta["io.modelcontextprotocol/protocolVersion"] as? String == "2026-07-28")
+        #expect((meta["io.modelcontextprotocol/clientInfo"] as? [String: Any])?["name"] as? String == "probe")
+        #expect((meta["io.modelcontextprotocol/clientInfo"] as? [String: Any])?["version"] as? String == "2.1")
+        // Declared, and declared as an object — "no capabilities" is a statement the server
+        // can act on, whereas an absent field is silence it has to guess about.
+        let capabilities = try #require(
+            meta["io.modelcontextprotocol/clientCapabilities"] as? [String: Any])
+        #expect(capabilities.isEmpty)
+    }
+
+    /// The version in the body is the one the server accepted, because that is what the header
+    /// will carry. Two independently-derived values would eventually disagree, and the failure
+    /// would be a `400` on every request with nothing obviously wrong.
+    @Test("The version in _meta is the negotiated one, not the requested one")
+    func metaCarriesNegotiatedVersion() async throws {
+        let transport = RecordingBodyTransport(negotiated: "2026-07-28")
+        let connection = MCPClientConnection(transport: transport)
+        _ = try await connection.initialize(
+            clientName: "probe", clientVersion: "1.0", protocolVersion: "2025-06-18")
+        _ = try? await connection.listTools()
+
+        let meta = try #require(requestMeta(of: await transport.lastRequest))
+        #expect(meta["io.modelcontextprotocol/protocolVersion"] as? String == "2026-07-28")
+    }
+
+    /// A 2025-era server gets none of it. `_meta` on a request is how the stateless revision
+    /// replaces the handshake; a server that performed a handshake has no use for it.
+    @Test("A 2025-era request carries no protocol _meta")
+    func earlierEraCarriesNoMeta() async throws {
+        let transport = RecordingBodyTransport(negotiated: "2025-06-18")
+        let connection = MCPClientConnection(transport: transport)
+        _ = try await connection.initialize(clientName: "probe", clientVersion: "1.0")
+        _ = try? await connection.listTools()
+
+        let meta = requestMeta(of: await transport.lastRequest)
+        #expect(meta?["io.modelcontextprotocol/protocolVersion"] == nil)
+    }
+}
+
+/// Answers an initialize handshake and keeps the body of the last request it was sent.
+private actor RecordingBodyTransport: MCPTransport {
+
+    private let negotiated: String
+    private var pending: [Data] = []
+    private(set) var lastRequest: Data?
+
+    init(negotiated: String) {
+        self.negotiated = negotiated
+    }
+
+
+    func connect() async throws {}
+    func disconnect() async throws {}
+
+    func send(_ data: Data) async throws {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        // The handshake's own request is not what these tests are about.
+        if object["method"] as? String != "initialize" {
+            lastRequest = data
+        }
+        guard let id = object["id"] else { return }
+        // Built in steps: a ternary between two heterogeneous dictionary literals defeats the
+        // type checker, which reports it as an internal error rather than as the ambiguity it
+        // is.
+        let result: [String: Any]
+        if object["method"] as? String == "initialize" {
+            result = [
+                "protocolVersion": negotiated,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "stub", "version": "1.0.0"]
+            ]
+        } else {
+            result = ["tools": [Any]()]
+        }
+        let response: [String: Any] = ["jsonrpc": "2.0", "id": id, "result": result]
+        pending.append(try JSONSerialization.data(withJSONObject: response))
+    }
+
+    func receive() async throws -> Data {
+        guard !pending.isEmpty else {
+            throw MCPError.connectionFailed(reason: "nothing queued")
+        }
+        return pending.removeFirst()
+    }
+}
+
+/// The `_meta` of a recorded request, parsed outside the actor that captured it.
+///
+/// A dictionary of `Any` is not `Sendable` and cannot leave an isolation boundary, so the
+/// bytes cross and the parsing happens here.
+private func requestMeta(of data: Data?) -> [String: Any]? {
+    guard let data,
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let params = object["params"] as? [String: Any] else {
+        return nil
+    }
+    return params["_meta"] as? [String: Any]
+}

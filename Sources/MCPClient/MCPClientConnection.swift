@@ -162,6 +162,13 @@ public actor MCPClientConnection: MCPClientProtocol {
             // this; the ones that must echo the header cannot learn it any other way.
             await transport.didNegotiate(protocolVersion: initResult.protocolVersion)
 
+            // Kept for the requests that follow. The stateless revision has no handshake to
+            // carry identity, so each request states it — and the version stated is the one the
+            // server *accepted*, because the transport puts that same value in the
+            // `MCP-Protocol-Version` header and a server rejects the two disagreeing.
+            self.negotiatedVersion = initResult.protocolVersion
+            self.clientIdentity = ClientIdentity(name: clientName, version: clientVersion)
+
             // Send notifications/initialized per MCP spec (fire-and-forget, no response)
             let notification = JSONRPCNotification(method: "notifications/initialized")
             let notificationData = try JSONEncoder().encode(notification)
@@ -281,6 +288,62 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// Polling as fast as a loop allows turns a long-running task into a denial of service
     /// against the server running it.
     static let defaultPollInterval: Duration = .milliseconds(1_000)
+
+    /// Who this client says it is, once initialization has established it.
+    private struct ClientIdentity: Sendable {
+        let name: String
+        let version: String
+    }
+
+    /// The version the server accepted, if this connection has initialized.
+    private var negotiatedVersion: String?
+
+    /// What to report as `clientInfo`.
+    private var clientIdentity: ClientIdentity?
+
+    /// Attaches the protocol `_meta` that a stateless revision expects on every request.
+    ///
+    /// MCP 2026-07-28 removed the handshake: a request carries its own protocol version, the
+    /// client's identity, and its capabilities, because there is no longer a session in which
+    /// those were established once.
+    ///
+    /// The version here **must** be the one the transport puts in `MCP-Protocol-Version` — a
+    /// server that finds them different answers `HeaderMismatch`. They come from the same
+    /// stored value for that reason, rather than being derived twice.
+    ///
+    /// Earlier revisions get nothing: they performed a handshake, and `_meta` describing it
+    /// again is noise a server has no rule for.
+    ///
+    /// - Parameter params: The request's parameters, if it has any.
+    /// - Returns: The parameters with `_meta` attached, or unchanged.
+    private func protocolMeta(attachedTo params: AnyCodableValue?) -> AnyCodableValue? {
+        guard let version = negotiatedVersion,
+              version >= StreamableHTTPSession.requestMetadataRevision else {
+            return params
+        }
+
+        var meta: [String: AnyCodableValue] = [
+            Metadata.Keys.protocolVersion: .string(version),
+            // Empty rather than absent: the field is how a server learns what this client can
+            // do, and omitting it says nothing rather than saying "nothing".
+            Metadata.Keys.clientCapabilities: .object([:])
+        ]
+        if let clientIdentity {
+            meta[Metadata.Keys.clientInfo] = .object([
+                "name": .string(clientIdentity.name),
+                "version": .string(clientIdentity.version)
+            ])
+        }
+
+        // Merged into whatever the request already carries, never over it: `_meta` is
+        // additional context, and a request whose parameters it replaced would be a different
+        // request.
+        guard case .object(var fields)? = params else {
+            return .object(["_meta": .object(meta)])
+        }
+        fields["_meta"] = .object(meta)
+        return .object(fields)
+    }
 
     /// Carries a typed parameter value into the request encoding this connection speaks.
     private static func parameters(_ value: some Encodable) throws -> AnyCodableValue {
@@ -760,7 +823,8 @@ public actor MCPClientConnection: MCPClientProtocol {
         let requestID = nextRequestID
         nextRequestID += 1
 
-        let request = JSONRPCRequest(id: requestID, method: method, params: params)
+        let request = JSONRPCRequest(
+            id: requestID, method: method, params: protocolMeta(attachedTo: params))
         let requestData = try JSONEncoder().encode(request)
 
         try await transport.send(requestData)

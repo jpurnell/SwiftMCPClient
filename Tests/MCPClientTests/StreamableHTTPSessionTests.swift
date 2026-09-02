@@ -211,3 +211,47 @@ private actor RecordingTransport: MCPTransport {
         return pending.removeFirst()
     }
 }
+
+/// When the mirrored request-metadata headers apply.
+///
+/// `Mcp-Method` and `Mcp-Name` arrived in 2026-07-28. Sending them to an earlier server offers
+/// headers it has no rule for; withholding them from a server that requires *and validates*
+/// them is a `400` on every request.
+@Suite("Streamable HTTP session — request metadata era")
+struct RequestMetadataEraTests {
+
+    /// Nothing negotiated, nothing mirrored. The `initialize` request itself predates any
+    /// answer about which revision is in play.
+    @Test("Before negotiation, no metadata headers")
+    func beforeNegotiation() async throws {
+        #expect(await StreamableHTTPSession().mirrorsRequestMetadata == false)
+    }
+
+    /// The revisions this client can meet, and what each expects. Dated revisions sort
+    /// lexicographically, which is why the protocol names them this way — but relying on that
+    /// silently is how a comparison survives until the day a version is not a date.
+    @Test("Each revision gets what it expects", arguments: [
+        ("2024-11-05", false),
+        ("2025-03-26", false),
+        ("2025-06-18", false),
+        ("2025-11-25", false),
+        ("2026-07-28", true)
+    ])
+    func perRevision(version: String, mirrors: Bool) async throws {
+        let session = StreamableHTTPSession()
+        await session.adopt(protocolVersion: version)
+
+        #expect(await session.mirrorsRequestMetadata == mirrors)
+    }
+
+    /// A revision after the one that introduced them still gets them. A client that only ever
+    /// matched the exact version it was written against stops conforming the day the next
+    /// revision ships.
+    @Test("A later revision still gets them")
+    func laterRevision() async throws {
+        let session = StreamableHTTPSession()
+        await session.adopt(protocolVersion: "2027-03-01")
+
+        #expect(await session.mirrorsRequestMetadata)
+    }
+}

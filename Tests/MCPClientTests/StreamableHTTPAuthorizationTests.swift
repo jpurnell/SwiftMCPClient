@@ -375,3 +375,102 @@ struct StreamableHTTPSessionHeaderTests {
         #expect(stillHeld == nil, "the transport still holds a session the server has forgotten")
     }
 }
+
+/// The headers 2026-07-28 mirrors from the request body.
+///
+/// `Mcp-Method` on every request and `Mcp-Name` on the three that carry a name are REQUIRED for
+/// compliance, and a server that reads the body **MUST** reject a request whose headers
+/// disagree with it. Deriving them from the body rather than from a caller's argument is what
+/// makes agreement structural instead of a thing to remember.
+@Suite("Streamable HTTP — request metadata headers")
+struct StreamableHTTPRequestMetadataTests {
+
+    /// Every request names its method.
+    @Test("Mcp-Method mirrors the body's method")
+    func mirrorsMethod() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2026-07-28")
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.method
+        }
+
+        #expect(seen == "tools/list")
+    }
+
+    /// `tools/call` carries the tool's name, from `params.name`.
+    @Test("Mcp-Name mirrors params.name")
+    func mirrorsToolName() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2026-07-28")
+            try await transport.send(Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.name
+        }
+
+        #expect(seen == "get_weather")
+    }
+
+    /// `resources/read` carries the URI instead, from `params.uri`.
+    @Test("Mcp-Name mirrors params.uri for a resource read")
+    func mirrorsResourceURI() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2026-07-28")
+            try await transport.send(Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///a.json"}}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.name
+        }
+
+        #expect(seen == "file:///a.json")
+    }
+
+    /// A name that cannot travel as plain ASCII goes in the sentinel, and decodes back to what
+    /// the body said — which is exactly the comparison the server performs.
+    @Test("A non-ASCII name travels encoded and decodes to the body value")
+    func encodesAwkwardName() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2026-07-28")
+            try await transport.send(Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"天気"}}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.name
+        }
+
+        let header = try #require(seen)
+        #expect(header.hasPrefix("=?base64?"), "an awkward name was sent raw")
+        #expect(MCPHeaderValue.decode(header) == "天気")
+    }
+
+    /// A method with no name field sends no `Mcp-Name`. An empty header is a value, and the
+    /// server would compare it against a body that has none.
+    @Test("A request with no name sends no Mcp-Name")
+    func noNameMeansNoHeader() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2026-07-28")
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last?.name
+        }
+
+        #expect(seen == nil)
+    }
+
+    /// Not sent to a 2025-era server. These headers were introduced in 2026-07-28, and a server
+    /// validating headers against a revision it does not implement has no reason to expect them.
+    @Test("A 2025-era server is sent neither header")
+    func notSentToEarlierServers() async throws {
+        let seen = try await withStub(replies: [.ok("{}")]) { transport, server in
+            await transport.didNegotiate(protocolVersion: "2025-06-18")
+            try await transport.send(Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}"#.utf8))
+            _ = try await transport.receive()
+            return await server.received.last
+        }
+
+        let request = try #require(seen)
+        #expect(request.method == nil)
+        #expect(request.name == nil)
+    }
+}

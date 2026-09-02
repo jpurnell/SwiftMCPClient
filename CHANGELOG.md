@@ -26,6 +26,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own idea of its headers — the defect being fixed was exactly a gap between what the
   transport believed it would send and what it sent (406 → 420).
 
+- **Requests carry what MCP 2026-07-28 requires of them.** The stateless revision removed the
+  handshake, so every request states its own protocol version, client identity and capabilities
+  in `_meta`, and mirrors `Mcp-Method` and `Mcp-Name` into HTTP headers so intermediaries can
+  route without parsing the body.
+
+  The headers are derived from the bytes being sent rather than passed alongside them. A server
+  that reads the body **MUST** reject a request whose headers disagree with it, and deriving
+  makes agreement structural rather than something to remember at each call site. The version in
+  `_meta` and the version in `MCP-Protocol-Version` come from one stored value for the same
+  reason.
+
+  `MCPHeaderValue` implements the Base64 sentinel — including the rule a reader skips: a value
+  that is *already* plain ASCII must still be encoded when it looks like the sentinel, or a
+  server would decode it into something the body never contained. All five of the
+  specification's worked examples are test vectors.
+
+  Everything here is gated on the negotiated revision. A 2025-era server sees none of it, since
+  it performed a handshake and has no rule for headers that did not exist yet.
+
 - **The protocol surface comes from the shared SDK now, not a second copy here.** This package
   depends on `jpurnell/swift-sdk` at `2.0.0-alpha.1`, pinned exactly, for the MCP wire types —
   the same source SwiftMCPServer uses. The transports, OAuth discovery, loopback listener,

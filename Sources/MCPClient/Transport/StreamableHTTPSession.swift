@@ -90,6 +90,22 @@ actor StreamableHTTPSession {
         lastEventIDs.removeAll()
     }
 
+    /// The revision that first required `Mcp-Method` and `Mcp-Name`.
+    ///
+    /// Compared as a string because these are dated revisions, and ISO dates sort
+    /// lexicographically — which is the whole reason the protocol names versions this way.
+    static let requestMetadataRevision = "2026-07-28"
+
+    /// Whether this session's server expects the mirrored request-metadata headers.
+    ///
+    /// False until a version is negotiated. Sending them to a server that predates them offers
+    /// headers it has no rule for; sending them to one that requires them and validates is the
+    /// difference between a request and a `400`.
+    var mirrorsRequestMetadata: Bool {
+        guard let protocolVersion else { return false }
+        return protocolVersion >= Self.requestMetadataRevision
+    }
+
     /// The headers this session contributes to a request.
     ///
     /// `MCP-Protocol-Version` appears only once a version has been negotiated, which is what

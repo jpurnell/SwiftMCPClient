@@ -70,6 +70,10 @@ actor StubHTTPServer {
         let sessionId: String?
         let protocolVersion: String?
         let lastEventID: String?
+        /// The `Mcp-Method` header, mirrored from the body by a 2026-07-28 client.
+        let method: String?
+        /// The `Mcp-Name` header, still encoded as it arrived.
+        let name: String?
         let body: String
     }
 
@@ -250,6 +254,8 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
             sessionId: head.headers.first(name: "Mcp-Session-Id"),
             protocolVersion: head.headers.first(name: "MCP-Protocol-Version"),
             lastEventID: head.headers.first(name: "Last-Event-ID"),
+            method: head.headers.first(name: "Mcp-Method"),
+            name: head.headers.first(name: "Mcp-Name"),
             body: body)
     }
 

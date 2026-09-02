@@ -464,6 +464,34 @@ public actor StreamableHTTPTransport: MCPTransport {
         responsePumps.removeAll { $0.isCancelled }
     }
 
+    /// The headers 2026-07-28 mirrors out of a request body.
+    ///
+    /// `Mcp-Name` is absent when the body has no name to mirror. An empty header is a *value*,
+    /// and a server would compare it against a body field that does not exist.
+    ///
+    /// - Parameter data: The JSON-RPC request as it will be sent.
+    /// - Returns: The headers to add, encoded for transport.
+    static func mirroredHeaders(of data: Data) -> [String: String] {
+        // A body that will not parse has nothing to mirror, and the request carries those same
+        // bytes to a server that will say so far more usefully than this could.
+        // silent: an unparseable body has no method to mirror; the server reports it
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any],
+              let method = fields["method"] as? String else {
+            return [:]
+        }
+
+        var headers = ["Mcp-Method": MCPHeaderValue.encode(method)]
+
+        // `params.name` for tools and prompts, `params.uri` for resources. Whichever the body
+        // carries is the one the server will compare against.
+        let params = fields["params"] as? [String: Any]
+        if let name = params?["name"] as? String ?? params?["uri"] as? String {
+            headers["Mcp-Name"] = MCPHeaderValue.encode(name)
+        }
+        return headers
+    }
+
     /// The JSON-RPC id of an outgoing request, for keying its response stream.
     ///
     /// A notification carries none, and its response stream is not resumable — there is
@@ -508,6 +536,21 @@ public actor StreamableHTTPTransport: MCPTransport {
         // place rather than inline here.
         for (key, value) in await session.headers() {
             request.headers.replaceOrAdd(name: key, value: value)
+        }
+
+        // `Mcp-Method` and `Mcp-Name`, mirrored from the body so intermediaries can route
+        // without parsing it. Derived from the bytes being sent rather than passed in
+        // alongside them: a server that reads the body MUST reject a request whose headers
+        // disagree with it, and deriving makes agreement structural instead of a thing to
+        // remember at every call site.
+        //
+        // 2026-07-28 onward only. These headers do not exist in earlier revisions, and a
+        // server validating against a revision it does not implement has no reason to expect
+        // them.
+        if await session.mirrorsRequestMetadata {
+            for (key, value) in Self.mirroredHeaders(of: data) {
+                request.headers.replaceOrAdd(name: key, value: value)
+            }
         }
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)

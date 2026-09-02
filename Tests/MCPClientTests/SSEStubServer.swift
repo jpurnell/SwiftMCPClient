@@ -141,6 +141,8 @@ private final class SSEStubHandler: ChannelInboundHandler, @unchecked Sendable {
                 sessionId: head.headers.first(name: "Mcp-Session-Id"),
                 protocolVersion: head.headers.first(name: "MCP-Protocol-Version"),
                 lastEventID: head.headers.first(name: "Last-Event-ID"),
+                method: head.headers.first(name: "Mcp-Method"),
+                name: head.headers.first(name: "Mcp-Name"),
                 body: body)
 
             if head.method == .GET {
