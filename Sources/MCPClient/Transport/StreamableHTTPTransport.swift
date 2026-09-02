@@ -291,6 +291,17 @@ public actor StreamableHTTPTransport: MCPTransport {
 
     /// Create the HTTP client for subsequent requests.
     public func connect() async throws {
+        // Reused rather than replaced. `AsyncHTTPClient` traps in `deinit` if a client was
+        // never shut down, so overwriting a live one here does not leak quietly — it kills the
+        // process with a `Fatal error` at whatever point the orphan is collected.
+        //
+        // Nothing called this twice until `MCPConnectionFactory` did, which begins a session
+        // optimistically and connects again when it falls back. The defect was older than the
+        // factory; the factory is only what reached it.
+        guard httpClient == nil else {
+            isConnected = true
+            return
+        }
         httpClient = makeHTTPClient()
         isConnected = true
     }

@@ -254,6 +254,17 @@ public actor HTTPSSETransport: MCPTransport {
     // MARK: - Connection
 
     private func performConnect() async throws {
+        // A client already here is one this transport is responsible for. Replacing it without
+        // shutting it down orphans it, and `AsyncHTTPClient` traps in `deinit` rather than
+        // leaking quietly — so the cost of forgetting is the process, not memory.
+        if let existing = httpClient {
+            httpClient = nil
+            // A shutdown that fails still leaves nothing referencing the client, and the
+            // connection being established is what the caller is actually waiting on.
+            // silent: a failed shutdown still leaves the client unreferenced
+            try? await existing.shutdown()
+        }
+
         let client = makeHTTPClient()
         self.httpClient = client
 

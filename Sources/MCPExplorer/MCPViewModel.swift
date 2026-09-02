@@ -94,6 +94,15 @@ final class MCPViewModel {
 
     /// Where ``serverURL`` is remembered.
     private let lastServer = LastServer()
+
+    /// Which shape of the protocol the connected server speaks.
+    ///
+    /// Worth showing: two servers that both work can be speaking materially different
+    /// protocols, and "why are there no notifications" has a different answer in each.
+    private(set) var negotiatedEra: MCPClientConnection.Era?
+
+    /// The protocol revision settled on with the connected server.
+    private(set) var negotiatedVersion: String?
     var bearerToken: String = "" // SECURITY: empty default, populated by user at runtime
 
     // OAuth. The session holds the credential; nothing here ever holds a code, a verifier or
@@ -213,19 +222,25 @@ final class MCPViewModel {
                 #endif
             }
 
-            let newClient = MCPClientConnection(transport: transport, requestTimeout: .seconds(30))
+            // Through the factory rather than straight to `initialize`, so the Explorer talks
+            // to a 2026-07-28 server as readily as a 2025-era one. Which era this is gets
+            // decided by asking the server, not by assuming.
             let caps = ClientCapabilities(roots: RootsCapability(listChanged: true))
-            let result = try await newClient.initialize(
+            let connected = try await MCPConnectionFactory.connect(
+                transport: transport,
                 clientName: "MCPExplorer",
                 clientVersion: "1.0.0",
-                capabilities: caps
+                capabilities: caps,
+                requestTimeout: .seconds(30)
             )
 
-            self.client = newClient
-            self.serverCapabilities = result.capabilities
+            self.client = connected.connection
+            self.serverCapabilities = connected.serverCapabilities
+            self.negotiatedEra = connected.era
+            self.negotiatedVersion = connected.protocolVersion
             connectionState = .connected(
-                server: result.serverInfo.name,
-                version: result.serverInfo.version
+                server: connected.serverInfo?.name ?? "unknown",
+                version: connected.serverInfo?.version ?? ""
             )
 
             // Cancel any previous notification listener before starting a new one

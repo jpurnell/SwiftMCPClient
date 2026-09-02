@@ -32,6 +32,17 @@ public enum MCPConnectionFactory {
         public let era: MCPClientConnection.Era
         /// The version both sides settled on.
         public let protocolVersion: String
+        /// What the server says it can do, where it said so.
+        ///
+        /// From `initialize` in the handshake era and from `server/discover` in the stateless
+        /// one. `nil` only if a server answered neither, which a conformant one does not.
+        public let serverCapabilities: ServerCapabilities?
+        /// What the server calls itself.
+        ///
+        /// A field of the handshake's result in the old era; in the stateless one, servers
+        /// identify themselves in each result's `_meta` instead, because there is no handshake
+        /// left to say it once.
+        public let serverInfo: ServerInfo?
     }
 
     /// Why a connection could not be established.
@@ -49,6 +60,8 @@ public enum MCPConnectionFactory {
     ///   - transport: The transport to speak over.
     ///   - clientName: This client's name, reported to the server.
     ///   - clientVersion: This client's version.
+    ///   - capabilities: What this client can do, declared to the server.
+    ///   - requestTimeout: How long a request may take before it is abandoned.
     ///   - preferred: The revision to try first. Defaults to the newest this client speaks.
     /// - Returns: The connection, its era, and the negotiated version.
     /// - Throws: ``FactoryError/noMutualProtocolVersion(serverSupports:)``, or whatever the
@@ -57,9 +70,11 @@ public enum MCPConnectionFactory {
         transport: any MCPTransport,
         clientName: String,
         clientVersion: String,
+        capabilities: ClientCapabilities = ClientCapabilities(),
+        requestTimeout: Duration = .seconds(30),
         preferred: String = MCPClientConnection.supportedProtocolVersions.last ?? "2026-07-28"
     ) async throws -> Connected {
-        let connection = MCPClientConnection(transport: transport)
+        let connection = MCPClientConnection(transport: transport, requestTimeout: requestTimeout)
 
         // Begins as though the server were modern. Nothing is committed by this: a stateless
         // session is a declaration, not a handshake, so being wrong costs one request.
@@ -71,6 +86,8 @@ public enum MCPConnectionFactory {
             return try await settle(
                 connection: connection,
                 serverSupports: discovered.supportedVersions,
+                serverCapabilities: Self.capabilities(from: discovered.capabilities),
+                serverInfo: Self.info(from: discovered._meta?.serverInfo),
                 clientName: clientName,
                 clientVersion: clientVersion)
         } catch let error as MCPError {
@@ -86,8 +103,32 @@ public enum MCPConnectionFactory {
                 connection: connection,
                 transport: transport,
                 clientName: clientName,
-                clientVersion: clientVersion)
+                clientVersion: clientVersion,
+                capabilities: capabilities,
+                requestTimeout: requestTimeout)
         }
+    }
+
+    /// Carries the SDK's identity shape into the one this client's API speaks.
+    private static func info(from serverInfo: Server.Info?) -> ServerInfo? {
+        guard let serverInfo else { return nil }
+        return ServerInfo(name: serverInfo.name, version: serverInfo.version)
+    }
+
+    /// Carries the SDK's capability shape into the one this client's API speaks.
+    ///
+    /// Two vocabularies exist because the wire types come from the shared SDK while the
+    /// connection's own API predates it. Converting through JSON keeps them in step without
+    /// either side having to know the other's Swift type — and if a field is added on one side
+    /// and not the other, it is simply absent rather than a compile error nobody can act on.
+    private static func capabilities(from serverCapabilities: Server.Capabilities) -> ServerCapabilities? {
+        // silent: a capability set that will not round-trip is reported as none, and a caller
+        // treating "none" as "cannot" is the safe reading
+        guard let data = try? JSONEncoder().encode(serverCapabilities),
+              let converted = try? JSONDecoder().decode(ServerCapabilities.self, from: data) else {
+            return nil
+        }
+        return converted
     }
 
     /// Decides what a failed discovery meant, and acts on it.
@@ -96,7 +137,9 @@ public enum MCPConnectionFactory {
         connection: MCPClientConnection,
         transport: any MCPTransport,
         clientName: String,
-        clientVersion: String
+        clientVersion: String,
+        capabilities: ClientCapabilities,
+        requestTimeout: Duration
     ) async throws -> Connected {
         let code: Int?
         if case .requestFailed(let failed, _, _) = error { code = failed } else { code = nil }
@@ -109,6 +152,8 @@ public enum MCPConnectionFactory {
             return try await settle(
                 connection: connection,
                 serverSupports: supported,
+                serverCapabilities: nil,
+                serverInfo: nil,
                 clientName: clientName,
                 clientVersion: clientVersion)
 
@@ -118,13 +163,16 @@ public enum MCPConnectionFactory {
             // logging: which answer led to the fallback, since the choice is not otherwise visible
             logger.debug("server did not answer server/discover (\(error)); using the handshake era")
 
-            let handshake = MCPClientConnection(transport: transport)
+            let handshake = MCPClientConnection(
+                transport: transport, requestTimeout: requestTimeout)
             let result = try await handshake.initialize(
-                clientName: clientName, clientVersion: clientVersion)
+                clientName: clientName, clientVersion: clientVersion, capabilities: capabilities)
             return Connected(
                 connection: handshake,
                 era: .handshake,
-                protocolVersion: result.protocolVersion)
+                protocolVersion: result.protocolVersion,
+                serverCapabilities: result.capabilities,
+                serverInfo: result.serverInfo)
         }
     }
 
@@ -132,6 +180,8 @@ public enum MCPConnectionFactory {
     private static func settle(
         connection: MCPClientConnection,
         serverSupports: [String],
+        serverCapabilities: ServerCapabilities?,
+        serverInfo: ServerInfo?,
         clientName: String,
         clientVersion: String
     ) async throws -> Connected {
@@ -145,6 +195,11 @@ public enum MCPConnectionFactory {
             try await connection.beginStateless(
                 protocolVersion: mutual, clientName: clientName, clientVersion: clientVersion)
         }
-        return Connected(connection: connection, era: .stateless, protocolVersion: mutual)
+        return Connected(
+            connection: connection,
+            era: .stateless,
+            protocolVersion: mutual,
+            serverCapabilities: serverCapabilities,
+            serverInfo: serverInfo)
     }
 }
