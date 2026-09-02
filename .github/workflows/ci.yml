@@ -1,10 +1,12 @@
-# Linux is the reason this exists. macOS is covered by the local quality gate on every
-# commit; Linux is not built anywhere else, and the parts of this package that cannot work
-# there — anything reaching a Keychain — are guarded rather than ported. Only CI notices when
-# a guard is missed.
+# Linux is the reason this exists. macOS is covered by the local quality gate on every commit;
+# Linux is not built anywhere else, and the parts of this package that cannot work there —
+# anything reaching a Keychain — are guarded rather than ported. Only CI notices when a guard
+# is missed.
 #
-# Pinned to 6.3 to match the deployment server, which is where anything built on this deploys. Local
-# development runs 6.4, so this is also where that drift shows up.
+# Neither job uses swift-actions/setup-swift. It resolves versions from its own list, and a
+# version missing from that list fails the run before a single line is compiled — which is how
+# this workflow spent its first run after being re-enabled. The official container and the
+# runner's own toolchain are both authoritative about what they contain.
 name: CI
 
 on:
@@ -15,14 +17,13 @@ on:
 
 jobs:
   macos:
-    name: macOS (Swift 6.3)
+    name: macOS
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.3'
-      - name: Verify Swift version
+      # Whatever the runner's Xcode ships. Pinning here would assert a toolchain this
+      # workflow cannot install, which is the failure it exists to avoid.
+      - name: Swift version
         run: swift --version
       - name: Build
         run: swift build
@@ -30,14 +31,17 @@ jobs:
         run: swift test
 
   linux:
-    name: Linux (Swift 6.3)
+    name: Linux
     runs-on: ubuntu-latest
+    container: swift:6.2
     steps:
       - uses: actions/checkout@v5
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.3'
+      - name: Swift version
+        run: swift --version
       - name: Build
         run: swift build
+      # The Keychain-backed conveniences are compiled out here, so what runs is the portable
+      # core: transports, framing, session state, and the encrypted stores minus their key
+      # source.
       - name: Test
         run: swift test
