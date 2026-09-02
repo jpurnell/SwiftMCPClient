@@ -1,4 +1,8 @@
 import Foundation
+#if canImport(FoundationNetworking)
+// `URLSession` and friends live here on Linux. Invisible on a Mac, so only CI catches it.
+import FoundationNetworking
+#endif
 import Testing
 import AsyncHTTPClient
 @testable import MCPClient
