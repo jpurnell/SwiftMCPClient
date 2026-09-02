@@ -1,4 +1,10 @@
 import Foundation
+#if canImport(FoundationNetworking)
+// `URLSession`, `URLRequest` and `HTTPURLResponse` live here on Linux rather than in
+// Foundation. Without this the file does not compile there at all — and it is invisible on a
+// Mac, which is why CI is the only thing that catches it.
+import FoundationNetworking
+#endif
 import Logging
 import SwiftOAuthCore
 import SwiftOAuthClient
