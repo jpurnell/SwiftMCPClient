@@ -579,7 +579,7 @@ public actor MCPClientConnection: MCPClientProtocol {
     ///
     /// Ordered rather than a set: choosing between what both sides know requires knowing which
     /// is newer, and dated revisions sort lexicographically.
-    static let supportedProtocolVersions = [
+    public static let supportedProtocolVersions = [
         "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"
     ]
 
@@ -667,6 +667,11 @@ public actor MCPClientConnection: MCPClientProtocol {
 
     /// The version the server accepted, if this connection has initialized.
     private var negotiatedVersion: String?
+
+    /// The version every request on this connection states.
+    ///
+    /// `nil` before anything has been negotiated or declared.
+    public var negotiatedProtocolVersion: String? { negotiatedVersion }
 
     /// What to report as `clientInfo`.
     private var clientIdentity: ClientIdentity?

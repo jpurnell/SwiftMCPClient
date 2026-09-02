@@ -6,7 +6,13 @@
 
 ## Current phase
 
-**Streamable HTTP Phase 2 — DONE** (roadmap #7), on `main`, unreleased. The transport is now a
+**Released as 0.11.0, and treated as the 1.0 candidate.** Both protocol eras are implemented,
+Linux CI is green, and the bar recorded for 1.0 is met. It ships as 0.11.0 so the API is
+exercised before being frozen — after 1.0 a breaking change costs a major version. **If nothing
+surfaces in real use, this becomes 1.0.0 unchanged**, and that is the intent rather than a
+placeholder.
+
+Streamable HTTP Phase 2 — DONE (roadmap #7). The transport is now a
 multiplexer over POST response streams and one server-initiated `GET`, both feeding one receive
 queue. All four gaps closed: streaming bodies, the `GET` channel, `Last-Event-ID` resumption,
 and the `MCP-Protocol-Version` header. ADR-002 recorded; ADR-001 entered late and says so.

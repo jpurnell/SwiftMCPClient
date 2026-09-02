@@ -4,7 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.11.0] — 2026-09-02
+
+Everything below shipped since 0.10.0. Two protocol eras, both transports keeping their
+sessions authorised, and the client verified against a live server, a reference implementation,
+and Linux.
+
+### Added
+- **`MCPConnectionFactory`** — opens a connection to a server whose era is not known in advance,
+  by asking `server/discover`. That one request is both the probe and the negotiation: its answer
+  names every version the server speaks, so nothing is guessed.
+
+  Era policy lives in the factory rather than the connection deliberately. MCP changed shape
+  twice in a year — a handshake with sessions, then neither — and the part most likely to change
+  again is the part that decides which shape a server speaks. A connection carrying that would be
+  edited on every revision; here, adding an era is adding a case.
+
+  It implements the inspection the specification asks for: a modern server answers `400` for an
+  unsupported version, a missing capability, or a header mismatch, and all of those mean "you are
+  talking to a modern server and got something wrong" rather than "this server is old". Only an
+  unrecognised refusal justifies falling back to `initialize` — which a modern server has removed.
+
 
 ### Added
 - **A refreshed token now reaches the wire.** `StreamableHTTPTransport` takes an
