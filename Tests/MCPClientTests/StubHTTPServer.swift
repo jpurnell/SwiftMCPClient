@@ -65,13 +65,26 @@ actor StubHTTPServer {
         let events: [String]
         /// An `id:` for the first event, so resumption can be checked.
         let firstID: String?
+        /// Whether the stream stays open after its events, instead of closing.
+        let holdsOpen: Bool
 
+        /// A stream that emits its events and then closes, so a reconnect can be observed.
         static func serving(_ events: [String], firstID: String? = nil) -> ServerStream {
-            ServerStream(status: .ok, events: events, firstID: firstID)
+            ServerStream(status: .ok, events: events, firstID: firstID, holdsOpen: false)
+        }
+
+        /// A stream that emits its events and stays open, as a real server's does.
+        ///
+        /// The difference decides what a count of `serverStreamOpens` means. Against a stream
+        /// that closes, the client reconnects — correctly — so the count climbs on its own and
+        /// says nothing about whether two streams ever ran at once. Only against a stream that
+        /// stays open does a second open mean a second *concurrent* stream.
+        static func holdingOpen(_ events: [String], firstID: String? = nil) -> ServerStream {
+            ServerStream(status: .ok, events: events, firstID: firstID, holdsOpen: true)
         }
 
         static let unsupported = ServerStream(
-            status: .methodNotAllowed, events: [], firstID: nil)
+            status: .methodNotAllowed, events: [], firstID: nil, holdsOpen: false)
     }
 
     /// One request as it arrived.
@@ -310,6 +323,12 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             buffer.writeString("data: \(event)\n\n")
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        }
+        guard !stream.holdsOpen else {
+            // Left open, so the client has no reason to reconnect. The client closes it when
+            // it disconnects, which is what ends the channel.
+            context.flush()
+            return
         }
         // Closed after the scripted events, so a reconnect can be observed.
         let bound = NIOLoopBound(context, eventLoop: context.eventLoop)

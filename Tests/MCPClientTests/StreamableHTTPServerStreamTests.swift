@@ -109,11 +109,17 @@ struct StreamableHTTPServerStreamTests {
 
     /// Exactly one stream at a time. The specification permits one, and a client that opens
     /// another on every prompt leaks them server-side.
+    ///
+    /// Against a stream that stays open, deliberately. A stream that closes after its events
+    /// is one the client then reconnects — correctly — so the open count climbs by itself and
+    /// a later sample says nothing about whether two ever ran together. Scripted the other way
+    /// this read as "a second stream was opened" on whichever machine happened to let the
+    /// reconnect land first, which was Linux.
     @Test("Negotiating twice does not open a second stream", .timeLimit(.minutes(1)))
     func onlyOneStream() async throws {
         let server = try await StubHTTPServer.start(
             replies: [.ok("{}")],
-            serverStream: .serving([#"{"jsonrpc":"2.0","method":"a"}"#]))
+            serverStream: .holdingOpen([#"{"jsonrpc":"2.0","method":"a"}"#]))
         let transport = StreamableHTTPTransport(url: try await server.url)
         try await transport.connect()
 
@@ -121,6 +127,10 @@ struct StreamableHTTPServerStreamTests {
             await transport.didNegotiate(protocolVersion: "2025-06-18")
             _ = try await transport.receive()
             await transport.didNegotiate(protocolVersion: "2025-06-18")
+
+            // Long enough for a wrongly-opened second stream to arrive and be counted.
+            // Asserting immediately would pass by outrunning the bug.
+            try await Task.sleep(for: .milliseconds(200))
 
             #expect(await server.serverStreamOpens.count == 1,
                     "a second stream was opened while one was already running")
@@ -222,9 +232,13 @@ struct StreamableHTTPResumptionTests {
         _ = try await transport.receive()
         try await transport.disconnect()
 
+        // Sampled after things settle, not at the instant of disconnect. An open already on
+        // the wire when disconnect was called still lands afterwards, and counting it as a
+        // reconnect blamed the loop for a request it had made while it was still running.
+        try await Task.sleep(for: .milliseconds(200))
         let afterDisconnect = await server.serverStreamOpens.count
         // Long enough that a live reconnect loop would have opened several more.
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(400))
 
         #expect(await server.serverStreamOpens.count == afterDisconnect,
                 "the stream kept reconnecting after disconnect")
