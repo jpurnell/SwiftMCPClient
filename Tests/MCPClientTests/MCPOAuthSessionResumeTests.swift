@@ -129,8 +129,8 @@ struct MCPOAuthSessionResumeTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let file = directory.appending(path: "registrations.enc")
-        let key = SymmetricKey(size: .bits256)
-        let written = try EncryptedFileRegistrationStore(url: file, key: key)
+        let key = freshKeyBytes()
+        let written = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await written.store(storedRegistration(), for: storedConnection())
 
         let sealed = try Data(contentsOf: file)
@@ -141,7 +141,7 @@ struct MCPOAuthSessionResumeTests {
         let session = MCPOAuthSession(
             setup: MCPOAuthSetup(fetch: metadataFetch()),
             storage: storage,
-            registrations: try EncryptedFileRegistrationStore(url: file, key: key))
+            registrations: try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key)))
 
         await #expect(throws: StorageError.cannotDecrypt) {
             try await session.resume(server: resumeServerURL())

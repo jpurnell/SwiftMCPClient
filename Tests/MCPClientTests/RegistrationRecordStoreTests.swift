@@ -23,12 +23,12 @@ struct RegistrationRecordStoreTests {
     func roundTripsAcrossInstances() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = SymmetricKey(size: .bits256)
+        let key = freshKeyBytes()
 
-        let written = try EncryptedFileRegistrationStore(url: file, key: key)
+        let written = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await written.store(registration(), for: connection())
 
-        let read = try EncryptedFileRegistrationStore(url: file, key: key)
+        let read = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         let restored = try await read.record(for: connection())
 
         #expect(restored == registration(), "the registration did not survive a restart")
@@ -40,7 +40,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
 
         #expect(try await store.record(for: connection()) == nil)
     }
@@ -52,7 +52,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
         try await store.store(registration(), for: connection())
 
         let other = ConnectionID(
@@ -67,13 +67,13 @@ struct RegistrationRecordStoreTests {
     func storingReplacesPreviousRecord() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = SymmetricKey(size: .bits256)
+        let key = freshKeyBytes()
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: key)
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
         try await store.store(registration(clientId: "client-2"), for: connection())
 
-        let read = try EncryptedFileRegistrationStore(url: file, key: key)
+        let read = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         let restored = try await read.record(for: connection())
 
         #expect(restored?.clientId == "client-2")
@@ -85,13 +85,13 @@ struct RegistrationRecordStoreTests {
     func removeForgetsTheRecord() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = SymmetricKey(size: .bits256)
+        let key = freshKeyBytes()
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: key)
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
         try await store.remove(connection())
 
-        let read = try EncryptedFileRegistrationStore(url: file, key: key)
+        let read = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         #expect(try await read.record(for: connection()) == nil)
     }
 
@@ -102,7 +102,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
         try await store.remove(connection())
 
         #expect(try await store.record(for: connection()) == nil)
@@ -115,15 +115,15 @@ struct RegistrationRecordStoreTests {
     func truncatedFileThrows() async throws {
         let file = try temporaryFile()
         defer { removeFile(file) }
-        let key = SymmetricKey(size: .bits256)
+        let key = freshKeyBytes()
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: key)
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         try await store.store(registration(), for: connection())
 
         let sealed = try Data(contentsOf: file)
         try sealed.prefix(sealed.count / 2).write(to: file, options: [.atomic])
 
-        let reopened = try EncryptedFileRegistrationStore(url: file, key: key)
+        let reopened = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: key))
         await #expect(throws: StorageError.cannotDecrypt) {
             try await reopened.record(for: connection())
         }
@@ -137,10 +137,10 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
         try await store.store(registration(), for: connection())
 
-        let other = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let other = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
         await #expect(throws: StorageError.cannotDecrypt) {
             try await other.record(for: connection())
         }
@@ -153,7 +153,7 @@ struct RegistrationRecordStoreTests {
         let file = try temporaryFile()
         defer { removeFile(file) }
 
-        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(size: .bits256))
+        let store = try EncryptedFileRegistrationStore(url: file, key: SymmetricKey(data: freshKeyBytes()))
         try await store.store(registration(), for: connection())
 
         let bytes = try Data(contentsOf: file)
@@ -193,6 +193,16 @@ private func registration(clientId: String = "client-1") -> ClientRegistrationRe
         clientSecret: "secret-value",
         clientName: "Test Client",
         redirectUris: ["http://127.0.0.1:49152/callback"])
+}
+
+/// Key material for a store, as bytes.
+///
+/// Bytes rather than a `SymmetricKey`, because a key shared between two stores has to cross an
+/// actor boundary twice — and `SymmetricKey` is `Sendable` on Apple platforms but not under
+/// swift-crypto on Linux, where passing one to an actor initialiser is a data race. `Data` is
+/// `Sendable` everywhere, so the bytes travel and each store builds its own key.
+func freshKeyBytes() -> Data {
+    SymmetricKey(size: .bits256).withUnsafeBytes(Data.init)
 }
 
 /// A path in a fresh directory, for a file the test will create.
