@@ -210,7 +210,14 @@ public struct MCPOAuthSetup: Sendable {
             return (
                 try metadata.configuration(
                     identifier: metadata.issuer.isEmpty ? identifier : metadata.issuer,
-                    scope: resource.scopesSupported?.joined(separator: " ")),
+                    scope: resource.scopesSupported?.joined(separator: " "),
+                    // RFC 8707. The identifier the *resource* published about itself, which is
+                    // exactly what a server with a strict resource policy expects to be named.
+                    // Discovery has held this value all along; until 0.11.1 there was nowhere
+                    // to put it, so the client read it and then sent nothing.
+                    //
+                    // SECURITY: parses an identifier this server published about itself.
+                    resource: URL(string: resource.resource)),
                 try metadata.registrationURL())
         } catch let error as DiscoveryError {
             throw MCPOAuthError.discovery(error)

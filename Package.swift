@@ -100,7 +100,7 @@ let package = Package(
         // path component of its URL, so the two repositories are two packages holding one
         // library — and a dependency graph reaching both fails to resolve. This is the public
         // export, and it is the one SwiftMCPServer resolves.
-        .package(url: "https://github.com/jpurnell/swift-oauth", from: "0.7.1"),
+        .package(url: "https://github.com/jpurnell/swift-oauth", from: "0.11.1"),
         // The protocol surface, shared with SwiftMCPServer rather than written twice. The
         // wire types are where duplication costs most: every specification revision would
         // otherwise be implemented once here and once there, and the two would drift in ways

@@ -1,5 +1,5 @@
 {
-  "originHash" : "134d457615eccbcfaa9b4c48a8f1c67ffab8ec873aaede67f5a458e1b3583e18",
+  "originHash" : "558274c4daf2df87310e61e2907656358382c7c81648015d85f6ec205e275320",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -213,8 +213,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/jpurnell/swift-oauth",
       "state" : {
-        "revision" : "d25ae70b1744a9759281f9f404b60e82ef211aca",
-        "version" : "0.7.1"
+        "revision" : "45897092d49568fbae986ec0084e7708f1ab6c0e",
+        "version" : "0.11.1"
       }
     },
     {

@@ -157,7 +157,12 @@ public actor MCPOAuthSession {
             tokenEndpoint: discovered.tokenEndpoint,
             revocationEndpoint: discovered.revocationEndpoint,
             scope: discovered.scope,
-            authenticationMethod: registration.authenticationMethod)
+            authenticationMethod: registration.authenticationMethod,
+            // Carried through the rebuild. This reconstruction exists only to substitute the
+            // authentication method, and a field-by-field copy drops whatever the author did
+            // not list — which is how the resource indicator was lost between discovery and
+            // the request.
+            resource: discovered.resource)
 
         // Keyed by the issuer that discovery reported, not by the host that was asked. See
         // `MCPOAuthSetup.discover`.
@@ -252,7 +257,12 @@ public actor MCPOAuthSession {
             tokenEndpoint: discovered.tokenEndpoint,
             revocationEndpoint: discovered.revocationEndpoint,
             scope: discovered.scope,
-            authenticationMethod: registration.authenticationMethod)
+            authenticationMethod: registration.authenticationMethod,
+            // Carried through the rebuild. This reconstruction exists only to substitute the
+            // authentication method, and a field-by-field copy drops whatever the author did
+            // not list — which is how the resource indicator was lost between discovery and
+            // the request.
+            resource: discovered.resource)
 
         self.connection = OAuthConnection(
             configuration: configuration,
