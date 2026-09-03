@@ -33,31 +33,38 @@ struct ResourceIndicatorClientTests {
                 "a client that discovers an identifier and sends nothing is refused by a strict server")
     }
 
-    /// Rebuilding a configuration must not silently drop the indicator.
+    /// The real discovery path, end to end.
     ///
-    /// `MCPOAuthSession` reconstructs the configuration discovery returned, in order to
-    /// substitute the authentication method registration reported. A reconstruction that copies
-    /// field by field drops anything the author forgot — which is exactly how the indicator was
-    /// lost, and the reason this asserts on the rebuild rather than only on discovery.
-    @Test("Rebuilding a configuration preserves the resource indicator")
-    func rebuiltConfigurationKeepsResource() throws {
-        let identifier = try #require(URL(string: "https://mcp.example.com"))
-        let original = ProviderConfiguration(
-            identifier: "auth",
-            authorizationEndpoint: try #require(URL(string: "https://auth.example.com/authorize")),
-            tokenEndpoint: try #require(URL(string: "https://auth.example.com/token")),
-            scope: "read",
-            resource: identifier)
+    /// The first version of this test built two `ProviderConfiguration`s by hand and compared
+    /// them, which exercised the initialiser and not the code under test — a mutation setting
+    /// `resource: nil` at the actual call site compiled and left it passing. It was a test of
+    /// the wrong thing that read like a test of the right one.
+    ///
+    /// This drives `MCPOAuthSetup.discover` against stubbed metadata, so the assertion covers
+    /// the path a real client takes.
+    @Test("Discovery produces a configuration carrying the server's resource identifier")
+    func discoveryCarriesResourceEndToEnd() async throws {
+        let setup = MCPOAuthSetup(fetch: { requested in
+            if requested.absoluteString.contains("oauth-protected-resource") {
+                return Data("""
+                {"resource":"https://mcp.example.com/mcp",
+                 "authorization_servers":["https://auth.example.com"],
+                 "scopes_supported":["read"]}
+                """.utf8)
+            }
+            return Data("""
+            {"issuer":"https://auth.example.com",
+             "authorization_endpoint":"https://auth.example.com/authorize",
+             "token_endpoint":"https://auth.example.com/token",
+             "code_challenge_methods_supported":["S256"]}
+            """.utf8)
+        })
 
-        let rebuilt = ProviderConfiguration(
-            identifier: original.identifier,
-            authorizationEndpoint: original.authorizationEndpoint,
-            tokenEndpoint: original.tokenEndpoint,
-            revocationEndpoint: original.revocationEndpoint,
-            scope: original.scope,
-            authenticationMethod: .clientSecretBasic,
-            resource: original.resource)
+        let (configuration, _) = try await setup.discover(
+            server: try #require(URL(string: "https://mcp.example.com/mcp")),
+            identifier: "fallback")
 
-        #expect(rebuilt.resource == identifier)
+        #expect(configuration.resource?.absoluteString == "https://mcp.example.com/mcp",
+                "the identifier the resource published about itself must reach the request")
     }
 }
