@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0] — 2026-09-03
+
+### Read this first: the dependency identities changed
+
+**This release renames two dependencies**, and if you consume this package you take them:
+
+| was | now |
+| :--- | :--- |
+| `jpurnell/SwiftOAuth` (private) | `jpurnell/swift-oauth` (public) |
+| `jpurnell/swift-sdk` | `jpurnell/swift-mcp-sdk` |
+
+SwiftPM derives a package's identity from the last path component of its URL, so those are four
+identities for two libraries. A dependency graph reaching both names for either fails to resolve
+— `multiple similar targets 'MCP' appear in package 'swift-sdk' and 'swift-mcp-sdk'` — and no
+version range fixes it, because it is not a version problem.
+
+If anything else in your graph names the old identities, it must move too. `swift-oauth` is now
+public, so this also removes the last private dependency: no token is needed to resolve this
+package.
+
+**Tags moved.** This repository's history was rewritten on 2026-09-03 to remove working notes
+and a deployment hostname, and every tag from `v0.2.0` to `v0.11.0` now points at a different
+commit. A `Package.resolved` pinning any of them holds a dead revision and will fail with
+`does not match previously recorded value`. Recovering needs the pin dropped, the SwiftPM
+repository cache cleared, and `~/.swiftpm/security/fingerprints/swiftmcpclient-*.json` deleted —
+a pinned build does not repair the fingerprint record, so it survives until something resolves
+fresh.
+
+### Added
+- **RFC 8707 resource indicators are sent.** The identifier comes from the server's own
+  protected-resource metadata, which discovery already fetched and then discarded. A client that
+  discovers the identifier it is meant to name and sends nothing is exactly the client a strict
+  authorization server refuses — and swift-oauth 0.8.0 made strict the default. Requires
+  swift-oauth 0.11.1, which is where the value gained somewhere to live.
+
+- **`MCPExplorer` is a real macOS application.** `Scripts/build-app.sh` produces a signed
+  `.app`; `--install` puts it in `/Applications`. The signature is not cosmetic: the Keychain
+  grants access by code identity, so an unsigned build loses its saved OAuth tokens on every
+  rebuild.
+
+- **A conformance suite for the stateless era**, opt-in through `MCP_STATELESS_SERVER`. The
+  reference implementation stops at `2025-11-25`, so every claim this client made about
+  `2026-07-28` had been checked only against stubs written from the same reading of the same
+  document.
+
+### Fixed
+- **The handshake negotiated `2024-11-05`.** `initialize` defaults to the oldest revision and
+  the factory never overrode it, so a client that had just asked for `2025-11-25` shook hands
+  two years older.
+- **An empty-data SSE event read as a protocol error.** The reference server leads its stream
+  with one; it is framing, not a message.
+- **`connect()` leaked an HTTP client**, which surfaced as a crash on deinit.
+- **Two Linux-only races** in the server-stream tests, both passing on macOS for no better
+  reason than losing the race the other way.
+
 ## [0.11.0] — 2026-09-02
 
 Everything below shipped since 0.10.0. Two protocol eras, both transports keeping their
