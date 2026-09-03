@@ -19,3 +19,10 @@ CLAUDE.local.md
 
 # Local field notes — never committed (career/external context lives here)
 project/notes/
+
+# Working notes and local agent configuration. Kept on disk, out of the repository: the
+# planning docs are notes about a library rather than part of it, and the Claude settings are
+# one machine's permission rules. Both were stripped from history when this repository became
+# public, so nothing here re-adds them by accident.
+project/
+.claude/
