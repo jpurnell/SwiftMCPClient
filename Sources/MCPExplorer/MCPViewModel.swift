@@ -253,6 +253,7 @@ final class MCPViewModel {
         } catch {
             connectionState = .error(String(describing: error))
             lastError = String(describing: error)
+            Self.logger.error("connect failed: \(error, privacy: .public)")
         }
     }
 

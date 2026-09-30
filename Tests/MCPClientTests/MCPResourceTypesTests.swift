@@ -8,10 +8,11 @@ struct MCPResourceTypesTests {
     // MARK: - MCPAnnotations
 
     @Test("Annotations with audience and priority")
-    func annotationsAllFields() {
+    func annotationsAllFields() throws {
         let annotations = MCPAnnotations(audience: [.user, .assistant], priority: 0.8)
         #expect(annotations.audience == [.user, .assistant])
-        #expect(abs((annotations.priority ?? 0) - 0.8) < 1e-4)
+        let priority = try #require(annotations.priority)
+        #expect(abs(priority - 0.8) < 1e-4)
     }
 
     @Test("Annotations with nil fields")
@@ -29,7 +30,8 @@ struct MCPResourceTypesTests {
         let data = json.utf8Data
         let annotations = try JSONDecoder().decode(MCPAnnotations.self, from: data)
         #expect(annotations.audience == [.user])
-        #expect(abs((annotations.priority ?? 0) - 0.5) < 1e-4)
+        let priority = try #require(annotations.priority)
+        #expect(abs(priority - 0.5) < 1e-4)
     }
 
     @Test("Annotations round-trips through JSON")
@@ -54,7 +56,7 @@ struct MCPResourceTypesTests {
     }
 
     @Test("Resource initializes with all fields")
-    func resourceAllFields() {
+    func resourceAllFields() throws {
         let annotations = MCPAnnotations(audience: [.user], priority: 0.9)
         let resource = MCPResource(
             uri: "file:///report.pdf",
@@ -69,7 +71,8 @@ struct MCPResourceTypesTests {
         #expect(resource.description == "Q4 financial report")
         #expect(resource.mimeType == "application/pdf")
         #expect(resource.size == 1024)
-        #expect(abs((resource.annotations?.priority ?? 0) - 0.9) < 1e-4)
+        let priority = try #require(resource.annotations?.priority)
+        #expect(abs(priority - 0.9) < 1e-4)
     }
 
     @Test("Resource decodes from JSON")
@@ -103,7 +106,8 @@ struct MCPResourceTypesTests {
         let data = json.utf8Data
         let resource = try JSONDecoder().decode(MCPResource.self, from: data)
         #expect(resource.annotations?.audience == [.user, .assistant])
-        #expect(abs((resource.annotations?.priority ?? 0) - 0.7) < 1e-4)
+        let priority = try #require(resource.annotations?.priority)
+        #expect(abs(priority - 0.7) < 1e-4)
     }
 
     @Test("Resource is equatable")
@@ -143,7 +147,7 @@ struct MCPResourceTypesTests {
     }
 
     @Test("ResourceTemplate initializes with all fields")
-    func templateAllFields() {
+    func templateAllFields() throws {
         let template = MCPResourceTemplate(
             uriTemplate: "db:///{table}/schema",
             name: "Table Schema",
@@ -153,7 +157,8 @@ struct MCPResourceTypesTests {
         )
         #expect(template.uriTemplate == "db:///{table}/schema")
         #expect(template.description == "Database table schema")
-        #expect(abs((template.annotations?.priority ?? 0) - 0.3) < 1e-4)
+        let priority = try #require(template.annotations?.priority)
+        #expect(abs(priority - 0.3) < 1e-4)
     }
 
     @Test("ResourceTemplate decodes from JSON")

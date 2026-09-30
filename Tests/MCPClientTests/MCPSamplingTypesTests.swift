@@ -18,7 +18,7 @@ struct MCPSamplingTypesTests {
     }
 
     @Test("SamplingRequest initializes with all fields")
-    func requestInitFull() {
+    func requestInitFull() throws {
         let msg = MCPSamplingMessage(role: .user, content: .text("Hello"))
         let prefs = MCPModelPreferences(
             hints: [MCPModelHint(name: "claude")],
@@ -38,10 +38,12 @@ struct MCPSamplingTypesTests {
         )
         #expect(request.systemPrompt == "Be helpful")
         #expect(request.includeContext == "thisServer")
-        #expect(abs((request.temperature ?? 0) - 0.7) < 1e-4)
+        let temperature = try #require(request.temperature)
+        #expect(abs(temperature - 0.7) < 1e-4)
         #expect(request.stopSequences == ["END"])
         #expect(request.modelPreferences?.hints?.first?.name == "claude")
-        #expect(abs((request.modelPreferences?.intelligencePriority ?? 0) - 0.9) < 1e-4)
+        let intelligencePriority = try #require(request.modelPreferences?.intelligencePriority)
+        #expect(abs(intelligencePriority - 0.9) < 1e-4)
     }
 
     @Test("SamplingRequest decodes from JSON")
@@ -117,7 +119,8 @@ struct MCPSamplingTypesTests {
         let prefs = try JSONDecoder().decode(MCPModelPreferences.self, from: data)
         #expect(prefs.hints?.count == 2)
         #expect(prefs.hints?[1].name == "claude")
-        #expect(abs((prefs.costPriority ?? 0) - 0.2) < 1e-4)
+        let costPriority = try #require(prefs.costPriority)
+        #expect(abs(costPriority - 0.2) < 1e-4)
     }
 
     // MARK: - MCPSamplingResult

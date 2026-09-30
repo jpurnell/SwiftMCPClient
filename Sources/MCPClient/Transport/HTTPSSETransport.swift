@@ -41,7 +41,7 @@ public actor HTTPSSETransport: MCPTransport {
     /// is inherent to a long-lived GET, not something this could fix. What it does fix is every
     /// POST, and the token the stream carries when it is next opened.
     private let authorization: AuthorizationProvider?
-    private let connectionTimeout: TimeInterval
+    private let connectionTimeout: TimeAmount
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
     private let trustSelfSignedCertificates: Bool
@@ -91,7 +91,7 @@ public actor HTTPSSETransport: MCPTransport {
         self.url = url
         self.headers = headers
         self.authorization = authorization
-        self.connectionTimeout = connectionTimeout
+        self.connectionTimeout = .seconds(clamping: connectionTimeout)
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
@@ -210,7 +210,7 @@ public actor HTTPSSETransport: MCPTransport {
         request.body = .bytes(data)
 
         do {
-            return try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+            return try await client.execute(request, timeout: connectionTimeout)
         } catch {
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
@@ -281,7 +281,7 @@ public actor HTTPSSETransport: MCPTransport {
 
         let response: HTTPClientResponse
         do {
-            response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+            response = try await client.execute(request, timeout: connectionTimeout)
         } catch {
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
@@ -397,7 +397,7 @@ public actor HTTPSSETransport: MCPTransport {
         var config = HTTPClient.Configuration(
             tlsConfiguration: tlsConfig
         )
-        config.timeout.connect = .seconds(Int64(connectionTimeout))
+        config.timeout.connect = connectionTimeout
 
         return HTTPClient(configuration: config)
     }

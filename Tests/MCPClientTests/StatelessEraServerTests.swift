@@ -107,7 +107,8 @@ struct StatelessEraServerTests {
             counts.append(try await connected.connection.listTools().count)
         }
         #expect(Set(counts).count == 1, "the same question got different answers: \(counts)")
-        #expect(counts.first ?? 0 > 0)
+        let firstCount = try #require(counts.first)
+        #expect(firstCount > 0)
 
         // Methods the server routes differently, in case the metadata only survives the path
         // that `tools/list` happens to take.

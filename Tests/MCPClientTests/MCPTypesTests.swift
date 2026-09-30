@@ -155,12 +155,13 @@ struct MCPTypesTests {
     }
 
     @Test("MCPContent text with annotations")
-    func contentTextAnnotated() {
+    func contentTextAnnotated() throws {
         let annotations = MCPAnnotations(audience: [.user], priority: 0.8)
         let content = MCPContent.text("hello", annotations: annotations)
         if case .text(let str, let ann) = content {
             #expect(str == "hello")
-            #expect(abs((ann?.priority ?? 0) - 0.8) < 1e-4)
+            let priority = try #require(ann?.priority)
+            #expect(abs(priority - 0.8) < 1e-4)
             #expect(ann?.audience == [.user])
         } else {
             Issue.record("Expected text case")
@@ -254,7 +255,8 @@ struct MCPTypesTests {
         if case .text(let str, let ann) = content {
             #expect(str == "hello")
             #expect(ann?.audience == [.user])
-            #expect(abs((ann?.priority ?? 0) - 0.5) < 1e-4)
+            let priority = try #require(ann?.priority)
+            #expect(abs(priority - 0.5) < 1e-4)
         } else {
             Issue.record("Expected text case")
         }

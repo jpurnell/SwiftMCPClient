@@ -101,11 +101,12 @@ struct MCPPromptTypesTests {
     }
 
     @Test("PromptContent text with annotations")
-    func contentTextAnnotations() {
+    func contentTextAnnotations() throws {
         let ann = MCPAnnotations(audience: [.user], priority: 0.9)
         let content = MCPPromptContent.text("Important", annotations: ann)
         if case .text(_, let annotations) = content {
-            #expect(abs((annotations?.priority ?? 0) - 0.9) < 1e-4)
+            let priority = try #require(annotations?.priority)
+            #expect(abs(priority - 0.9) < 1e-4)
         } else {
             Issue.record("Expected text variant")
         }
@@ -196,7 +197,8 @@ struct MCPPromptTypesTests {
         let content = try JSONDecoder().decode(MCPPromptContent.self, from: data)
         if case .text(_, let annotations) = content {
             #expect(annotations?.audience == [.assistant])
-            #expect(abs((annotations?.priority ?? 0) - 0.5) < 1e-4)
+            let priority = try #require(annotations?.priority)
+            #expect(abs(priority - 0.5) < 1e-4)
         } else {
             Issue.record("Expected text variant")
         }

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **A non-finite or oversized `connectionTimeout` stopped the process.** Both HTTP transports
+  took the `TimeInterval` and converted it with `Int64(_:)` at every use — seven places — which
+  traps on a NaN, an infinity, or anything past `Int64.max`. The conversion now happens once, in
+  the initializer, through `TimeAmount.seconds(clamping:)`, which answers every `Double`: NaN and
+  negatives become a wait of nothing, infinity and overflow become the longest wait NIO can hold,
+  and fractional seconds keep their precision. The old path truncated to whole seconds, so a
+  half-second timeout had been no timeout at all.
+- **A failed `connect()` in MCPExplorer was recorded but never logged.** The catch block set the
+  error state and stopped; it now logs like the other catch blocks around it.
+
+### Changed
+- **Thirteen test assertions no longer coalesce a missing value to `0`.** A nil priority or
+  temperature had been asserted as if it were present; each now goes through `#require`, so an
+  absent value fails the test that was meant to see it.
+
 ## [0.12.0] — 2026-09-03
 
 ### Read this first: the dependency identities changed

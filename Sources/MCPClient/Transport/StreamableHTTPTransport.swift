@@ -89,7 +89,7 @@ public actor StreamableHTTPTransport: MCPTransport {
 
     /// Asked for a current `Authorization` header before each request.
     private let authorization: AuthorizationProvider?
-    private let connectionTimeout: TimeInterval
+    private let connectionTimeout: TimeAmount
     private let trustSelfSignedCertificates: Bool
 
     /// The HTTP client used for all requests.
@@ -143,7 +143,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         self.headers = headers
         self.authorization = authorization
         self.opensServerStream = openServerStream
-        self.connectionTimeout = connectionTimeout
+        self.connectionTimeout = .seconds(clamping: connectionTimeout)
         self.trustSelfSignedCertificates = trustSelfSignedCertificates
     }
 
@@ -272,7 +272,7 @@ public actor StreamableHTTPTransport: MCPTransport {
             request.headers.replaceOrAdd(name: "Authorization", value: header)
         }
 
-        let response = try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+        let response = try await client.execute(request, timeout: connectionTimeout)
 
         // 405 is a conformant server saying it originates no messages. Not a failure, and not
         // something to retry: the answer will not change.
@@ -319,7 +319,7 @@ public actor StreamableHTTPTransport: MCPTransport {
                 request.headers.replaceOrAdd(name: key, value: value)
             }
             // silent: best-effort session termination during disconnect
-            _ = try? await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+            _ = try? await client.execute(request, timeout: connectionTimeout)
         }
 
         serverStreamTask?.cancel()
@@ -656,7 +656,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         request.body = .bytes(data)
 
         do {
-            return try await client.execute(request, timeout: .seconds(Int64(connectionTimeout)))
+            return try await client.execute(request, timeout: connectionTimeout)
         } catch {
             throw MCPError.connectionFailed(reason: error.localizedDescription)
         }
@@ -688,7 +688,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         var config = HTTPClient.Configuration(
             tlsConfiguration: tlsConfig
         )
-        config.timeout.connect = .seconds(Int64(connectionTimeout))
+        config.timeout.connect = connectionTimeout
 
         return HTTPClient(configuration: config)
     }
