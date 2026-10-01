@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- One `// SECURITY:` acknowledgement now says what was decided, ahead of the quality gate requiring a
+  reason of at least eight words on every one.
+
 ### Fixed
 - **A non-finite or oversized `connectionTimeout` stopped the process.** Both HTTP transports
   took the `TimeInterval` and converted it with `Int64(_:)` at every use — seven places — which
