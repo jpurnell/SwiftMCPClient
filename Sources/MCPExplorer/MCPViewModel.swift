@@ -103,7 +103,7 @@ final class MCPViewModel {
 
     /// The protocol revision settled on with the connected server.
     private(set) var negotiatedVersion: String?
-    var bearerToken: String = "" // SECURITY: empty default, populated by user at runtime
+    var bearerToken: String = "" // SECURITY: an empty string, not a credential; the user types the token at runtime
 
     // OAuth. The session holds the credential; nothing here ever holds a code, a verifier or
     // a state, because those are what an application gets subtly wrong.
