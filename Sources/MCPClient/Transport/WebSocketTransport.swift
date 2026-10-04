@@ -28,7 +28,7 @@ import NIOPosix
 public actor WebSocketTransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]
-    private let trustSelfSignedCertificates: Bool
+    private let serverTrust: ServerTrust
     private var eventLoopGroup: (any EventLoopGroup)?
     private var webSocket: WebSocket?
     private var isConnected: Bool = false
@@ -44,16 +44,43 @@ public actor WebSocketTransport: MCPTransport {
     /// - Parameters:
     ///   - url: The WebSocket URL to connect to (ws:// or wss://).
     ///   - headers: Optional HTTP headers to include in the upgrade request.
-    ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
-    ///     Works on both macOS and Linux.
+    ///   - serverTrust: Which certificate roots a `wss://` server may chain to. Defaults to
+    ///     ``ServerTrust/system``. For a self-signed or privately issued certificate, supply
+    ///     it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``; the
+    ///     chain and the hostname are verified either way.
     public init(
         url: URL,
         headers: [String: String] = [:],
-        trustSelfSignedCertificates: Bool = false
+        serverTrust: ServerTrust = .system
     ) {
         self.url = url
         self.headers = headers
-        self.trustSelfSignedCertificates = trustSelfSignedCertificates
+        self.serverTrust = serverTrust
+    }
+
+    /// Removed: this did not trust a self-signed certificate, it disabled verification.
+    ///
+    /// Passing `true` set NIOSSL's `certificateVerification` to `.none`, which accepts any
+    /// certificate from anyone. Supply the certificate instead — see ``ServerTrust``.
+    ///
+    /// - Parameters:
+    ///   - url: The WebSocket URL to connect to.
+    ///   - headers: Optional HTTP headers to include in the upgrade request.
+    ///   - trustSelfSignedCertificates: Ignored. Verification is never disabled.
+    @available(*, unavailable, message: "This disabled certificate verification entirely. Pass serverTrust: try .onlyRoots([.pemFile(path)]) (or .additionalRoots) with the server's certificate; omit the argument where it was false.")
+    public init(
+        url: URL,
+        headers: [String: String] = [:],
+        trustSelfSignedCertificates: Bool
+    ) {
+        self.url = url
+        self.headers = headers
+        self.serverTrust = .system
+    }
+
+    /// The TLS configuration a `wss://` connection is made with.
+    nonisolated var tlsConfiguration: TLSConfiguration {
+        serverTrust.makeTLSConfiguration()
     }
 
     /// Establish a WebSocket connection to the MCP server.
@@ -61,10 +88,7 @@ public actor WebSocketTransport: MCPTransport {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.eventLoopGroup = group
 
-        var tlsConfig = TLSConfiguration.makeClientConfiguration()
-        if trustSelfSignedCertificates {
-            tlsConfig.certificateVerification = .none
-        }
+        let tlsConfig = tlsConfiguration
 
         var upgradeHeaders = HTTPHeaders()
         for (key, value) in headers {

@@ -46,13 +46,16 @@ struct ConnectionView: View {
                                   ? "Signed in with OAuth; the token is managed for you."
                                   : "Used only if you are not signed in with OAuth.")
 
-                        Toggle("Trust self-signed certificates", isOn: $vm.trustSelfSignedCertificates)
-                            .font(.callout)
                     } else {
                         Text("Example: \(viewModel.transportType.exampleURL)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    TextField("Trusted certificate file (PEM, optional)", text: $vm.trustedCertificateFile)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .help("For a self-signed or privately issued server: the path of its certificate, or of the authority that issued it. When set, only certificates in this file are trusted. The certificate must still name the host in the URL.")
 
                 case .stdio:
                     TextField("Command", text: $vm.stdioCommand)
