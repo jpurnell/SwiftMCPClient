@@ -119,7 +119,9 @@ final class MCPViewModel {
     var stdioCommand: String = ""
     var stdioArguments: String = ""
     var transportType: TransportType = .httpSSE
-    var trustSelfSignedCertificates: Bool = false
+    /// Path of a PEM file holding the server's certificate, or the private authority that
+    /// issued it. Empty means the system roots. See ``TrustedCertificateFile``.
+    var trustedCertificateFile: String = ""
     var connectionState: ConnectionState = .disconnected
     var serverCapabilities: ServerCapabilities?
 
@@ -164,6 +166,9 @@ final class MCPViewModel {
 
         do {
             let transport: MCPTransport
+            // Resolved before any transport exists, so an unreadable certificate file stops
+            // the connection here rather than becoming a connection made without it.
+            let serverTrust = try TrustedCertificateFile.serverTrust(for: trustedCertificateFile)
             switch transportType {
             case .httpSSE, .streamableHTTP:
                 // SECURITY: URL is user-provided configuration entered in the UI
@@ -199,9 +204,9 @@ final class MCPViewModel {
                         url: url,
                         headers: headers,
                         authorization: provider,
-                        trustSelfSignedCertificates: trustSelfSignedCertificates)
+                        serverTrust: serverTrust)
                 } else {
-                    transport = HTTPSSETransport(url: url, headers: headers, trustSelfSignedCertificates: trustSelfSignedCertificates)
+                    transport = HTTPSSETransport(url: url, headers: headers, serverTrust: serverTrust)
                 }
 
             case .webSocket:
@@ -210,7 +215,7 @@ final class MCPViewModel {
                     connectionState = .error("Invalid URL")
                     return
                 }
-                transport = WebSocketTransport(url: url)
+                transport = WebSocketTransport(url: url, serverTrust: serverTrust)
 
             case .stdio:
                 #if os(macOS) || os(Linux)

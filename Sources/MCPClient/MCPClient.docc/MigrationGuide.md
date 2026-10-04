@@ -226,3 +226,28 @@ func connectOverWebSocket() throws {
     _ = webSocketTransport
 }
 ```
+
+## Migrating to 0.13.0: `trustSelfSignedCertificates` is removed
+
+The network transports no longer accept `trustSelfSignedCertificates`. Passing
+`true` disabled certificate verification entirely — it did not trust a
+self-signed certificate, it trusted whoever answered. The old spelling is now a
+compile error.
+
+Where the argument was `false`, delete it. Where it was `true`, supply the
+certificate the server presents, or the authority that issued it, through
+``ServerTrust``:
+
+```swift
+func connectWithSuppliedCertificate() throws {
+    guard let url = URL(string: "https://dev.internal:8443/mcp") else { return }
+
+    // Before: StreamableHTTPTransport(url: url, trustSelfSignedCertificates: true)
+    let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
+    _ = StreamableHTTPTransport(url: url, serverTrust: trust)
+}
+```
+
+The certificate must name the host in the URL as a subject alternative name;
+that check was skipped before and is not skippable now. See
+<doc:TransportGuide> for the details.

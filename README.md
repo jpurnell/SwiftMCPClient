@@ -17,7 +17,7 @@ A Swift 6 client library for the [Model Context Protocol (MCP)](https://modelcon
 
 - Swift 6.0+
 - macOS 14+ / iOS 17+ / tvOS 17+ / watchOS 10+
-- Linux (Ubuntu 22.04+) — builds; CI verification is still outstanding, so treat Linux as unproven
+- Linux (Ubuntu 22.04+) — built and tested in CI
 
 ## Installation
 
@@ -114,9 +114,34 @@ let transport = HTTPSSETransport(
     connectionTimeout: 30,
     maxReconnectAttempts: 3,
     reconnectBaseDelay: 1.0,
-    trustSelfSignedCertificates: false  // true only for dev/testing
+    serverTrust: .system  // the default; see below for self-signed and private-CA servers
 )
 ```
+
+### Self-signed and private-CA servers
+
+Every network transport takes a `serverTrust:`. It defaults to `.system`, the platform's root
+store. For a server whose certificate is self-signed, or issued by a private authority, supply
+that certificate and it becomes a trust root:
+
+```swift
+// Trust this certificate and nothing else. For a self-signed server this is a pin.
+let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
+
+// Or: the system roots plus a private authority.
+let trust = try ServerTrust.additionalRoots([.pem(corporateRootPEM)])
+
+let transport = StreamableHTTPTransport(url: url, serverTrust: trust)
+```
+
+Sources are `.pem(String)`, `.der([UInt8])`, `.pemFile(String)` and `.derFile(String)`. They are
+read when the value is made, so a bad path throws there, not at connect time.
+
+There is no option that turns verification off. The chain is validated and the certificate is
+checked against the host in the URL in every case, so a development certificate must name its
+host in a subject alternative name. Versions before 0.13.0 had a `trustSelfSignedCertificates`
+flag that disabled verification outright; it is removed — see the
+[changelog](CHANGELOG.md) for the migration.
 
 ## MCP Operations
 
@@ -279,6 +304,7 @@ MCPClient/
 │   ├── HTTPSSETransport    # HTTP POST + Server-Sent Events
 │   ├── WebSocketTransport  # WebSocket text frames
 │   ├── StdioTransport      # Subprocess stdin/stdout
+│   ├── ServerTrust         # Which certificate roots a TLS server may chain to
 │   └── SSEParser           # SSE event stream parser
 ├── AnyCodableValue         # Type-safe JSON value wrapper
 ├── JSONRPCTypes            # JSON-RPC 2.0 envelope types

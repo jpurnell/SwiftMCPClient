@@ -14,6 +14,10 @@ var targets: [Target] = [
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            // The transports import NIOSSL to say what a TLS connection trusts. It arrived
+            // transitively for as long as nothing here named a type of its own; `ServerTrust`
+            // does, so the dependency is declared rather than borrowed.
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
             .product(name: "WebSocketKit", package: "websocket-kit"),
         ],
         // Declared rather than left implicit. SwiftPM does not claim this catalog on a
@@ -37,6 +41,13 @@ var targets: [Target] = [
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            // What a transport trusts is also wire behaviour: whether a handshake with a
+            // given certificate completes. The tests stand up a TLS server on loopback and
+            // mint its certificates at run time, so no private key is ever committed.
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            .product(name: "X509", package: "swift-certificates"),
+            .product(name: "SwiftASN1", package: "swift-asn1"),
+            .product(name: "Crypto", package: "swift-crypto"),
         ]
     ),
 ]
@@ -118,6 +129,14 @@ let package = Package(
         // listener uses it directly.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // Already present transitively via async-http-client and websocket-kit; declared
+        // because `ServerTrust` builds a `TLSConfiguration` directly.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.36.0"),
+        // Test-only: mints the self-signed and private-CA certificates the trust tests
+        // handshake against. Both were already in the graph through async-http-client's
+        // dependencies; neither reaches the library target.
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.18.0"),
+        .package(url: "https://github.com/apple/swift-asn1.git", from: "1.6.0"),
         .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
     ],

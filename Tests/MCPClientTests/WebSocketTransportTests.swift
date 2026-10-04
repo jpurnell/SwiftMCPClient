@@ -19,13 +19,6 @@ struct WebSocketTransportTests {
         #expect(Bool(true), "Transport initialized successfully")
     }
 
-    @Test("WebSocketTransport initializes with self-signed certificate trust")
-    func initWithSelfSignedTrust() throws {
-        let url = try requireURL("wss://mcp.example.com/ws")
-        _ = WebSocketTransport(url: url, trustSelfSignedCertificates: true)
-        #expect(Bool(true), "Transport initialized successfully")
-    }
-
     @Test("Send before connect throws")
     func sendBeforeConnect() async throws {
         let url = try requireURL("ws://localhost:1/mcp")

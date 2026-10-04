@@ -90,7 +90,7 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Asked for a current `Authorization` header before each request.
     private let authorization: AuthorizationProvider?
     private let connectionTimeout: TimeAmount
-    private let trustSelfSignedCertificates: Bool
+    private let serverTrust: ServerTrust
 
     /// The HTTP client used for all requests.
     private var httpClient: HTTPClient?
@@ -129,22 +129,58 @@ public actor StreamableHTTPTransport: MCPTransport {
     ///     server-initiated messages. Passing `false` restores the POST-only behaviour of
     ///     ADR-001 exactly.
     ///   - connectionTimeout: Maximum time to wait for each HTTP request. Default 30s.
-    ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
-    ///     **Use only for development/testing** — this disables certificate validation.
+    ///   - serverTrust: Which certificate roots an `https://` server may chain to. Defaults
+    ///     to ``ServerTrust/system``. For a self-signed or privately issued certificate,
+    ///     supply it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``;
+    ///     the chain and the hostname are verified either way.
     public init(
         url: URL,
         headers: [String: String] = [:],
         authorization: AuthorizationProvider? = nil,
         openServerStream: Bool = true,
         connectionTimeout: TimeInterval = 30.0,
-        trustSelfSignedCertificates: Bool = false
+        serverTrust: ServerTrust = .system
     ) {
         self.url = url
         self.headers = headers
         self.authorization = authorization
         self.opensServerStream = openServerStream
         self.connectionTimeout = .seconds(clamping: connectionTimeout)
-        self.trustSelfSignedCertificates = trustSelfSignedCertificates
+        self.serverTrust = serverTrust
+    }
+
+    /// Removed: this did not trust a self-signed certificate, it disabled verification.
+    ///
+    /// Passing `true` set NIOSSL's `certificateVerification` to `.none`, which accepts any
+    /// certificate from anyone. Supply the certificate instead — see ``ServerTrust``.
+    ///
+    /// - Parameters:
+    ///   - url: The MCP endpoint URL.
+    ///   - headers: Custom HTTP headers sent with all requests.
+    ///   - authorization: Asked for a current `Authorization` header.
+    ///   - openServerStream: Whether to open the client-initiated `GET` stream.
+    ///   - connectionTimeout: Maximum time to wait for each HTTP request.
+    ///   - trustSelfSignedCertificates: Ignored. Verification is never disabled.
+    @available(*, unavailable, message: "This disabled certificate verification entirely. Pass serverTrust: try .onlyRoots([.pemFile(path)]) (or .additionalRoots) with the server's certificate; omit the argument where it was false.")
+    public init(
+        url: URL,
+        headers: [String: String] = [:],
+        authorization: AuthorizationProvider? = nil,
+        openServerStream: Bool = true,
+        connectionTimeout: TimeInterval = 30.0,
+        trustSelfSignedCertificates: Bool
+    ) {
+        self.url = url
+        self.headers = headers
+        self.authorization = authorization
+        self.opensServerStream = openServerStream
+        self.connectionTimeout = .seconds(clamping: connectionTimeout)
+        self.serverTrust = .system
+    }
+
+    /// The TLS configuration every request is made with.
+    nonisolated var tlsConfiguration: TLSConfiguration {
+        serverTrust.makeTLSConfiguration()
     }
 
     /// Replaces the `Authorization` header used by subsequent requests.
@@ -680,17 +716,7 @@ public actor StreamableHTTPTransport: MCPTransport {
     // MARK: - HTTP Client Factory
 
     private func makeHTTPClient() -> HTTPClient {
-        var tlsConfig = TLSConfiguration.makeClientConfiguration()
-        if trustSelfSignedCertificates {
-            tlsConfig.certificateVerification = .none
-        }
-
-        var config = HTTPClient.Configuration(
-            tlsConfiguration: tlsConfig
-        )
-        config.timeout.connect = connectionTimeout
-
-        return HTTPClient(configuration: config)
+        serverTrust.makeHTTPClient(connectTimeout: connectionTimeout)
     }
 
     // MARK: - Message Handling

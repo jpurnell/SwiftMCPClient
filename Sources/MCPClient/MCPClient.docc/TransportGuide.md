@@ -144,6 +144,84 @@ an exponential backoff — three attempts by default, configurable through
 - Servers that offer only the legacy HTTP+SSE endpoints
 - Cross-platform (macOS, iOS, tvOS, watchOS, Linux)
 
+## Self-Signed and Private-CA Servers
+
+The three network transports — ``StreamableHTTPTransport``, ``HTTPSSETransport``
+and ``WebSocketTransport`` — each take a ``ServerTrust``, which says which
+certificate roots the server's chain may end at. It defaults to
+``ServerTrust/system``: the platform's root store, which is what any publicly
+certified server needs.
+
+A development server with a self-signed certificate, or a server behind a
+private certificate authority, is trusted by *supplying the certificate*:
+
+```swift
+// Shown inside functions this guide never calls: one reads a file that is not
+// there when the guide runs, and both would open a connection.
+func connectToSelfSignedServer() async throws {
+    guard let url = URL(string: "https://dev.internal:8443/mcp") else { return }
+
+    // The server's own certificate, and nothing else. A server presenting any
+    // other certificate — including another self-signed one — is refused.
+    let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
+
+    let transport = StreamableHTTPTransport(url: url, serverTrust: trust)
+    let client = MCPClientConnection(transport: transport)
+    _ = try await client.initialize(clientName: "my-app", clientVersion: "1.0.0")
+}
+
+func connectBehindPrivateAuthority(rootPEM: String) throws {
+    guard let url = URL(string: "wss://mcp.corp.example/ws") else { return }
+
+    // The system roots as well as the private one, for a client that reaches
+    // public servers too.
+    let trust = try ServerTrust.additionalRoots([.pem(rootPEM)])
+
+    // What was just trusted, as `openssl x509 -fingerprint -sha256` prints it.
+    print(trust.rootFingerprints)
+
+    _ = WebSocketTransport(url: url, serverTrust: trust)
+}
+```
+
+### What is still checked
+
+Everything. A supplied root changes who is allowed to have signed the server's
+certificate; it does not change whether that is checked, and there is no option
+that does. In particular:
+
+- **The hostname.** The certificate must carry the host in the URL as a subject
+  alternative name — a DNS name, or an IP address if the URL uses one. A trusted
+  certificate issued for another name is refused.
+- **The chain.** It must end at a supplied root, or for
+  ``ServerTrust/additionalRoots(_:)`` at a supplied root or a system one.
+- **The dates.** An expired certificate is refused even if it is the one you
+  supplied.
+
+On Apple platforms ``ServerTrust/additionalRoots(_:)`` is evaluated by the
+system verifier, which applies Apple's own requirements for TLS server
+certificates — among them an extended key usage of `serverAuth`.
+``ServerTrust/onlyRoots(_:)`` is evaluated by BoringSSL on every platform.
+
+### When it fails
+
+A ``ServerTrust`` that cannot be built — a missing file, text holding no
+certificate, an empty list — throws ``ServerTrustError`` where it is
+constructed, before any transport exists. Nothing falls back to the system
+roots.
+
+A server that is refused surfaces as ``MCPError/connectionFailed(reason:)``
+from the first request. The HTTP transports retry a failed connection until
+`connectionTimeout` elapses, so a refusal is reported after that long rather
+than at once.
+
+### Why there is no "trust anything" switch
+
+Versions before 0.13.0 had `trustSelfSignedCertificates: Bool`. It did not
+trust a self-signed certificate; it turned verification off, which accepts any
+certificate from anyone able to answer the connection. It has been removed —
+the old spelling is a compile error that points here.
+
 ## Stdio — Local Subprocess
 
 ``StdioTransport`` launches an MCP server as a local child process and

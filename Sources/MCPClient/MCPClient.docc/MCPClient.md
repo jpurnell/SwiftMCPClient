@@ -66,9 +66,12 @@ Swift project that needs MCP integration.
 
 - <doc:TransportGuide>
 - ``MCPTransport``
+- ``StreamableHTTPTransport``
 - ``HTTPSSETransport``
 - ``WebSocketTransport``
 - ``StdioTransport``
+- ``ServerTrust``
+- ``ServerTrustError``
 
 ### JSON-RPC Protocol
 

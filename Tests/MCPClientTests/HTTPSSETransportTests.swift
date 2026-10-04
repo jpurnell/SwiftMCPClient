@@ -25,15 +25,6 @@ struct HTTPSSETransportTests {
         #expect(Bool(true), "Transport initialized successfully")
     }
 
-    @Test("Initializes with self-signed certificate trust")
-    func initWithSelfSignedTrust() throws {
-        _ = HTTPSSETransport(
-            url: try requireURL("https://mcp.example.com/sse"),
-            trustSelfSignedCertificates: true
-        )
-        #expect(Bool(true), "Transport initialized successfully")
-    }
-
     // MARK: - Send/Receive Before Connect
 
     @Test("Send throws connectionFailed when not connected")

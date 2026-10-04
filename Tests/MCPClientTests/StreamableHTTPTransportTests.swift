@@ -18,17 +18,7 @@ struct StreamableHTTPTransportTests {
         _ = StreamableHTTPTransport(
             url: try requireURL("https://mcp.example.com/mcp"),
             headers: ["Authorization": "Bearer token123"],
-            connectionTimeout: 60.0,
-            trustSelfSignedCertificates: false
-        )
-        #expect(Bool(true), "Transport initialized successfully")
-    }
-
-    @Test("Initializes with self-signed certificate trust")
-    func initWithSelfSignedTrust() throws {
-        _ = StreamableHTTPTransport(
-            url: try requireURL("https://mcp.example.com/mcp"),
-            trustSelfSignedCertificates: true
+            connectionTimeout: 60.0
         )
         #expect(Bool(true), "Transport initialized successfully")
     }

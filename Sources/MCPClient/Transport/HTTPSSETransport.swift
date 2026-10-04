@@ -27,9 +27,11 @@ import Logging
 ///
 /// ## Cross-Platform
 ///
-/// Uses `AsyncHTTPClient` (Swift NIO) for HTTP and TLS, providing identical
-/// behavior on macOS and Linux. Self-signed certificate support works on
-/// all platforms via NIO SSL.
+/// Uses `AsyncHTTPClient` for HTTP on every platform. TLS is the platform's own
+/// on Apple platforms and NIOSSL's on Linux, both verifying against the system
+/// roots. A self-signed or privately issued server certificate is trusted by
+/// supplying it — see ``ServerTrust`` — and a transport given one verifies with
+/// NIOSSL everywhere, so that case behaves identically on macOS and Linux.
 public actor HTTPSSETransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]
@@ -44,7 +46,7 @@ public actor HTTPSSETransport: MCPTransport {
     private let connectionTimeout: TimeAmount
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
-    private let trustSelfSignedCertificates: Bool
+    private let serverTrust: ServerTrust
 
     /// The endpoint URL extracted from the SSE `endpoint` event during connect.
     private var endpointURL: URL?
@@ -76,9 +78,10 @@ public actor HTTPSSETransport: MCPTransport {
     ///   - connectionTimeout: Maximum time to wait for the initial endpoint event. Default 30s.
     ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop. Default 3.
     ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds. Default 1.0.
-    ///   - trustSelfSignedCertificates: Accept self-signed or invalid TLS certificates.
-    ///     **Use only for development/testing** — this disables certificate validation.
-    ///     Works on both macOS and Linux.
+    ///   - serverTrust: Which certificate roots an `https://` server may chain to. Defaults
+    ///     to ``ServerTrust/system``. For a self-signed or privately issued certificate,
+    ///     supply it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``;
+    ///     the chain and the hostname are verified either way.
     public init(
         url: URL,
         headers: [String: String] = [:],
@@ -86,7 +89,7 @@ public actor HTTPSSETransport: MCPTransport {
         connectionTimeout: TimeInterval = 30.0,
         maxReconnectAttempts: Int = 3,
         reconnectBaseDelay: TimeInterval = 1.0,
-        trustSelfSignedCertificates: Bool = false
+        serverTrust: ServerTrust = .system
     ) {
         self.url = url
         self.headers = headers
@@ -94,7 +97,44 @@ public actor HTTPSSETransport: MCPTransport {
         self.connectionTimeout = .seconds(clamping: connectionTimeout)
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
-        self.trustSelfSignedCertificates = trustSelfSignedCertificates
+        self.serverTrust = serverTrust
+    }
+
+    /// Removed: this did not trust a self-signed certificate, it disabled verification.
+    ///
+    /// Passing `true` set NIOSSL's `certificateVerification` to `.none`, which accepts any
+    /// certificate from anyone. Supply the certificate instead — see ``ServerTrust``.
+    ///
+    /// - Parameters:
+    ///   - url: The SSE endpoint URL.
+    ///   - headers: Custom HTTP headers sent with all requests.
+    ///   - authorization: Asked for a current `Authorization` header.
+    ///   - connectionTimeout: Maximum time to wait for the initial endpoint event.
+    ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop.
+    ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds.
+    ///   - trustSelfSignedCertificates: Ignored. Verification is never disabled.
+    @available(*, unavailable, message: "This disabled certificate verification entirely. Pass serverTrust: try .onlyRoots([.pemFile(path)]) (or .additionalRoots) with the server's certificate; omit the argument where it was false.")
+    public init(
+        url: URL,
+        headers: [String: String] = [:],
+        authorization: AuthorizationProvider? = nil,
+        connectionTimeout: TimeInterval = 30.0,
+        maxReconnectAttempts: Int = 3,
+        reconnectBaseDelay: TimeInterval = 1.0,
+        trustSelfSignedCertificates: Bool
+    ) {
+        self.url = url
+        self.headers = headers
+        self.authorization = authorization
+        self.connectionTimeout = .seconds(clamping: connectionTimeout)
+        self.maxReconnectAttempts = maxReconnectAttempts
+        self.reconnectBaseDelay = reconnectBaseDelay
+        self.serverTrust = .system
+    }
+
+    /// The TLS configuration every request is made with.
+    nonisolated var tlsConfiguration: TLSConfiguration {
+        serverTrust.makeTLSConfiguration()
     }
 
     /// Open the SSE connection to the MCP server, retrying with exponential backoff on failure.
@@ -389,17 +429,7 @@ public actor HTTPSSETransport: MCPTransport {
     // MARK: - HTTP Client Factory
 
     private func makeHTTPClient() -> HTTPClient {
-        var tlsConfig = TLSConfiguration.makeClientConfiguration()
-        if trustSelfSignedCertificates {
-            tlsConfig.certificateVerification = .none
-        }
-
-        var config = HTTPClient.Configuration(
-            tlsConfiguration: tlsConfig
-        )
-        config.timeout.connect = connectionTimeout
-
-        return HTTPClient(configuration: config)
+        serverTrust.makeHTTPClient(connectTimeout: connectionTimeout)
     }
 
     // MARK: - Message Handling

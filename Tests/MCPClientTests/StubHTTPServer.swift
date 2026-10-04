@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOHTTP1
+import NIOSSL
 
 /// An HTTP server on loopback that answers from a script and records what it was asked.
 ///
@@ -105,27 +106,41 @@ actor StubHTTPServer {
     private var channel: Channel?
     private let recorder: Recorder
 
-    private init(recorder: Recorder) {
+    /// Whether the listener speaks TLS, which decides the scheme of ``url``.
+    private let servesTLS: Bool
+
+    private init(recorder: Recorder, servesTLS: Bool) {
         self.recorder = recorder
+        self.servesTLS = servesTLS
     }
 
     /// Starts a server answering with `replies`.
     ///
-    /// - Parameter replies: The scripted responses, in order.
+    /// - Parameters:
+    ///   - replies: The scripted responses, in order.
+    ///   - serverStream: How to answer a `GET`, if at all.
+    ///   - tls: The identity to present. Supplying one makes this an HTTPS server, which is
+    ///     what the trust tests need: whether a request arrived at all is the only honest
+    ///     evidence of what a client was willing to handshake with.
     /// - Returns: The running server.
     static func start(
         replies: [Reply],
-        serverStream: ServerStream? = nil
+        serverStream: ServerStream? = nil,
+        tls: NIOSSLContext? = nil
     ) async throws -> StubHTTPServer {
         let recorder = Recorder(replies: replies, serverStream: serverStream)
-        let server = StubHTTPServer(recorder: recorder)
+        let server = StubHTTPServer(recorder: recorder, servesTLS: tls != nil)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.backlog, value: 8)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(StubHandler(recorder: recorder))
+                channel.eventLoop.makeCompletedFuture {
+                    if let tls {
+                        try channel.pipeline.syncOperations.addHandler(NIOSSLServerHandler(context: tls))
+                    }
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(StubHandler(recorder: recorder))
                 }
             }
 
@@ -145,7 +160,7 @@ actor StubHTTPServer {
                 throw StubServerError.notListening
             }
             var components = URLComponents()
-            components.scheme = "http"
+            components.scheme = servesTLS ? "https" : "http"
             components.host = "127.0.0.1"
             components.port = port
             components.path = "/mcp"
