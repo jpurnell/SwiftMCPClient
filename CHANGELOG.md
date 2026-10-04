@@ -6,8 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed
+## [0.13.0] — 2026-10-03
 
+### Read this first: `trustSelfSignedCertificates` is gone, and it never did what it said
+
+**Breaking, and a security fix (CWE-295).** All three network transports took
+`trustSelfSignedCertificates: Bool`. Passing `true` set NIOSSL's `certificateVerification` to
+`.none`. That does not trust a self-signed certificate — it stops checking certificates, so the
+connection accepts whatever is presented by whoever answers it. Anyone on the path between a
+client and its "development" server could read and rewrite the session, bearer token included.
+
+The parameter is removed rather than deprecated. A deprecated flag that quietly began verifying
+would compile, warn, and then fail at run time in exactly the environments that set it; a
+deprecated flag that kept working would keep the hole. Each transport instead carries an
+`unavailable` initializer under the old label, so the old spelling is a compile error whose
+message says what to write.
+
+**Migration.** Where the argument was `false`, delete it. Where it was `true`, supply the
+certificate the server presents — or the private authority that issued it — as a trust root:
+
+```swift
+// before
+let transport = StreamableHTTPTransport(url: url, trustSelfSignedCertificates: true)
+
+// after
+let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
+let transport = StreamableHTTPTransport(url: url, serverTrust: trust)
+```
+
+Two things that used to be skipped are now checked, and a development server has to pass both:
+
+- **The name.** The certificate must carry the host in the URL as a subject alternative name —
+  a DNS name for `https://dev.internal`, an IP address for `https://127.0.0.1`. To export what a
+  server presents: `openssl s_client -connect host:443 -showcerts </dev/null | openssl x509 >
+  server.pem`. To make one that names its host: `openssl req -x509 -newkey ec -pkeyopt
+  ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out server.pem -days 365 -subj
+  "/CN=dev.internal" -addext "subjectAltName=DNS:dev.internal,IP:127.0.0.1" -addext
+  "extendedKeyUsage=serverAuth"`.
+- **The chain.** It must end at a root you supplied (or, for `additionalRoots`, at one of those
+  or a system root).
+
+There is no replacement for "verify nothing", by design.
+
+### Added
+- **`ServerTrust` — what a transport is prepared to believe about its server.** One type, used
+  by `StreamableHTTPTransport`, `HTTPSSETransport` and `WebSocketTransport` through a new
+  `serverTrust:` parameter that defaults to `.system`:
+  - `ServerTrust.system` — the platform root store. The default; behaviour is unchanged.
+  - `ServerTrust.additionalRoots(_:)` — the platform root store plus supplied certificates.
+  - `ServerTrust.onlyRoots(_:)` — the supplied certificates and nothing else. With a self-signed
+    server's own certificate this is a pin: a different self-signed certificate is refused.
+
+  Certificates come from `ServerTrust.CertificateSource`: `.pem(String)`, `.der([UInt8])`,
+  `.pemFile(String)`, `.derFile(String)`. They are read and parsed when the value is made, so a
+  bad path or a mangled certificate throws `ServerTrustError` where the configuration is
+  written. An empty list throws too; nothing falls back to the system roots.
+  `rootFingerprints` exposes the SHA-256 of each supplied root — the value `openssl x509
+  -fingerprint -sha256` prints — so an application can show what it trusts.
+- **No hash pinning, deliberately.** Pinning by SHA-256 of a key or certificate needs NIOSSL's
+  verification callback, which neither `AsyncHTTPClient` nor `WebSocketKit` lets a caller
+  install, and which replaces chain validation rather than adding to it. A pin that only some
+  transports could enforce would be worse than none.
+
+### Changed
+- **A transport with supplied roots runs on NIO's event loops, on every platform.** On Apple
+  platforms `AsyncHTTPClient` normally runs on Network.framework and *translates* a NIOSSL
+  `TLSConfiguration` for it; that translation ignores `additionalTrustRoots` altogether. With
+  supplied roots the client is now built on `MultiThreadedEventLoopGroup.singleton`, so NIOSSL
+  enforces the configuration and macOS behaves as Linux does. `.system` keeps the platform
+  stack, so nothing changes for a caller who does not pass `serverTrust`.
+- **`swift-nio-ssl` is a declared dependency.** The transports already imported it and received
+  it transitively. `swift-certificates` and `swift-asn1` are added for the test target only,
+  which mints its certificates at run time rather than committing a private key. All three were
+  already in the resolved graph; `Package.resolved` is unchanged.
+- **MCPExplorer's "Trust self-signed certificates" toggle is now a "Trusted certificate file"
+  field.** It takes the path of a PEM file and trusts only what is in it; an unreadable path
+  stops the connection instead of connecting without it. It applies to WebSocket connections
+  too, which the toggle never reached.
 - One `// SECURITY:` acknowledgement now says what was decided, ahead of the quality gate requiring a
   reason of at least eight words on every one.
 
@@ -471,3 +546,13 @@ and Linux.
 - Phase 2 spec compliance: notifications, ping, pagination, protocol version negotiation
 - TransportGuide DocC article
 - Initial MCPClient package with HTTP/SSE transport
+
+[Unreleased]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.12.0...HEAD
+[0.13.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.4.0...v0.9.0
+[0.4.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/jpurnell/SwiftMCPClient/releases/tag/v0.2.0

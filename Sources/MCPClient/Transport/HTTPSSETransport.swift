@@ -27,9 +27,11 @@ import Logging
 ///
 /// ## Cross-Platform
 ///
-/// Uses `AsyncHTTPClient` (Swift NIO) for HTTP and TLS, providing identical
-/// behavior on macOS and Linux. A self-signed or privately issued server
-/// certificate is trusted by supplying it — see ``ServerTrust``.
+/// Uses `AsyncHTTPClient` for HTTP on every platform. TLS is the platform's own
+/// on Apple platforms and NIOSSL's on Linux, both verifying against the system
+/// roots. A self-signed or privately issued server certificate is trusted by
+/// supplying it — see ``ServerTrust`` — and a transport given one verifies with
+/// NIOSSL everywhere, so that case behaves identically on macOS and Linux.
 public actor HTTPSSETransport: MCPTransport {
     private let url: URL
     private let headers: [String: String]

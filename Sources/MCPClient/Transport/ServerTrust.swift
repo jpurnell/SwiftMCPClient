@@ -23,8 +23,10 @@ import NIOSSL
 /// A self-signed certificate is its own issuer, so trusting it means supplying it as a root:
 ///
 /// ```swift
-/// let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
-/// let transport = StreamableHTTPTransport(url: url, serverTrust: trust)
+/// func selfSignedTransport(url: URL) throws -> StreamableHTTPTransport {
+///     let trust = try ServerTrust.onlyRoots([.pemFile("/etc/mcp/dev-server.pem")])
+///     return StreamableHTTPTransport(url: url, serverTrust: trust)
+/// }
 /// ```
 ///
 /// With ``onlyRoots(_:)`` that is also a pin: the server must present a chain ending at that
@@ -37,7 +39,9 @@ import NIOSSL
 /// the names that certificate carries:
 ///
 /// ```swift
-/// let trust = try ServerTrust.additionalRoots([.pem(corporateRootPEM)])
+/// func privateAuthorityTrust(rootPEM: String) throws -> ServerTrust {
+///     try ServerTrust.additionalRoots([.pem(rootPEM)])
+/// }
 /// ```
 ///
 /// ## The hostname still has to match
