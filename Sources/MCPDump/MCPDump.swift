@@ -36,6 +36,7 @@ struct MCPDump {
 
         // Same bar as MCPExplorer's sign-in: the string is about to name the host an
         // OAuth flow runs against, so https is required.
+        // SECURITY: the operator names the server on the command line; connecting there is what this tool is for.
         guard let components = URLComponents(string: urlString),
               components.scheme?.lowercased() == "https",
               let host = components.host, !host.isEmpty,
