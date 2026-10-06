@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **`HTTPSSETransport` would POST to wherever the server said, bearer token attached
+  (CWE-918, CWE-522).** In the legacy HTTP+SSE handshake the server's first event, `endpoint`,
+  names the URI every JSON-RPC message is then sent to. The transport resolved that value
+  against the configured URL and used the result. For a path that is harmless. But it is
+  resolved as a URL reference, so `https://other.example/x` — or `//other.example/x`, which
+  looks like a path and is not one — replaced the host outright, and every subsequent POST
+  went there carrying the `Authorization` header and any static `headers`. A compromised or
+  malicious server, or anything able to write into the event stream, could collect the
+  credential and the session's traffic.
+
+  **Now:** the resolved endpoint must be on the **same origin** as the configured stream URL —
+  same scheme, same host (case-insensitive), same effective port (a missing port is the
+  scheme's default). The comparison is of parsed components, not string prefixes. An endpoint
+  with userinfo (`user@host`) is refused even on the right host; a fragment is dropped.
+  Otherwise `connect()` throws the new `MCPError.endpointRejected(endpoint:reason:)`, logs
+  the offending origin at error level, sends nothing to the endpoint, and does not retry.
+
+  **This is a behaviour change.** A server that sends a cross-origin endpoint — most plausibly
+  one behind a reverse proxy that advertises its internal address, or an `http://` endpoint on
+  an `https://` stream — connected before and is refused now. Have it send a path. There is no
+  opt-out: the 2024-11-05 specification says only that the event contains "a URI", but the
+  TypeScript and Python reference clients both refuse a cross-origin endpoint already, and no
+  deployment was found that needs one.
+
+  The line carried a `// SECURITY:` acknowledgement for `security.ssrf` — "URL is resolved from
+  the server-provided endpoint path, caller controls the base URL" — which was true of a path
+  and of nothing else the parser accepts.
+
+### Added
+- **`MCPError.endpointRejected(endpoint:reason:)`.** A new case on a public enum, so an
+  exhaustive `switch` over `MCPError` needs one more arm. `endpoint` is an origin only
+  (`scheme://host[:port]`) and safe to log.
+
+### Tests
+- A cross-origin `307` in answer to a POST does **not** carry `Authorization` to the new
+  origin. That is `AsyncHTTPClient`'s behaviour rather than this package's, and is now pinned
+  by a test so a dependency update that changed it would fail here. (Static `headers` other
+  than `Authorization` and `Cookie`, and the request body, *are* still forwarded — see the
+  transport guide; not changed in this release.)
+
 ### Removed
 - **Seven `// SECURITY:` acknowledgements that answered no finding.** `security.ssrf` now reports
   a URL that reaches a request rather than one that is merely parsed, so these sat on lines the

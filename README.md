@@ -255,6 +255,7 @@ do {
     case .invalidResponse: print("Invalid server response")
     case .transportClosed: print("Connection closed unexpectedly")
     case .processSpawnFailed(let reason): print("Subprocess failed: \(reason)")
+    case .endpointRejected(let endpoint, let reason): print("Refused endpoint on \(endpoint): \(reason)")
     }
 }
 ```

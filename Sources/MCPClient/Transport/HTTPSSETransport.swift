@@ -19,6 +19,20 @@ import Logging
 /// 3. **Receive:** Yields JSON-RPC responses from SSE `message` events.
 /// 4. **Disconnect:** Cancels the SSE stream.
 ///
+/// ## The Endpoint Stays on the Stream's Origin
+///
+/// The `endpoint` event is the server telling the client where to send everything else —
+/// including the `Authorization` header. It is usually a path, but it is resolved as a URL
+/// reference, so it can name another host outright. This transport accepts it only if it
+/// resolves to the **same origin** as the `url` it was created with: the same scheme, the
+/// same host, and the same port (a port left out being the scheme's default). An endpoint
+/// that carries userinfo (`user@host`) is refused as well, and a fragment is dropped.
+///
+/// Anything else fails ``connect()`` with ``MCPError/endpointRejected(endpoint:reason:)``.
+/// Nothing is sent to the endpoint, and the connect is not retried. This matches the
+/// TypeScript and Python reference clients; the 2024-11-05 specification itself says only
+/// that the event contains "a URI". There is no setting that widens it.
+///
 /// ## Reconnection
 ///
 /// If the SSE stream drops during ``connect()``, the transport automatically
@@ -138,6 +152,10 @@ public actor HTTPSSETransport: MCPTransport {
     }
 
     /// Open the SSE connection to the MCP server, retrying with exponential backoff on failure.
+    ///
+    /// - Throws: ``MCPError/endpointRejected(endpoint:reason:)``, without retrying, if the
+    ///   server's `endpoint` event names a URL off the origin of the configured stream;
+    ///   otherwise the last attempt's error once the retries are spent.
     public func connect() async throws {
         let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
@@ -157,6 +175,18 @@ public actor HTTPSSETransport: MCPTransport {
             do {
                 try await performConnect()
                 return
+            } catch let MCPError.endpointRejected(endpoint, reason) {
+                // Not retried. This is a decision about the server, not a failure of the
+                // network: another attempt re-opens the stream, credentials attached, to be
+                // told the same thing.
+                // logging: swift-log has no privacy annotations; an origin only — no path, query, userinfo or header
+                logger.error("Refused the server's message endpoint on \(endpoint): \(reason)")
+                if let client = httpClient {
+                    httpClient = nil
+                    // silent: best-effort cleanup; the refusal is the error that matters
+                    try? await client.shutdown()
+                }
+                throw MCPError.endpointRejected(endpoint: endpoint, reason: reason)
             } catch {
                 lastError = error
                 // logging: swift-log Logger does not support privacy annotations
@@ -344,14 +374,10 @@ public actor HTTPSSETransport: MCPTransport {
 
             for event in events {
                 if event.event == "endpoint" {
-                    // SECURITY: URL is resolved from the server-provided endpoint path, caller controls the base URL
-                    guard let resolvedEndpoint = URL(
-                        string: event.data, relativeTo: url
-                    )?.absoluteURL else {
-                        throw MCPError.connectionFailed(
-                            reason: "Invalid endpoint URL: \(event.data)"
-                        )
-                    }
+                    // Held to the origin of `url` — see `resolveEndpoint`. A refusal throws
+                    // from here, before the endpoint is stored and so before anything can be
+                    // sent to it.
+                    let resolvedEndpoint = try Self.resolveEndpoint(event.data, against: url)
 
                     self.endpointURL = resolvedEndpoint
                     self.isConnected = true
@@ -379,6 +405,96 @@ public actor HTTPSSETransport: MCPTransport {
 
         // If we get here, the stream ended without an endpoint event
         throw MCPError.connectionFailed(reason: "No endpoint event received from SSE stream")
+    }
+
+    // MARK: - Endpoint Origin
+
+    /// Turns the server's `endpoint` event into the URL messages are POSTed to, or refuses it.
+    ///
+    /// The value is the server's to choose and is resolved as an RFC 3986 reference, so it is
+    /// not necessarily a path: an absolute URL replaces the whole origin, and so does
+    /// `//host/path`. Whatever it resolves to is where the caller's credentials go, which is
+    /// why the result is held to the origin of the stream the caller configured:
+    ///
+    /// - **Same scheme, host and effective port.** Compared as parsed components, never as
+    ///   string prefixes; scheme and host case-insensitively; a port left out is the scheme's
+    ///   default. `http` for an `https` stream is a different origin, and refused.
+    /// - **No userinfo.** `user@host` is refused even on the right host. Nothing needs it, and
+    ///   `good.example@evil.test` is how a URL is made to read as one host and reach another.
+    /// - **No fragment.** Dropped, not refused: it is never sent in a request.
+    ///
+    /// A relative reference cannot fail any of these — `..` stops at the root of the origin —
+    /// so a server that sends a path, as almost all do, sees no difference.
+    ///
+    /// - Parameters:
+    ///   - raw: The `data` of the `endpoint` event.
+    ///   - streamURL: The SSE URL the transport was configured with.
+    /// - Returns: The URL to POST to, on `streamURL`'s origin and with no fragment.
+    /// - Throws: ``MCPError/endpointRejected(endpoint:reason:)`` if the endpoint is on another
+    ///   origin or carries userinfo; ``MCPError/connectionFailed(reason:)`` if it is not a URL.
+    static func resolveEndpoint(_ raw: String, against streamURL: URL) throws -> URL {
+        guard let resolved = URL(string: raw, relativeTo: streamURL)?.absoluteURL,
+              var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false) else {
+            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(raw)")
+        }
+        components.fragment = nil
+
+        // Re-read from the string, because the string is what the HTTP client is handed. A
+        // check made on one parse and a request made from another is the gap this closes.
+        guard let text = components.string, let endpoint = URL(string: text) else {
+            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(raw)")
+        }
+
+        let expected = originDescription(of: streamURL)
+        let named = originDescription(of: endpoint)
+
+        guard endpoint.user == nil, endpoint.password == nil else {
+            throw MCPError.endpointRejected(
+                endpoint: named,
+                reason: "The server's endpoint event carries credentials in its URL; "
+                    + "expected a plain endpoint on \(expected)")
+        }
+
+        // The origin, component by component. Each side is parsed; nothing here is a prefix
+        // or a substring test, so `good.example.evil.test` is simply a different host.
+        guard let expectedScheme = streamURL.scheme?.lowercased(),
+              let expectedHost = streamURL.host?.lowercased(), !expectedHost.isEmpty,
+              let expectedPort = effectivePort(of: streamURL),
+              endpoint.scheme?.lowercased() == expectedScheme,
+              endpoint.host?.lowercased() == expectedHost,
+              effectivePort(of: endpoint) == expectedPort else {
+            throw MCPError.endpointRejected(
+                endpoint: named,
+                reason: "Endpoint origin does not match connection origin \(expected); "
+                    + "nothing was sent to it")
+        }
+        return endpoint
+    }
+
+    /// The port a URL's requests go to: the one it names, else its scheme's default.
+    ///
+    /// - Parameter url: An absolute URL.
+    /// - Returns: `nil` unless the scheme is `http` or `https` — nothing else is a place this
+    ///   transport can POST to, so nothing else has a port worth comparing.
+    private static func effectivePort(of url: URL) -> Int? {
+        switch url.scheme?.lowercased() {
+        case "https": return url.port ?? 443
+        case "http": return url.port ?? 80
+        default: return nil
+        }
+    }
+
+    /// `scheme://host[:port]` — what an error or a log line may say about a URL.
+    ///
+    /// Userinfo, path and query are left out on purpose: the first is a credential, and a
+    /// legacy endpoint's query is usually the session id.
+    private static func originDescription(of url: URL) -> String {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
+            return "(no origin)"
+        }
+        let authority = host.contains(":") ? "[\(host)]" : host
+        guard let port = url.port else { return "\(scheme)://\(authority)" }
+        return "\(scheme)://\(authority):\(port)"
     }
 
     /// Continue reading SSE messages in the background using the same iterator.

@@ -20,9 +20,20 @@ actor SSEStubServer {
 
     /// Starts the server.
     ///
-    /// - Parameter replies: How to answer each POST, in order. The last repeats.
-    static func start(replies: [StubHTTPServer.Reply]) async throws -> SSEStubServer {
-        let recorder = SSERecorder(replies: replies)
+    /// - Parameters:
+    ///   - replies: How to answer each POST, in order. The last repeats.
+    ///   - endpoint: The `data` of the `endpoint` event, as it goes on the wire. A server
+    ///     chooses this, so a hostile one chooses it too — which is what the origin tests
+    ///     script. `{authority}` is replaced with this server's own `host:port`, and
+    ///     `{origin}` with its scheme and authority.
+    ///   - redirectingPostsTo: If set, every POST is answered `307` with this `Location`
+    ///     instead of a scripted reply.
+    static func start(
+        replies: [StubHTTPServer.Reply],
+        endpoint: String = "/messages",
+        redirectingPostsTo redirect: String? = nil
+    ) async throws -> SSEStubServer {
+        let recorder = SSERecorder(replies: replies, endpoint: endpoint, redirect: redirect)
         let server = SSEStubServer(recorder: recorder)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -41,6 +52,14 @@ actor SSEStubServer {
 
     private func adopt(_ channel: Channel) {
         self.channel = channel
+    }
+
+    /// The port the server is listening on.
+    var port: Int {
+        get throws {
+            guard let port = channel?.localAddress?.port else { throw StubServerError.notListening }
+            return port
+        }
     }
 
     /// The SSE endpoint to point a transport at.
@@ -80,8 +99,15 @@ private final class SSERecorder: @unchecked Sendable {
     private var postStorage: [StubHTTPServer.Received] = []
     private var openStorage: [StubHTTPServer.Received] = []
 
-    init(replies: [StubHTTPServer.Reply]) {
+    /// The `data` of the `endpoint` event.
+    let endpoint: String
+    /// Where a POST is redirected, if anywhere.
+    let redirect: String?
+
+    init(replies: [StubHTTPServer.Reply], endpoint: String, redirect: String?) {
         self.replies = replies
+        self.endpoint = endpoint
+        self.redirect = redirect
     }
 
     var posts: [StubHTTPServer.Received] {
@@ -151,7 +177,11 @@ private final class SSEStubHandler: ChannelInboundHandler, @unchecked Sendable {
                 openStream(context: context)
             } else {
                 recorder.recordPost(record)
-                respond(context: context, reply: recorder.nextReply())
+                if let location = recorder.redirect {
+                    redirect(context: context, to: location)
+                } else {
+                    respond(context: context, reply: recorder.nextReply())
+                }
             }
         }
     }
@@ -167,9 +197,34 @@ private final class SSEStubHandler: ChannelInboundHandler, @unchecked Sendable {
         // The transport learns where to POST from this event, and waits for it before
         // `connect()` returns.
         var buffer = context.channel.allocator.buffer(capacity: 64)
-        buffer.writeString("event: endpoint\ndata: /messages\n\n")
+        // `{authority}` and `{origin}` stand for this server's own address, which a test cannot
+        // know before the kernel has assigned the port.
+        let authority = "127.0.0.1:\(context.channel.localAddress?.port ?? 0)"
+        var origin = URLComponents()
+        origin.scheme = "http"
+        origin.percentEncodedHost = "127.0.0.1"
+        origin.port = context.channel.localAddress?.port
+        let endpoint = recorder.endpoint
+            .replacingOccurrences(of: "{origin}", with: origin.string ?? "")
+            .replacingOccurrences(of: "{authority}", with: authority)
+        buffer.writeString("event: endpoint\ndata: \(endpoint)\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         // Left open: this is the long-lived stream, and closing it would start a reconnect.
+    }
+
+    /// Answers `307`, which asks the client to repeat the same method and body elsewhere.
+    private func redirect(context: ChannelHandlerContext, to location: String) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Location", value: location)
+        headers.add(name: "Content-Length", value: "0")
+        headers.add(name: "Connection", value: "close")
+        let head = HTTPResponseHead(version: .http1_1, status: .temporaryRedirect, headers: headers)
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+
+        let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+            bound.value.close(promise: nil)
+        }
     }
 
     private func respond(context: ChannelHandlerContext, reply: StubHTTPServer.Reply) {

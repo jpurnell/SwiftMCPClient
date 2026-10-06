@@ -41,4 +41,21 @@ public enum MCPError: Error, Sendable, Equatable {
 
     /// The transport connection was closed unexpectedly (e.g., subprocess exited).
     case transportClosed
+
+    /// The server named a message endpoint this client will not send to.
+    ///
+    /// In the legacy HTTP+SSE transport the server's `endpoint` event says where every
+    /// JSON-RPC message is POSTed, credentials included. ``HTTPSSETransport`` accepts only an
+    /// endpoint on the origin of the stream it was configured with — the same scheme, host and
+    /// port — and throws this, having sent nothing, for anything else.
+    ///
+    /// Unlike ``connectionFailed(reason:)`` this is not transient and is not retried: the
+    /// server, or something writing into its stream, asked for the session to be sent
+    /// elsewhere. Treat it as a reason to distrust the server rather than to try again.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The origin the server named, as `scheme://host[:port]`. Userinfo, path
+    ///     and query are deliberately left out, so this is safe to log.
+    ///   - reason: Why it was refused, naming the origin that was expected.
+    case endpointRejected(endpoint: String, reason: String)
 }

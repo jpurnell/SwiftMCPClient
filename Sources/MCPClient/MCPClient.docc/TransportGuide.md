@@ -139,10 +139,49 @@ until ``MCPTransport/disconnect()`` is called. A failed connect is retried with
 an exponential backoff — three attempts by default, configurable through
 `maxReconnectAttempts` and `reconnectBaseDelay`.
 
+### Where Messages Are Sent
+
+The first event on the stream, `endpoint`, is the server saying where to POST.
+That makes it the server's choice where your `Authorization` header goes, so the
+transport holds it to the **origin of the URL you configured**: the same scheme,
+host and port.
+
+| The server sends | Stream at `https://mcp.example.com/sse` |
+|---|---|
+| `/messages?sessionId=1` | accepted — `https://mcp.example.com/messages?sessionId=1` |
+| `../messages` | accepted — `..` cannot leave the origin |
+| `https://mcp.example.com/messages` | accepted — same origin |
+| `https://mcp.example.com:443/messages` | accepted — 443 is the default port |
+| `https://other.example/messages` | refused — another host |
+| `//other.example/messages` | refused — another host; this is not a path |
+| `http://mcp.example.com/messages` | refused — another scheme |
+| `https://mcp.example.com:8443/messages` | refused — another port |
+| `https://mcp.example.com.other.example/x` | refused — another host |
+| `https://user@mcp.example.com/messages` | refused — userinfo |
+
+A refused endpoint fails ``MCPTransport/connect()`` with
+``MCPError/endpointRejected(endpoint:reason:)``. Nothing is sent to it, and the
+connect is not retried. The TypeScript and Python reference clients apply the
+same rule. There is no option to widen it; a server whose stream and message
+endpoint genuinely live on different origins needs to be fronted by one.
+
 ### When to Use
 
 - Servers that offer only the legacy HTTP+SSE endpoints
 - Cross-platform (macOS, iOS, tvOS, watchOS, Linux)
+
+## Redirects
+
+Both HTTP transports follow redirects, up to five, because `AsyncHTTPClient`
+does by default. When a redirect leaves the origin of the request, the
+`Authorization`, `Cookie`, `Origin` and `Proxy-Authorization` headers are
+removed before the request is repeated — so a bearer token is not carried to
+another host by a redirect.
+
+Two things *are* carried: any other header passed in `headers`, and, for a
+`307` or `308`, the request body. If a secret travels in a custom header — an
+`X-API-Key`, say — treat a server able to redirect as able to read it, and
+prefer `Authorization` for credentials.
 
 ## Self-Signed and Private-CA Servers
 

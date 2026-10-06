@@ -150,6 +150,31 @@ func handleTransportClosed() async throws {
 }
 ```
 
+### endpointRejected
+
+Thrown by ``HTTPSSETransport`` when the server's `endpoint` event names a URL
+that is not on the origin of the stream — another host, scheme or port, or a
+URL carrying userinfo. Nothing has been sent to that URL, and the connect was
+not retried.
+
+```swift
+func handleRejectedEndpoint() async throws {
+    guard let url = URL(string: "https://mcp.example.com/sse") else { return }
+    let transport = HTTPSSETransport(url: url)
+    do {
+        try await transport.connect()
+    } catch MCPError.endpointRejected(let endpoint, let reason) {
+        print("Server asked for messages to go to \(endpoint): \(reason)")
+        // Not transient: do not retry. Either the server is misconfigured
+        // (advertising an internal address from behind a proxy, say) or it,
+        // or something in front of it, is redirecting your session.
+    }
+}
+```
+
+`endpoint` is an origin only — `scheme://host[:port]` — with no path, query or
+userinfo, so it is safe to log.
+
 ## Best Practices
 
 ### Use exhaustive switch for robust handling
@@ -179,6 +204,8 @@ func logEveryErrorCase() async throws {
             logger.error("Spawn failed: \(reason)")
         case .transportClosed:
             logger.warning("Transport closed")
+        case .endpointRejected(let endpoint, let reason):
+            logger.error("Refused endpoint on \(endpoint): \(reason)")
         }
     }
 }
@@ -188,4 +215,5 @@ func logEveryErrorCase() async throws {
 
 Timeouts and transport closures may be transient. Implement exponential
 backoff for these cases while treating `requestFailed` errors as
-non-retryable server-side issues.
+non-retryable server-side issues. `endpointRejected` is never worth retrying:
+it is the server's answer, and it will give the same one again.

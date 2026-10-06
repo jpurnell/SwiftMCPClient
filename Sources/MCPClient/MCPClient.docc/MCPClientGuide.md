@@ -116,6 +116,8 @@ func handleToolErrors() async throws {
             print("Transport connection was closed")
         case .processSpawnFailed(let reason):
             print("Failed to spawn subprocess: \(reason)")
+        case .endpointRejected(let endpoint, let reason):
+            print("Refused the server's message endpoint on \(endpoint): \(reason)")
         }
     }
 }
