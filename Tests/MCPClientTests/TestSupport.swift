@@ -29,7 +29,6 @@ func requireURL(
     _ string: String,
     sourceLocation: SourceLocation = #_sourceLocation
 ) throws -> URL {
-    // SECURITY: parses a literal written in the test source; nothing reaches this from a server.
     try #require(URL(string: string), "Malformed test URL: \(string)", sourceLocation: sourceLocation)
 }
 
@@ -51,7 +50,6 @@ func loopbackPort(
     of redirect: String,
     sourceLocation: SourceLocation = #_sourceLocation
 ) throws -> Int {
-    // SECURITY: the host is checked against the loopback literal on the next line.
     let url = try #require(URL(string: redirect), "Malformed redirect URI: \(redirect)", sourceLocation: sourceLocation)
     #expect(url.host() == "127.0.0.1", "redirect URI is not on loopback: \(redirect)", sourceLocation: sourceLocation)
     return try #require(url.port, "Redirect URI names no port: \(redirect)", sourceLocation: sourceLocation)

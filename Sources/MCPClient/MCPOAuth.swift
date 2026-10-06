@@ -215,8 +215,6 @@ public struct MCPOAuthSetup: Sendable {
                     // exactly what a server with a strict resource policy expects to be named.
                     // Discovery has held this value all along; until 0.11.1 there was nowhere
                     // to put it, so the client read it and then sent nothing.
-                    //
-                    // SECURITY: parses an identifier this server published about itself.
                     resource: URL(string: resource.resource)),
                 try metadata.registrationURL())
         } catch let error as DiscoveryError {

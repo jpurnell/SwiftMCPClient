@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **Seven `// SECURITY:` acknowledgements that answered no finding.** `security.ssrf` now reports
+  a URL that reaches a request rather than one that is merely parsed, so these sat on lines the
+  gate no longer flags. Each was decided by removing it and re-running the checker; the eight
+  that still answer a finding are untouched.
+
 ## [0.13.0] — 2026-10-03
 
 ### Read this first: `trustSelfSignedCertificates` is gone, and it never did what it said

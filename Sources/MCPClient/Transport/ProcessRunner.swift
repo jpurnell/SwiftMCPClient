@@ -47,7 +47,6 @@ final class ProcessRunner: @unchecked Sendable {
     ///   - environment: Variables merged over the current process environment.
     /// - Throws: ``MCPError/processSpawnFailed(reason:)`` if the process cannot be launched.
     init(command: String, arguments: [String], environment: [String: String]) throws {
-        // SECURITY: command path and arguments are caller-controlled configuration, not user input
         process = Process()
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = arguments

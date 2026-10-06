@@ -18,7 +18,6 @@ struct ResourceIndicatorClientTests {
     /// The identifier the server published is the one the configuration carries.
     @Test("A discovered resource identifier reaches the provider configuration")
     func discoveredResourceIsCarried() throws {
-        // SECURITY: literals written in this test; nothing is fetched from them.
         let identifier = try #require(URL(string: "https://mcp.example.com"))
         let metadata = AuthorizationServerMetadata(
             issuer: "https://auth.example.com",

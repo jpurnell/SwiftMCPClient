@@ -125,7 +125,6 @@ struct RedirectURITests {
 
         // This is the loopback-host check itself, so it cannot delegate to a helper that
         // has already made the same check.
-        // SECURITY: the host is asserted against the loopback literal on the next line.
         let url = try #require(URL(string: redirect))
         #expect(url.host() == "127.0.0.1")
         #expect(url.host() != "0.0.0.0")
