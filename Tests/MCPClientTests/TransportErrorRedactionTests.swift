@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(FoundationNetworking)
+// `HTTPURLResponse` lives here on Linux rather than in Foundation. Without this the file does
+// not compile there — which is what broke the Linux build when this file was added.
+import FoundationNetworking
+#endif
 import Testing
 import NIOHTTP1
 @testable import MCPClient
