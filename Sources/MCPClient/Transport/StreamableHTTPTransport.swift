@@ -44,6 +44,16 @@ public typealias AuthorizationProvider = @Sendable (_ forcingRefresh: Bool) asyn
 /// 5. **Disconnect:** Cancels the server stream and every in-flight response, sends
 ///    `DELETE /mcp` to terminate the session, then shuts down the HTTP client.
 ///
+/// ## Redirects Stay on the Configured Origin
+///
+/// Every request — each `POST`, the server stream's `GET`, a resumption `GET`, the closing
+/// `DELETE` — follows a `301`, `302`, `303`, `307` or `308` only to the origin of `url`: the
+/// same scheme, host and port. At most five are followed. A redirect anywhere else — another
+/// host or port, or `http` for `https` — is not followed and nothing is sent to it: no
+/// header, no `Mcp-Session-Id`, no body. ``send(_:)`` fails with
+/// ``MCPError/redirectRejected(destination:reason:)``; the server stream, which nobody is
+/// awaiting, logs the refusal at error level and stops rather than reconnecting.
+///
 /// ## Compared with legacy HTTP+SSE
 ///
 /// The difference is what a dead stream costs. Legacy HTTP+SSE dies with its stream, because
@@ -278,6 +288,16 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // Failures escalate — that is the `catch` below. This path is only ever a
                 // stream that ended without error.
                 attempt = delivered ? 0 : StreamBackoff.pollingAttempt
+            } catch MCPError.redirectRejected {
+                // The server answered, and the answer was "open it somewhere else". That is
+                // not a dropped stream and asking again gets the same answer, so the loop
+                // ends here rather than backing off into it forever. Request and response
+                // carry on without this channel. The refusal itself is logged, at error, where
+                // it was made; this says what it cost.
+                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+                // logging: the consequence of a refused redirect — no value from the request or the response
+                logger.warning("the server stream will not be reopened: its GET was redirected off the configured origin")
+                return
             } catch {
                 attempt += 1
                 let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
@@ -292,6 +312,8 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// - Parameter resuming: Whether to carry `Last-Event-ID` and pick up where the previous
     ///   stream stopped.
     /// - Returns: The stream body, or `nil` if the server offers no such channel.
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the `GET` is redirected
+    ///   off the configured origin.
     private func openServerStream(resuming stream: StreamableHTTPSession.StreamKind?) async throws -> HTTPClientResponse.Body? {
         guard let client = httpClient else { return nil }
 
@@ -304,11 +326,9 @@ public actor StreamableHTTPTransport: MCPTransport {
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)
         }
-        if let authorization, let header = try await authorization(false) {
-            request.headers.replaceOrAdd(name: "Authorization", value: header)
-        }
 
-        let response = try await client.execute(request, timeout: connectionTimeout)
+        let response = try await redirects.execute(
+            request, on: client, timeout: connectionTimeout, authorization: authorization)
 
         // 405 is a conformant server saying it originates no messages. Not a failure, and not
         // something to retry: the answer will not change.
@@ -354,8 +374,18 @@ public actor StreamableHTTPTransport: MCPTransport {
             for (key, value) in headers {
                 request.headers.replaceOrAdd(name: key, value: value)
             }
-            // silent: best-effort session termination during disconnect
-            _ = try? await client.execute(request, timeout: connectionTimeout)
+            do {
+                // Through the same door as every other request, so a redirected `DELETE`
+                // cannot carry the session id somewhere a `POST` would not have gone.
+                _ = try await redirects.execute(
+                    request, on: client, timeout: connectionTimeout, authorization: nil)
+            } catch {
+                // Best effort: the session is being abandoned either way, and the server
+                // expires what it is not told about.
+                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+                // logging: a session the server was not told had ended; the error names no URL beyond an origin
+                logger.debug("session termination was not delivered: \(error.localizedDescription)")
+            }
         }
 
         serverStreamTask?.cancel()
@@ -383,6 +413,10 @@ public actor StreamableHTTPTransport: MCPTransport {
     }
 
     /// Post a JSON-RPC message to the MCP endpoint and enqueue the response.
+    ///
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
+    ///   success; ``MCPError/redirectRejected(destination:reason:)`` if the server redirects
+    ///   the POST off the configured origin.
     public func send(_ data: Data) async throws {
         guard let client = httpClient, isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -636,10 +670,11 @@ public actor StreamableHTTPTransport: MCPTransport {
     ///   - client: The HTTP client to send on.
     ///   - forcingRefresh: Passed to the provider. `true` only on a retry after a refusal.
     /// - Returns: The response, whatever its status — the caller decides what a status means.
-    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made, or
-    ///   whatever the provider threw. A provider that fails **fails the send**: continuing
-    ///   without the header would reach the server as a `401`, which reads as a credential
-    ///   problem at the far end rather than a local one.
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made,
+    ///   ``MCPError/redirectRejected(destination:reason:)`` if it was redirected off the
+    ///   configured origin, or whatever the provider threw. A provider that fails **fails the
+    ///   send**: continuing without the header would reach the server as a `401`, which reads
+    ///   as a credential problem at the far end rather than a local one.
     private func attempt(
         _ data: Data,
         on client: HTTPClient,
@@ -677,25 +712,20 @@ public actor StreamableHTTPTransport: MCPTransport {
             request.headers.replaceOrAdd(name: key, value: value)
         }
 
-        // After the static headers, so a live session wins over a token pasted into
-        // configuration. Both present means the pasted one is the leftover.
-        if let authorization {
-            if let header = try await authorization(forcingRefresh) {
-                request.headers.replaceOrAdd(name: "Authorization", value: header)
-            } else {
-                // `nil` means not signed in, which is a request with no header — not one
-                // carrying `Bearer` and nothing after it.
-                request.headers.remove(name: "Authorization")
-            }
-        }
-
         request.body = .bytes(data)
 
-        do {
-            return try await client.execute(request, timeout: connectionTimeout)
-        } catch {
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
-        }
+        // The provider's token is applied there — after the static headers, so a live session
+        // wins over a token pasted into configuration — and again for each request a redirect
+        // turns this into.
+        return try await redirects.execute(
+            request, on: client, timeout: connectionTimeout,
+            authorization: authorization, forcingRefresh: forcingRefresh)
+    }
+
+    /// How every request this transport makes is sent: redirects are followed on the origin
+    /// of `url` and nowhere else.
+    private var redirects: SameOriginRedirects {
+        SameOriginRedirects(configured: url, loggerLabel: "MCPClient.StreamableHTTPTransport")
     }
 
     /// Return the next queued response, or suspend until one arrives from a ``send(_:)`` call.

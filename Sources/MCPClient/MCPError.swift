@@ -58,4 +58,26 @@ public enum MCPError: Error, Sendable, Equatable {
     ///     and query are deliberately left out, so this is safe to log.
     ///   - reason: Why it was refused, naming the origin that was expected.
     case endpointRejected(endpoint: String, reason: String)
+
+    /// The server redirected a request to an origin this client will not follow it to.
+    ///
+    /// ``StreamableHTTPTransport`` and ``HTTPSSETransport`` follow a redirect only when its
+    /// destination has the scheme, host and port of the URL they were configured with.
+    /// Anything else — another host, another port, `http` where `https` was configured — is
+    /// not followed: nothing is sent to the destination, not even a request without
+    /// credentials, and the operation that met the redirect throws this.
+    ///
+    /// Distinct from ``endpointRejected(endpoint:reason:)`` because the remedy usually is. A
+    /// redirect is most often a server that has moved, or one reached by `http` that wants
+    /// `https`: if the destination is the server you meant, configure the transport with that
+    /// URL. If it is not, the server — or something answering for it — tried to send the
+    /// session elsewhere.
+    ///
+    /// Like ``endpointRejected(endpoint:reason:)`` it is not transient and is not retried.
+    ///
+    /// - Parameters:
+    ///   - destination: The origin the redirect named, as `scheme://host[:port]`. Userinfo,
+    ///     path and query are deliberately left out, so this is safe to log.
+    ///   - reason: Why it was refused, naming the status and the origin that was configured.
+    case redirectRejected(destination: String, reason: String)
 }

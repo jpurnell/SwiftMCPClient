@@ -41,6 +41,9 @@ var targets: [Target] = [
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            // What a redirect does to a request is decided on an `HTTPClientRequest`, and the
+            // tests of that decision build one.
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
             // What a transport trusts is also wire behaviour: whether a handshake with a
             // given certificate completes. The tests stand up a TLS server on loopback and
             // mint its certificates at run time, so no private key is ever committed.

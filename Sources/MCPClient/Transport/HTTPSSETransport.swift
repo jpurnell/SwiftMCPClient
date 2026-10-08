@@ -33,6 +33,14 @@ import Logging
 /// TypeScript and Python reference clients; the 2024-11-05 specification itself says only
 /// that the event contains "a URI". There is no setting that widens it.
 ///
+/// ## Redirects Stay on It Too
+///
+/// A redirect is the same instruction by another route, and is held to the same rule: the
+/// stream's `GET` and every `POST` follow a `301`, `302`, `303`, `307` or `308` only to the
+/// origin of `url`, at most five times. A redirect anywhere else — another host or port, or
+/// `http` for `https` — is not followed: nothing is sent to it, the call fails with
+/// ``MCPError/redirectRejected(destination:reason:)``, and ``connect()`` does not retry.
+///
 /// ## Reconnection
 ///
 /// If the SSE stream drops during ``connect()``, the transport automatically
@@ -155,7 +163,9 @@ public actor HTTPSSETransport: MCPTransport {
     ///
     /// - Throws: ``MCPError/endpointRejected(endpoint:reason:)``, without retrying, if the
     ///   server's `endpoint` event names a URL off the origin of the configured stream;
-    ///   otherwise the last attempt's error once the retries are spent.
+    ///   ``MCPError/redirectRejected(destination:reason:)``, also without retrying, if the
+    ///   stream's `GET` is redirected off that origin; otherwise the last attempt's error
+    ///   once the retries are spent.
     public func connect() async throws {
         let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
@@ -187,6 +197,20 @@ public actor HTTPSSETransport: MCPTransport {
                     try? await client.shutdown()
                 }
                 throw MCPError.endpointRejected(endpoint: endpoint, reason: reason)
+            } catch let MCPError.redirectRejected(destination, reason) {
+                // Not retried, for the same reason: the server answered, and what it said was
+                // "go elsewhere". Asking again gets the same answer. Already logged where it
+                // was refused.
+                if let client = httpClient {
+                    httpClient = nil
+                    do {
+                        try await client.shutdown()
+                    } catch {
+                        // logging: cleanup after a refusal; the refusal is the error that matters
+                        logger.debug("HTTP client shutdown failed after a refused redirect: \(error.localizedDescription)")
+                    }
+                }
+                throw MCPError.redirectRejected(destination: destination, reason: reason)
             } catch {
                 lastError = error
                 // logging: swift-log Logger does not support privacy annotations
@@ -226,6 +250,10 @@ public actor HTTPSSETransport: MCPTransport {
     }
 
     /// Post a JSON-RPC message to the server's endpoint URL.
+    ///
+    /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
+    ///   success; ``MCPError/redirectRejected(destination:reason:)`` if the server redirects
+    ///   the POST off the configured origin.
     public func send(_ data: Data) async throws {
         guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -260,10 +288,11 @@ public actor HTTPSSETransport: MCPTransport {
 
     /// Makes one POST, with a freshly resolved `Authorization` header.
     ///
-    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made, or
-    ///   whatever the provider threw. A provider that fails **fails the send**: continuing
-    ///   unauthenticated reaches the server as a `401`, which reads as a credential problem at
-    ///   the far end rather than a local one.
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` if the request could not be made,
+    ///   ``MCPError/redirectRejected(destination:reason:)`` if it was redirected off the
+    ///   configured origin, or whatever the provider threw. A provider that fails **fails the
+    ///   send**: continuing unauthenticated reaches the server as a `401`, which reads as a
+    ///   credential problem at the far end rather than a local one.
     private func post(
         _ data: Data,
         to endpointURL: URL,
@@ -276,32 +305,19 @@ public actor HTTPSSETransport: MCPTransport {
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)
         }
-        try await applyAuthorization(to: &request, forcingRefresh: forcingRefresh)
         request.body = .bytes(data)
 
-        do {
-            return try await client.execute(request, timeout: connectionTimeout)
-        } catch {
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
-        }
+        // The provider's token is applied there, after the static headers and again for each
+        // request a redirect turns this into.
+        return try await redirects.execute(
+            request, on: client, timeout: connectionTimeout,
+            authorization: authorization, forcingRefresh: forcingRefresh)
     }
 
-    /// Puts a current token on a request, if this transport was given a way to get one.
-    ///
-    /// Applied after the static headers, so a live session wins over a token pasted into
-    /// configuration — both present means the pasted one is the leftover.
-    private func applyAuthorization(
-        to request: inout HTTPClientRequest,
-        forcingRefresh: Bool
-    ) async throws {
-        guard let authorization else { return }
-        if let header = try await authorization(forcingRefresh) {
-            request.headers.replaceOrAdd(name: "Authorization", value: header)
-        } else {
-            // `nil` means not signed in, which is a request with no header — not one carrying
-            // `Bearer` and nothing after it.
-            request.headers.remove(name: "Authorization")
-        }
+    /// How every request this transport makes is sent: redirects are followed on the origin
+    /// of `url` and nowhere else.
+    private var redirects: SameOriginRedirects {
+        SameOriginRedirects(configured: url, loggerLabel: "MCPClient.HTTPSSETransport")
     }
 
     /// Return the next queued SSE message, or suspend until one arrives.
@@ -345,16 +361,10 @@ public actor HTTPSSETransport: MCPTransport {
         for (key, value) in headers {
             request.headers.replaceOrAdd(name: key, value: value)
         }
-        // Resolved each time the stream is opened, so a reconnect after a token expired does
-        // not present the token that had already stopped working.
-        try await applyAuthorization(to: &request, forcingRefresh: false)
-
-        let response: HTTPClientResponse
-        do {
-            response = try await client.execute(request, timeout: connectionTimeout)
-        } catch {
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
-        }
+        // The token is resolved each time the stream is opened, so a reconnect after a token
+        // expired does not present the token that had already stopped working.
+        let response = try await redirects.execute(
+            request, on: client, timeout: connectionTimeout, authorization: authorization)
 
         guard (200...299).contains(response.status.code) else {
             throw MCPError.connectionFailed(
@@ -419,8 +429,10 @@ public actor HTTPSSETransport: MCPTransport {
     /// - **Same scheme, host and effective port.** Compared as parsed components, never as
     ///   string prefixes; scheme and host case-insensitively; a port left out is the scheme's
     ///   default. `http` for an `https` stream is a different origin, and refused.
-    /// - **No userinfo.** `user@host` is refused even on the right host. Nothing needs it, and
-    ///   `good.example@evil.test` is how a URL is made to read as one host and reach another.
+    /// - **No userinfo of its own.** `user@host` is refused even on the right host. Nothing
+    ///   needs it, and `good.example@evil.test` is how a URL is made to read as one host and
+    ///   reach another. Userinfo the configured URL itself carries is the caller's, and a
+    ///   relative endpoint that inherits it is accepted.
     /// - **No fragment.** Dropped, not refused: it is never sent in a request.
     ///
     /// A relative reference cannot fail any of these — `..` stops at the root of the origin —
@@ -433,68 +445,26 @@ public actor HTTPSSETransport: MCPTransport {
     /// - Throws: ``MCPError/endpointRejected(endpoint:reason:)`` if the endpoint is on another
     ///   origin or carries userinfo; ``MCPError/connectionFailed(reason:)`` if it is not a URL.
     static func resolveEndpoint(_ raw: String, against streamURL: URL) throws -> URL {
-        guard let resolved = URL(string: raw, relativeTo: streamURL)?.absoluteURL,
-              var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false) else {
+        let expected = HTTPOrigin.description(of: streamURL)
+
+        // The comparison itself is `HTTPOrigin`'s, shared with redirects: one rule for every
+        // place a server gets to say "send it over there".
+        switch HTTPOrigin.resolve(raw, relativeTo: streamURL, heldTo: streamURL) {
+        case .sameOrigin(let endpoint):
+            return endpoint
+        case .notAURL:
             throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(raw)")
-        }
-        components.fragment = nil
-
-        // Re-read from the string, because the string is what the HTTP client is handed. A
-        // check made on one parse and a request made from another is the gap this closes.
-        guard let text = components.string, let endpoint = URL(string: text) else {
-            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(raw)")
-        }
-
-        let expected = originDescription(of: streamURL)
-        let named = originDescription(of: endpoint)
-
-        guard endpoint.user == nil, endpoint.password == nil else {
+        case .carriesUserinfo(let named):
             throw MCPError.endpointRejected(
                 endpoint: named,
                 reason: "The server's endpoint event carries credentials in its URL; "
                     + "expected a plain endpoint on \(expected)")
-        }
-
-        // The origin, component by component. Each side is parsed; nothing here is a prefix
-        // or a substring test, so `good.example.evil.test` is simply a different host.
-        guard let expectedScheme = streamURL.scheme?.lowercased(),
-              let expectedHost = streamURL.host?.lowercased(), !expectedHost.isEmpty,
-              let expectedPort = effectivePort(of: streamURL),
-              endpoint.scheme?.lowercased() == expectedScheme,
-              endpoint.host?.lowercased() == expectedHost,
-              effectivePort(of: endpoint) == expectedPort else {
+        case .otherOrigin(let named):
             throw MCPError.endpointRejected(
                 endpoint: named,
                 reason: "Endpoint origin does not match connection origin \(expected); "
                     + "nothing was sent to it")
         }
-        return endpoint
-    }
-
-    /// The port a URL's requests go to: the one it names, else its scheme's default.
-    ///
-    /// - Parameter url: An absolute URL.
-    /// - Returns: `nil` unless the scheme is `http` or `https` — nothing else is a place this
-    ///   transport can POST to, so nothing else has a port worth comparing.
-    private static func effectivePort(of url: URL) -> Int? {
-        switch url.scheme?.lowercased() {
-        case "https": return url.port ?? 443
-        case "http": return url.port ?? 80
-        default: return nil
-        }
-    }
-
-    /// `scheme://host[:port]` — what an error or a log line may say about a URL.
-    ///
-    /// Userinfo, path and query are left out on purpose: the first is a credential, and a
-    /// legacy endpoint's query is usually the session id.
-    private static func originDescription(of url: URL) -> String {
-        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
-            return "(no origin)"
-        }
-        let authority = host.contains(":") ? "[\(host)]" : host
-        guard let port = url.port else { return "\(scheme)://\(authority)" }
-        return "\(scheme)://\(authority):\(port)"
     }
 
     /// Continue reading SSE messages in the background using the same iterator.

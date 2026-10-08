@@ -175,6 +175,39 @@ func handleRejectedEndpoint() async throws {
 `endpoint` is an origin only — `scheme://host[:port]` — with no path, query or
 userinfo, so it is safe to log.
 
+### redirectRejected
+
+Thrown by ``StreamableHTTPTransport`` and ``HTTPSSETransport`` when the server
+answers a request with a redirect to another origin — another host or port, or
+`http` where the transport was configured with `https`. The redirect was not
+followed and nothing was sent to its destination: no header, no session id, no
+body.
+
+```swift
+func handleRejectedRedirect() async throws {
+    guard let url = URL(string: "https://mcp.example.com/mcp") else { return }
+    let client = MCPClientConnection(transport: StreamableHTTPTransport(url: url))
+    do {
+        _ = try await client.initialize(clientName: "app", clientVersion: "1.0")
+    } catch MCPError.redirectRejected(let destination, let reason) {
+        print("Server redirected to \(destination): \(reason)")
+        // Not transient: do not retry. If `destination` is where the server
+        // really lives now, configure the transport with that URL. If it is
+        // not, something is trying to move your session.
+    }
+}
+```
+
+`destination` is an origin only, like `endpoint` above. The redirect's path and
+query are left out: they are the server's to write, and an error is not where a
+server gets to write into your logs.
+
+It is a separate case from `endpointRejected` because what to do about it
+differs. A cross-origin `endpoint` is a server misdescribing itself, and only
+the server can fix that. A cross-origin redirect is very often a server that
+moved, or one you reached over `http` that wants `https` — and the fix is the
+URL you configured.
+
 ## Best Practices
 
 ### Use exhaustive switch for robust handling
@@ -206,6 +239,8 @@ func logEveryErrorCase() async throws {
             logger.warning("Transport closed")
         case .endpointRejected(let endpoint, let reason):
             logger.error("Refused endpoint on \(endpoint): \(reason)")
+        case .redirectRejected(let destination, let reason):
+            logger.error("Refused redirect to \(destination): \(reason)")
         }
     }
 }
@@ -215,5 +250,6 @@ func logEveryErrorCase() async throws {
 
 Timeouts and transport closures may be transient. Implement exponential
 backoff for these cases while treating `requestFailed` errors as
-non-retryable server-side issues. `endpointRejected` is never worth retrying:
-it is the server's answer, and it will give the same one again.
+non-retryable server-side issues. `endpointRejected` and `redirectRejected` are
+never worth retrying: each is the server's answer, and it will give the same
+one again.

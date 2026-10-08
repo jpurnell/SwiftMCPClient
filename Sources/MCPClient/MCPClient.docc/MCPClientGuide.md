@@ -118,6 +118,8 @@ func handleToolErrors() async throws {
             print("Failed to spawn subprocess: \(reason)")
         case .endpointRejected(let endpoint, let reason):
             print("Refused the server's message endpoint on \(endpoint): \(reason)")
+        case .redirectRejected(let destination, let reason):
+            print("Refused a redirect to \(destination): \(reason)")
         }
     }
 }

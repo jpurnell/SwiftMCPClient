@@ -159,11 +159,17 @@ public struct ServerTrust: Sendable, Hashable {
     /// own event loops makes the configuration built above the one that is enforced, and
     /// makes it the same one on macOS and Linux. ``system`` keeps the platform's stack.
     ///
+    /// The client does **not** follow redirects. `AsyncHTTPClient` follows them to any
+    /// origin when asked to follow at all, so the transports ask it not to and follow the
+    /// same-origin ones themselves, through ``SameOriginRedirects``. A request made on this
+    /// client by any other route gets a `3xx` back as the answer.
+    ///
     /// - Parameter connectTimeout: How long a connection attempt may take.
     /// - Returns: The client. The caller owns it and must shut it down.
     func makeHTTPClient(connectTimeout: TimeAmount) -> HTTPClient {
         var configuration = HTTPClient.Configuration(tlsConfiguration: makeTLSConfiguration())
         configuration.timeout.connect = connectTimeout
+        configuration.redirectConfiguration = .disallow
         guard !roots.isEmpty else {
             return HTTPClient(configuration: configuration)
         }

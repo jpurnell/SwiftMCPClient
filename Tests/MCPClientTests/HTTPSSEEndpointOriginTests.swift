@@ -164,6 +164,20 @@ struct HTTPSSEEndpointResolutionTests {
             _ = try HTTPSSETransport.resolveEndpoint("", against: stream)
         }
     }
+
+    /// 0.14.0 refused every endpoint, a plain path included, when the *configured* URL
+    /// carried userinfo — the path inherits it, and inherited userinfo looked like supplied
+    /// userinfo. What the caller wrote is the caller's; what the server adds is not.
+    @Test("A relative endpoint keeps the userinfo the configured URL already had")
+    func configuredUserinfoIsNotTheServers() throws {
+        let stream = try requireURL("https://caller:theirs@good.example/sse")
+        let resolved = try HTTPSSETransport.resolveEndpoint("/messages", against: stream)
+        #expect(resolved.absoluteString == "https://caller:theirs@good.example/messages")
+
+        #expect(throws: MCPError.self) {
+            _ = try HTTPSSETransport.resolveEndpoint("https://other:theirs@good.example/messages", against: stream)
+        }
+    }
 }
 
 /// The same rule, observed from the far end of the socket.
@@ -286,12 +300,13 @@ struct HTTPSSEEndpointOriginWireTests {
         await Self.tearDown(transport, server)
     }
 
-    /// Not this package's code, but this package's exposure: `AsyncHTTPClient` follows
-    /// redirects by default, and whether the credential survives a redirect to another origin
-    /// is decided there. Pinned so that a dependency update which changed it would say so.
-    @Test("A cross-origin redirect of the POST does not carry Authorization",
+    /// The other route to the same place. 0.14.0 pinned what `AsyncHTTPClient` did with this
+    /// redirect — it followed it, without `Authorization` but with everything else. The
+    /// transport now decides for itself, and the answer is the one the endpoint gets: nothing
+    /// is sent to another origin. The whole matrix is in `TransportRedirectWireTests`.
+    @Test("A cross-origin redirect of the POST is refused, and nothing is sent there",
           .timeLimit(.minutes(1)))
-    func redirectDoesNotForwardAuthorization() async throws {
+    func redirectIsNotFollowedOffOrigin() async throws {
         let other = try await SSEStubServer.start(replies: [.ok("{}")])
         let otherPort = try await other.port
         let server = try await SSEStubServer.start(
@@ -300,10 +315,15 @@ struct HTTPSSEEndpointOriginWireTests {
         let transport = try await Self.transport(for: server)
         do {
             try await transport.connect()
-            try await transport.send(Data("{}".utf8))
+            await #expect(throws: MCPError.redirectRejected(
+                destination: "http://127.0.0.1:\(otherPort)",
+                reason: "HTTP 307 redirect leaves the configured origin "
+                    + "http://127.0.0.1:\(try await server.port); nothing was sent to it")
+            ) {
+                try await transport.send(Data("{}".utf8))
+            }
             #expect(await server.received.map(\.authorization) == [Self.watched])
-            #expect(await other.received.map(\.authorization) == [nil],
-                    "the redirect target was sent the credential")
+            #expect(await other.received.isEmpty, "the redirect target was sent a request")
             await Self.tearDown(transport, server)
             await other.stop()
         } catch {

@@ -90,6 +90,10 @@ public enum MCPConnectionFactory {
                 serverInfo: Self.info(from: discovered._meta?.serverInfo),
                 clientName: clientName,
                 clientVersion: clientVersion)
+        } catch let MCPError.redirectRejected(destination, reason) {
+            // Not a refusal of the *request*, so not evidence about the era. Falling back to
+            // `initialize` would send a second request into the same redirect.
+            throw MCPError.redirectRejected(destination: destination, reason: reason)
         } catch let error as MCPError {
             // Recorded here, at the moment the era is actually decided. Without it, a modern
             // server that corrected us leaves no trace: the connection works, and nothing says
