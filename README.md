@@ -118,6 +118,14 @@ let transport = HTTPSSETransport(
 )
 ```
 
+### Redirects
+
+`HTTPSSETransport` and `StreamableHTTPTransport` follow a redirect only to the origin of the URL
+they were configured with — the same scheme, host and port. A redirect anywhere else, including
+`https` → `http`, is not followed: nothing is sent to the destination, and the request fails with
+`MCPError.redirectRejected(destination:reason:)`. `WebSocketTransport` never follows a redirect
+of its upgrade request. If a server has moved, configure the URL it moved to.
+
 ### Self-signed and private-CA servers
 
 Every network transport takes a `serverTrust:`. It defaults to `.system`, the platform's root
@@ -256,6 +264,7 @@ do {
     case .transportClosed: print("Connection closed unexpectedly")
     case .processSpawnFailed(let reason): print("Subprocess failed: \(reason)")
     case .endpointRejected(let endpoint, let reason): print("Refused endpoint on \(endpoint): \(reason)")
+    case .redirectRejected(let destination, let reason): print("Refused redirect to \(destination): \(reason)")
     }
 }
 ```

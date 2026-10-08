@@ -277,3 +277,44 @@ func describeEndpointRejection(_ error: MCPError) -> String {
 A server that deliberately serves its message endpoint from another origin is not supported
 by the legacy HTTP+SSE transport. Use ``StreamableHTTPTransport``, which posts only to the URL
 it was given.
+
+## After 0.14.0: cross-origin redirects are not followed, and `MCPError` gains `redirectRejected`
+
+Two changes, one cause. ``StreamableHTTPTransport`` and ``HTTPSSETransport`` used to follow
+a redirect wherever it pointed. They now follow one only to the origin of the URL they were
+configured with — the same scheme, host and port.
+
+**If your server redirects within its own origin** — `/mcp` to `/mcp/`, say — nothing changes.
+
+**If it redirects to another origin**, the request now fails with
+``MCPError/redirectRejected(destination:reason:)`` where it used to be repeated at the new
+address. That includes `http://` to `https://` on the same host. Configure the transport with
+the URL the server redirects *to*; `destination` in the error is its origin:
+
+```swift
+func describeRedirectRejection(_ error: MCPError) -> String {
+    switch error {
+    case .redirectRejected(let destination, let reason):
+        return "The server redirected to \(destination), which was not followed: \(reason)."
+    default:
+        return String(describing: error)
+    }
+}
+```
+
+There is no option that restores the old behaviour.
+
+``MCPError/redirectRejected(destination:reason:)`` is a new case on a public enum, so a
+`switch` over `MCPError` with no `default` no longer compiles until it handles it.
+
+Two smaller things a caller could notice:
+
+- **Error text.** ``MCPError/requestFailed(code:message:data:)`` from a failed POST names the
+  endpoint by origin and path — `HTTP 500 from POST to https://mcp.example.com/messages` —
+  where it used to include the query. Code that parsed a session id out of that message has
+  nothing to parse; code that only logged it is unaffected.
+  ``MCPOAuthError/metadataNotFound(url:status:)`` likewise carries the URL without userinfo
+  or query.
+- **A provider that returns `nil`.** With an `authorization:` provider that returns `nil`, a
+  static `Authorization` in `headers` is now left off the Streamable HTTP server stream's
+  `GET`, as it already was off every `POST`.

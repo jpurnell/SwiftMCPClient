@@ -6,6 +6,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **A redirect could send a request — custom headers, session id and body — to any origin,
+  and from `https` to `http` (CWE-200, CWE-522, CWE-319).** `StreamableHTTPTransport` and
+  `HTTPSSETransport` made their requests on an `AsyncHTTPClient` left at its default: follow up
+  to five redirects, wherever they point. Across origins that client removes four headers —
+  `Authorization`, `Cookie`, `Origin`, `Proxy-Authorization` — and nothing else. So a server
+  answering `3xx` with a `Location` on another host or another port — over plaintext
+  included — received, measured on the wire between two loopback servers:
+
+  | Request | `301` / `302` | `303` | `307` / `308` |
+  |---|---|---|---|
+  | HTTP+SSE stream `GET` | `GET` + static headers | same | same |
+  | HTTP+SSE `POST` | `GET` + static headers | same | `POST` + static headers + **body** |
+  | Streamable HTTP first `POST` | `GET` + static headers | same | `POST` + static headers + **body** |
+  | Streamable HTTP later `POST` | `GET` + static headers + `Mcp-Session-Id` | same | `POST` + static headers + `Mcp-Session-Id` + **body** |
+  | Streamable HTTP server-stream `GET` | `GET` + static headers + `Mcp-Session-Id` + `MCP-Protocol-Version` | same | same |
+  | Streamable HTTP resumption `GET` | `GET` + static headers + `Mcp-Session-Id` + `Last-Event-ID` | same | same |
+  | Streamable HTTP `DELETE` | `DELETE` + static headers + `Mcp-Session-Id` | `GET` + the same | `DELETE` + the same |
+
+  "Static headers" is everything passed in `headers:` other than `Authorization` and `Cookie`
+  — an `X-API-Key`, for instance. The `authorization:` provider's token never crossed, and
+  neither did a static `Authorization`. An `https` server redirecting to an `http` one was
+  followed like any other, which put the same things on the network in the clear.
+
+  **Now:** a redirect is followed only when its destination has the **same scheme, host
+  (case-insensitive) and effective port** as the URL the transport was configured with — the
+  comparison 0.14.0 introduced for the SSE `endpoint` event, and the same code
+  (`HTTPOrigin.resolve`). For anything else every cell above is *nothing*: no request is made
+  to the destination at all. The operation fails with the new
+  `MCPError.redirectRejected(destination:reason:)`, the refusal is logged at error level
+  naming the destination's origin only, and it is not retried — `HTTPSSETransport.connect()`
+  does not loop on it, the Streamable HTTP server stream stops instead of reconnecting, and
+  `MCPConnectionFactory` does not fall back to a second handshake through the same redirect.
+
+  `WebSocketTransport` was checked and needed no change here: `WebSocketKit` sends one upgrade
+  request and fails on any answer but `101`. That is now pinned by a wire test for all five
+  redirect statuses.
+
+  The TypeScript and Python reference clients restrict redirects to the request's origin too
+  (`fetchWithinOrigin`, `stream_within_origin`). This is stricter than both in one respect:
+  they treat `http` → `https` on the same host and default ports as staying within the
+  origin, and this does not.
+
+### Changed
+- **Cross-origin redirects are no longer followed.** A deployment that answered the configured
+  URL with a redirect to another host or port — or from `http://` to `https://` — worked
+  before and fails now with `MCPError.redirectRejected`. Configure the transport with the URL
+  the server redirects to; the error's `destination` is its origin. There is no opt-out and no
+  allow-list: no deployment was found that needs one.
+- **Same-origin redirects are followed by the transports themselves** rather than by
+  `AsyncHTTPClient`, whose following is now switched off for the transports' client. The rules
+  are that client's, kept: `301`/`302`/`303`/`307`/`308`, at most five, loops refused, `303`
+  (and `301`/`302` for a `POST`) repeated as a `GET` without the body, `307`/`308` repeated as
+  sent. Three differences: a `304` or `305` carrying a `Location` is no longer treated as a
+  redirect; `POST /x` → `303` → `/x` is no longer mistaken for a loop; and the
+  `authorization:` provider is asked again for each redirected request instead of the first
+  request's token being reused.
+- **A `Location` carrying userinfo is refused** even on the configured origin, as an
+  `endpoint` carrying userinfo already was.
+- With an `authorization:` provider that returns `nil`, a static `Authorization` in `headers`
+  is now left off the Streamable HTTP server stream's `GET` too. It was already left off every
+  `POST`; the `GET` sent it.
+
+### Added
+- **`MCPError.redirectRejected(destination:reason:)`.** A new case on a public enum, so an
+  exhaustive `switch` over `MCPError` needs one more arm. `destination` is an origin only
+  (`scheme://host[:port]`) and safe to log. A separate case from `endpointRejected` because the
+  remedy differs: a cross-origin `endpoint` is the server misdescribing itself, while a
+  cross-origin redirect is usually a server that moved, and the fix is the configured URL.
+
+### Fixed
+- **A failed POST put the session id in the error (CWE-532).** `send(_:)`'s
+  `MCPError.requestFailed` message was `HTTP 500 from POST to ` followed by the whole request
+  URL. A legacy HTTP+SSE endpoint is usually `/messages?sessionId=…`, so the session id went
+  wherever the error went — a log, an alert, a bug report. On `StreamableHTTPTransport` the
+  same message carried the configured URL's query, which is where a key ends up when a server
+  documents `?api_key=…`. Both now name the endpoint by origin and path only, through one
+  function (`HTTPOrigin.redacted`) that removes query, fragment and userinfo.
+- **Three more places a URL or a header reached error text**, found by reading every
+  interpolation in the transports and the OAuth code:
+  - An `endpoint` event that did not parse was quoted back in
+    `connectionFailed("Invalid endpoint URL: …")`. It is no longer quoted.
+  - `WebSocketTransport.connect()` reported a refused upgrade with `WebSocketKit`'s
+    description of it, which prints the response head — every header the server sent,
+    `Location` and `Set-Cookie` included. It now reports the status code.
+  - `MCPOAuthError.metadataNotFound(url:status:)` carried the discovery URL with any userinfo
+    the server URL had, and the matching debug log line printed it. Both are redacted.
+- **`HTTPSSETransport` refused every `endpoint` when the configured URL itself carried
+  userinfo.** A relative endpoint inherits it, and inherited userinfo was mistaken for
+  userinfo the server had supplied. What the caller wrote is now told apart from what the
+  server adds.
+
+### Tests
+- `TransportRedirectWireTests` — two loopback servers, every request each HTTP transport makes
+  × `301`/`302`/`303`/`307`/`308`, asserting on what the *second* server received; the same
+  with an `authorization:` provider; four spellings of "elsewhere"; an HTTPS first server
+  redirecting to a plaintext second one; a chain that leaves and returns; loops and the hop
+  limit; same-origin redirects still followed with the right method, headers and body, and
+  still streaming; no retry.
+- `HTTPOriginTests` — the decision function for the destinations loopback cannot be
+  (look-alike hosts, `https` → `http` on one host), the request rewrite table, and redaction.
+- `TransportErrorRedactionTests` — a failing request per site, with every rendering of the
+  error searched for the value that must not be in it.
+- 0.14.0's `redirectDoesNotForwardAuthorization` pinned `AsyncHTTPClient` following a
+  cross-origin `307` without `Authorization`. It now asserts that the redirect is refused and
+  the second server hears nothing.
+
 ## [0.14.0] — 2026-10-08
 
 ### Security

@@ -172,16 +172,76 @@ endpoint genuinely live on different origins needs to be fronted by one.
 
 ## Redirects
 
-Both HTTP transports follow redirects, up to five, because `AsyncHTTPClient`
-does by default. When a redirect leaves the origin of the request, the
-`Authorization`, `Cookie`, `Origin` and `Proxy-Authorization` headers are
-removed before the request is repeated — so a bearer token is not carried to
-another host by a redirect.
+A redirect is a server saying "send that somewhere else", and the request it
+is talking about carries your headers, your session id and your message. Both
+HTTP transports follow one only when the destination is on the **origin of the
+URL you configured** — the same scheme, host and port, which is the comparison
+the `endpoint` event is held to, made by the same code.
 
-Two things *are* carried: any other header passed in `headers`, and, for a
-`307` or `308`, the request body. If a secret travels in a custom header — an
-`X-API-Key`, say — treat a server able to redirect as able to read it, and
-prefer `Authorization` for credentials.
+Anything else is not followed. *Nothing* is sent to the destination: not the
+request with its credentials removed, not a bare `GET`. The call that met the
+redirect fails with ``MCPError/redirectRejected(destination:reason:)``, the
+refusal is logged at error level naming the destination's origin, and it is not
+retried — not by ``HTTPSSETransport``'s reconnect loop, and not by the
+Streamable HTTP server stream, which stops instead of backing off into the same
+answer.
+
+| `Location`, for a transport at `https://mcp.example.com/mcp` | |
+|---|---|
+| `/v2/mcp` | followed — a path cannot leave the origin |
+| `https://mcp.example.com/v2/mcp` | followed — same origin |
+| `https://MCP.Example.com:443/v2/mcp` | followed — host case and the default port do not matter |
+| `https://other.example/mcp` | refused — another host |
+| `//other.example/mcp` | refused — another host; this is not a path |
+| `https://mcp.example.com:8443/mcp` | refused — another port |
+| `http://mcp.example.com/mcp` | refused — a downgrade to plaintext |
+| `https://mcp.example.com.other.example/mcp` | refused — another host |
+| `https://user:pw@mcp.example.com/mcp` | refused — userinfo |
+
+The reverse of the downgrade is refused too: a transport configured with
+`http://` that is redirected to `https://` is told so, and the fix is to
+configure `https://` — by then the first request has already crossed the
+network in the clear.
+
+This applies to every request the transports make:
+
+| Request | Sent to another origin on a redirect |
+|---|---|
+| ``HTTPSSETransport`` — the stream's `GET`, including reconnects | nothing |
+| ``HTTPSSETransport`` — each `POST` | nothing |
+| ``StreamableHTTPTransport`` — each `POST` | nothing |
+| ``StreamableHTTPTransport`` — the server stream's `GET` | nothing |
+| ``StreamableHTTPTransport`` — a resumption `GET` (`Last-Event-ID`) | nothing |
+| ``StreamableHTTPTransport`` — the closing `DELETE` | nothing |
+| ``WebSocketTransport`` — the upgrade `GET` | nothing — it is never redirected at all |
+
+Through 0.14.0 each of the HTTP rows was "the request, every header in
+`headers` except `Authorization` and `Cookie`, `Mcp-Session-Id`,
+`MCP-Protocol-Version`, `Last-Event-ID`, and for a `307` or `308` the JSON-RPC
+body" — to any host, and from `https` to `http`.
+
+### Within the origin
+
+A same-origin redirect is followed as it always was:
+
+- `301`, `302`, `303`, `307` and `308` are redirects. Up to five are followed
+  for one request; a sixth, or a loop, fails it with
+  ``MCPError/connectionFailed(reason:)``.
+- `307` and `308` repeat the request — method, headers and body.
+- `303` repeats it as a `GET` with no body. So do `301` and `302` **for a
+  `POST`**, which is what browsers and `AsyncHTTPClient` do and almost never
+  what an MCP server wants: the JSON-RPC message is dropped. A server that
+  moves its endpoint should answer `307` or `308`.
+- Every header goes with it, and the `authorization:` provider is asked again
+  for each request, so a redirected request carries a current token.
+- A redirected stream still streams.
+
+A `Location` that will not parse is not followed and not refused: the `3xx` is
+reported as the failed request it is.
+
+There is no option to follow redirects to other origins, and no list of
+additional origins to allow. If a server has moved, point the transport at
+where it is.
 
 ## Self-Signed and Private-CA Servers
 

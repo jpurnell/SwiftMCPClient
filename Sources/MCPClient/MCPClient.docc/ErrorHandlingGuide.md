@@ -208,6 +208,19 @@ the server can fix that. A cross-origin redirect is very often a server that
 moved, or one you reached over `http` that wants `https` — and the fix is the
 URL you configured.
 
+### What an error says about a URL
+
+A message that names a URL names its origin and path, never its query, fragment
+or userinfo. A legacy HTTP+SSE endpoint is usually
+`/messages?sessionId=…`, and a failed POST to it reports
+`HTTP 500 from POST to https://mcp.example.com/messages`. The same holds for
+the URL you configured, for ``MCPOAuthError/metadataNotFound(url:status:)``,
+and for a WebSocket upgrade the server refuses, which reports the status and
+none of the response's headers.
+
+The path is kept. If your server puts a secret in the *path* — `/mcp/<key>/sse`
+— it will appear in errors and logs; put it in a header instead.
+
 ## Best Practices
 
 ### Use exhaustive switch for robust handling
