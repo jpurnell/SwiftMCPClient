@@ -251,3 +251,29 @@ func connectWithSuppliedCertificate() throws {
 The certificate must name the host in the URL as a subject alternative name;
 that check was skipped before and is not skippable now. See
 <doc:TransportGuide> for the details.
+
+## Migrating to 0.14.0: `MCPError` gains `endpointRejected`
+
+``MCPError`` has a new case, ``MCPError/endpointRejected(endpoint:reason:)``. A `switch` over
+`MCPError` with no `default` no longer compiles until it handles the case.
+
+It is thrown by ``HTTPSSETransport`` when the server's `endpoint` event names a destination
+off the origin of the URL the transport was given — another host, another port, or `http` for
+an `https` stream. Before 0.14.0 the transport would have sent every message there, with the
+`Authorization` header attached. Nothing is sent now, and the connection is not retried: the
+server will say the same thing again.
+
+```swift
+func describeEndpointRejection(_ error: MCPError) -> String {
+    switch error {
+    case .endpointRejected(let endpoint, let reason):
+        return "The server asked for messages to be sent to \(endpoint): \(reason)."
+    default:
+        return String(describing: error)
+    }
+}
+```
+
+A server that deliberately serves its message endpoint from another origin is not supported
+by the legacy HTTP+SSE transport. Use ``StreamableHTTPTransport``, which posts only to the URL
+it was given.
