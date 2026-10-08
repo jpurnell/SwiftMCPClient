@@ -21,6 +21,13 @@ import NIOPosix
 /// let info = try await client.initialize(clientName: "my-app", clientVersion: "1.0")
 /// ```
 ///
+/// ## Redirects
+///
+/// The upgrade request is never redirected. `WebSocketKit` sends one `GET` and treats any
+/// answer but `101 Switching Protocols` as a failed upgrade, so a `3xx` fails ``connect()``
+/// with ``MCPError/connectionFailed(reason:)`` naming the status, and nothing is sent to
+/// wherever its `Location` pointed.
+///
 /// ## Reconnection
 ///
 /// If the WebSocket connection drops, create a new transport instance —
@@ -121,8 +128,25 @@ public actor WebSocketTransport: MCPTransport {
             // silent: best-effort cleanup after failed connect
             try? await group.shutdownGracefully()
             eventLoopGroup = nil
-            throw MCPError.connectionFailed(reason: error.localizedDescription)
+            throw MCPError.connectionFailed(reason: Self.describe(connectFailure: error))
         }
+    }
+
+    /// What a failed connect may say about itself.
+    ///
+    /// `WebSocketKit` describes a refused upgrade by printing the whole response head: the
+    /// status, and every header the server sent with it — a `Location`, a `Set-Cookie`,
+    /// whatever it chose. That text is the server's, and it has no business in an error the
+    /// caller will log. The status is the part that says what happened, so the status is
+    /// what is kept.
+    ///
+    /// - Parameter error: What `WebSocket.connect` failed with.
+    /// - Returns: A description that quotes nothing the server sent but its status code.
+    static func describe(connectFailure error: any Error) -> String {
+        if case .invalidResponseStatus(let head) = error as? WebSocketClient.Error {
+            return "The server answered the WebSocket upgrade with HTTP \(head.status.code)"
+        }
+        return error.localizedDescription
     }
 
     /// Close the WebSocket and shut down the event loop.

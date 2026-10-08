@@ -415,8 +415,9 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Post a JSON-RPC message to the MCP endpoint and enqueue the response.
     ///
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
-    ///   success; ``MCPError/redirectRejected(destination:reason:)`` if the server redirects
-    ///   the POST off the configured origin.
+    ///   success, naming the endpoint by origin and path only — never its query;
+    ///   ``MCPError/redirectRejected(destination:reason:)`` if the server redirects the POST
+    ///   off the configured origin.
     public func send(_ data: Data) async throws {
         guard let client = httpClient, isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -452,7 +453,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         guard (200...299).contains(response.status.code) else {
             throw MCPError.requestFailed(
                 code: Int(response.status.code),
-                message: "HTTP \(response.status.code) from POST to \(url.absoluteString)",
+                message: "HTTP \(response.status.code) from POST to \(HTTPOrigin.redacted(url))",
                 data: nil
             )
         }

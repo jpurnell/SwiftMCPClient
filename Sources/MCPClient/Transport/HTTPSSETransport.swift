@@ -252,8 +252,9 @@ public actor HTTPSSETransport: MCPTransport {
     /// Post a JSON-RPC message to the server's endpoint URL.
     ///
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
-    ///   success; ``MCPError/redirectRejected(destination:reason:)`` if the server redirects
-    ///   the POST off the configured origin.
+    ///   success, naming the endpoint by origin and path only — its query, which is usually
+    ///   the session id, is left out; ``MCPError/redirectRejected(destination:reason:)`` if
+    ///   the server redirects the POST off the configured origin.
     public func send(_ data: Data) async throws {
         guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -272,7 +273,7 @@ public actor HTTPSSETransport: MCPTransport {
         guard (200...299).contains(response.status.code) else {
             throw MCPError.requestFailed(
                 code: Int(response.status.code),
-                message: "HTTP \(response.status.code) from POST to \(endpointURL.absoluteString)",
+                message: "HTTP \(response.status.code) from POST to \(HTTPOrigin.redacted(endpointURL))",
                 data: nil
             )
         }
@@ -453,7 +454,9 @@ public actor HTTPSSETransport: MCPTransport {
         case .sameOrigin(let endpoint):
             return endpoint
         case .notAURL:
-            throw MCPError.connectionFailed(reason: "Invalid endpoint URL: \(raw)")
+            // Without the value. What a server sent that would not parse is still what a
+            // server sent, and an endpoint's query is usually the session id.
+            throw MCPError.connectionFailed(reason: "The server's endpoint event is not a usable URL")
         case .carriesUserinfo(let named):
             throw MCPError.endpointRejected(
                 endpoint: named,

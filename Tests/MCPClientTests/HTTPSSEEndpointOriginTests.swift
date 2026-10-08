@@ -160,7 +160,7 @@ struct HTTPSSEEndpointResolutionTests {
     @Test("An unparseable endpoint is still a failed connection")
     func unparseableIsConnectionFailed() throws {
         let stream = try requireURL(Self.stream)
-        #expect(throws: MCPError.connectionFailed(reason: "Invalid endpoint URL: ")) {
+        #expect(throws: MCPError.connectionFailed(reason: "The server's endpoint event is not a usable URL")) {
             _ = try HTTPSSETransport.resolveEndpoint("", against: stream)
         }
     }

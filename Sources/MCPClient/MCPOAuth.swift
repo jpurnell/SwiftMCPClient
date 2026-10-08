@@ -37,6 +37,9 @@ public enum MCPOAuthError: Error, Equatable, Sendable {
     /// "not found" without saying where is not actionable.
     ///
     /// A `status` of `0` means no candidate URL could be formed from the server URL at all.
+    ///
+    /// The URL is where the client looked, without userinfo, query or fragment — an error is
+    /// printed and logged, and those are the parts of a URL that carry secrets.
     case metadataNotFound(url: URL, status: Int)
 }
 
@@ -125,15 +128,33 @@ public struct MCPOAuthSetup: Sendable {
     /// - Parameters:
     ///   - data: The body as received.
     ///   - response: The response, if the transport produced one.
-    ///   - url: The URL requested, carried into the error so the caller knows where we looked.
+    ///   - url: The URL requested, carried into the error so the caller knows where we looked
+    ///     — by origin and path only.
     /// - Returns: `data`, unchanged, when the status is a success or absent.
     /// - Throws: ``MCPOAuthError/metadataNotFound(url:status:)`` for any non-2xx status.
     public static func validate(data: Data, response: URLResponse?, url: URL) throws -> Data {
         guard let http = response as? HTTPURLResponse else { return data }
         guard (200...299).contains(http.statusCode) else {
-            throw MCPOAuthError.metadataNotFound(url: url, status: http.statusCode)
+            throw notFound(at: url, status: http.statusCode)
         }
         return data
+    }
+
+    /// The error for a metadata document that was not where it was looked for.
+    ///
+    /// The one place ``MCPOAuthError/metadataNotFound(url:status:)`` is made, so that the URL
+    /// it carries has always been through ``HTTPOrigin/redactedURL(_:)``. The server URL is
+    /// the caller's and can hold userinfo or a key in its query; the error is a public value
+    /// a caller will print.
+    ///
+    /// - Parameters:
+    ///   - url: Where the client looked.
+    ///   - status: The HTTP status, or `0` if nothing could be requested.
+    /// - Returns: The error, naming `url` without userinfo, query or fragment.
+    static func notFound(at url: URL, status: Int) -> MCPOAuthError {
+        // A URL that cannot be taken apart is named as the root, never as itself: the
+        // fallback must not be the thing the redaction exists to keep out.
+        .metadataNotFound(url: HTTPOrigin.redactedURL(url) ?? URL(fileURLWithPath: "/"), status: status)
     }
 
     /// The candidate metadata URLs for a server, most specific first.
@@ -230,7 +251,7 @@ public struct MCPOAuthSetup: Sendable {
     public func protectedResourceMetadata(server: URL) async throws -> ProtectedResourceMetadata {
         let candidates = Self.protectedResourceURLs(server: server)
         guard !candidates.isEmpty else {
-            throw MCPOAuthError.metadataNotFound(url: server, status: 0)
+            throw Self.notFound(at: server, status: 0)
         }
 
         var lastError: (any Error)?
@@ -243,11 +264,11 @@ public struct MCPOAuthSetup: Sendable {
                 // publish only at the origin root. The last failure is rethrown below if
                 // every candidate is exhausted.
                 let logger = Logger(label: "MCPClient.MCPOAuth")
-                // logging: candidate URL and error needed to diagnose a discovery failure
-                logger.debug("protected-resource metadata not at \(candidate): \(error.localizedDescription)")
+                // logging: swift-log has no privacy annotations; the candidate by origin and path only — no userinfo or query
+                logger.debug("protected-resource metadata not at \(HTTPOrigin.redacted(candidate)): \(error.localizedDescription)")
                 lastError = error
             }
         }
-        throw lastError ?? MCPOAuthError.metadataNotFound(url: server, status: 0)
+        throw lastError ?? Self.notFound(at: server, status: 0)
     }
 }
