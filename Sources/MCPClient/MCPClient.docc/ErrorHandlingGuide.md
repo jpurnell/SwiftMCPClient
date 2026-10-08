@@ -48,6 +48,15 @@ func handleConnectionFailure() async throws {
 - SSL/TLS certificate issues
 - Protocol version mismatch (server returned incompatible version)
 
+The `reason` for a network failure is written by the transport, not passed on
+from the networking library: `Could not reach https://mcp.example.com: `
+followed by the kind of failure — `connection refused`,
+`the connection attempt timed out`, `no response before the deadline`,
+`the server closed the connection`, `the host name could not be resolved`,
+`the TLS handshake failed…`, `the response was not valid HTTP`. A failure it
+does not recognise is named by its Swift type. The server is named by origin
+only; see <doc:ErrorHandlingGuide#What-an-error-says-about-a-URL>.
+
 ### requestFailed
 
 Thrown when the server returns a JSON-RPC error response.
@@ -178,10 +187,25 @@ userinfo, so it is safe to log.
 ### redirectRejected
 
 Thrown by ``StreamableHTTPTransport`` and ``HTTPSSETransport`` when the server
-answers a request with a redirect to another origin — another host or port, or
-`http` where the transport was configured with `https`. The redirect was not
-followed and nothing was sent to its destination: no header, no session id, no
-body.
+answers a request with a redirect they will not follow. Nothing further was
+sent — no header, no session id, no body. There are three reasons, and
+`reason` says which:
+
+- **Another origin** — another host or port, `http` where the transport was
+  configured with `https`, or `https` where it was configured with `http`. For
+  that last one the reason says the request has already been sent in the
+  clear, and names the `https` origin to configure.
+- **A redirect that cannot carry the request** — a `301`, `302` or `303`
+  answering a `POST`. Following it would repeat the `POST` as a `GET` with no
+  body and drop the JSON-RPC message; the reason names `307` and `308`, the
+  statuses that redirect a `POST` as it was sent. `destination` is the
+  configured origin itself.
+- **A loop, or more than five redirects in a row.** Also on the configured
+  origin, and also not something a retry changes.
+
+The OAuth requests made by ``MCPOAuthSession`` and ``MCPOAuthSetup`` throw it
+too: a metadata fetch redirected off its origin, or a client registration or
+token request redirected at all.
 
 ```swift
 func handleRejectedRedirect() async throws {
@@ -210,16 +234,42 @@ URL you configured.
 
 ### What an error says about a URL
 
-A message that names a URL names its origin and path, never its query, fragment
-or userinfo. A legacy HTTP+SSE endpoint is usually
-`/messages?sessionId=…`, and a failed POST to it reports
-`HTTP 500 from POST to https://mcp.example.com/messages`. The same holds for
-the URL you configured, for ``MCPOAuthError/metadataNotFound(url:status:)``,
-and for a WebSocket upgrade the server refuses, which reports the status and
-none of the response's headers.
+An error message and a log line outlive the request, so a URL reaches them only
+through one function, and what it keeps is this:
 
-The path is kept. If your server puts a secret in the *path* — `/mcp/<key>/sse`
-— it will appear in errors and logs; put it in a header instead.
+| Part | In error and log text |
+|---|---|
+| Scheme, host, port | kept — which server it was is the point |
+| Userinfo (`user:password@`) | removed |
+| Query (`?sessionId=…`, `?api_key=…`) | removed, whole |
+| Fragment | removed |
+| Path | kept segment by segment, **except** a segment that could be a credential, which becomes `-redacted-` |
+
+So a failed POST to `/messages?sessionId=…` reports
+`HTTP 500 from POST to https://mcp.example.com/messages`, and one to
+`/mcp/9f8e7d6c5b4a39281706f5e4d3c2b1a0/sse` reports
+`…/mcp/-redacted-/sse`.
+
+A path segment is kept only if it looks like an ordinary one — at most 32
+characters of ASCII letters, digits, `-`, `_`, `.` and `~`, made of short words
+(`messages`, `getToolsList`), small numbers (`42`, `2025`) and words with a
+version (`v1`, `oauth2`), such as `.well-known`, `oauth-protected-resource` or
+`2025-06-18`. Everything else is redacted: a UUID, a run of hex, a JWT,
+anything base64, a prefixed key like `sk-live-abc123`, a long number, any free
+mix of letters and digits. It errs towards redacting.
+
+Two things it cannot do. A credential that *is* a couple of short words —
+`/mcp/correct-horse/sse` — is indistinguishable from a path and is kept. And a
+key in the host name is part of the origin, and is kept. If your server's URL
+must stay out of logs entirely, carry the key in a header.
+
+A URL the *server* chose — a redirect's `Location`, an `endpoint` event — is
+named by origin alone, with no path at all.
+
+The same holds for ``MCPOAuthError/metadataNotFound(url:status:)``, for a
+WebSocket upgrade the server refuses, which reports the status and none of the
+response's headers, and for every network failure, which names the kind of
+failure and the origin and never quotes the underlying error.
 
 ## Best Practices
 

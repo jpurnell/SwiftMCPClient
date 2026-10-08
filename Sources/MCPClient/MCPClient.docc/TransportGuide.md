@@ -81,7 +81,48 @@ func connectWithOAuth(session: MCPOAuthSession) async throws {
 
 The provider is asked before every request, and again after a `401` — that
 second call is what recovers from a token the server has rejected before it
-expired locally, which no clock on this side can predict.
+expired locally, which no clock on this side can predict. That includes the
+`DELETE` that ends the session; see
+<doc:TransportGuide#Ending-a-Streamable-HTTP-Session>.
+
+### Where the OAuth requests themselves go
+
+``MCPOAuthSession`` makes requests of its own — discovery, registration, the
+token exchange, every refresh — and they are held to their origin as the
+transports' are:
+
+| Request | A redirect |
+|---|---|
+| Protected-resource and authorization-server metadata (`GET`) | followed only within the origin of the URL being fetched, at most five times |
+| Dynamic client registration (`POST`) | never followed |
+| Token exchange, refresh, revocation (`POST`) | never followed |
+
+A metadata document is public, but it is only worth anything from the server
+it describes: RFC 8414 §3 and RFC 9728 §3 put it at a well-known path on that
+server's own host, and RFC 8414 §3.3 forbids using one whose `issuer` is not
+the issuer it was fetched for — which is checked, and fails with
+``MCPOAuthError/issuerMismatch(expected:found:)``. The `POST`s carry the
+authorization code and its PKCE verifier, the refresh token and the client
+secret; a `307` or `308` would re-send all of it, so no redirect from those
+endpoints is followed, on any status, even within the origin.
+
+A redirect that is not followed sends nothing to its destination and throws
+``MCPError/redirectRejected(destination:reason:)``.
+
+This is true of the defaults — ``MCPOAuthSetup/fetchMetadata(from:)`` and
+``MCPOAuthTokenTransport``. A `fetch` or a `tokenTransport` you supply yourself
+replaces them, and decides for itself what a redirect does:
+
+```swift
+func setupWithLoggedFetch() -> MCPOAuthSetup {
+    // A fetch of your own that keeps the default's redirect rule by calling it.
+    MCPOAuthSetup(fetch: { url in
+        let document = try await MCPOAuthSetup.fetchMetadata(from: url)
+        print("fetched \(document.count) bytes of metadata")
+        return document
+    })
+}
+```
 
 ### What survives a drop
 
@@ -198,10 +239,13 @@ answer.
 | `https://mcp.example.com.other.example/mcp` | refused — another host |
 | `https://user:pw@mcp.example.com/mcp` | refused — userinfo |
 
-The reverse of the downgrade is refused too: a transport configured with
-`http://` that is redirected to `https://` is told so, and the fix is to
-configure `https://` — by then the first request has already crossed the
-network in the clear.
+The reverse of the downgrade is refused too. A transport configured with
+`http://` that is redirected to `https://` on the same host does not follow —
+the TypeScript and Python reference clients both do — because by the time the
+redirect arrives the request that drew it has already crossed the network in
+the clear, headers and body, and following quietly would let every later
+request do the same. The error's reason says exactly that, and names the
+`https` origin to configure instead.
 
 This applies to every request the transports make:
 
@@ -222,18 +266,36 @@ body" — to any host, and from `https` to `http`.
 
 ### Within the origin
 
-A same-origin redirect is followed as it always was:
+On the configured origin a redirect is followed **only if it repeats the
+request as it was sent**:
 
-- `301`, `302`, `303`, `307` and `308` are redirects. Up to five are followed
-  for one request; a sixth, or a loop, fails it with
-  ``MCPError/connectionFailed(reason:)``.
-- `307` and `308` repeat the request — method, headers and body.
-- `303` repeats it as a `GET` with no body. So do `301` and `302` **for a
-  `POST`**, which is what browsers and `AsyncHTTPClient` do and almost never
-  what an MCP server wants: the JSON-RPC message is dropped. A server that
-  moves its endpoint should answer `307` or `308`.
-- Every header goes with it, and the `authorization:` provider is asked again
-  for each request, so a redirected request carries a current token.
+| Request | `301` / `302` | `303` | `307` / `308` |
+|---|---|---|---|
+| A `GET` — the HTTP+SSE stream, the server stream, a resumption | followed | followed | followed |
+| A `POST` — every JSON-RPC message | **refused** | **refused** | followed, with its body |
+| The closing `DELETE` | followed | **refused** | followed |
+
+The refused cells are the ones where a browser — and `AsyncHTTPClient`, which
+these transports used to leave this to — repeats the request as a `GET` with no
+body. For a JSON-RPC message that is not a redirect but a deletion: on
+Streamable HTTP the `GET` then opened a stream, `send(_:)` returned as though
+it had worked, and the caller waited for an answer to a message the server
+never received. It now fails at once with
+``MCPError/redirectRejected(destination:reason:)``, whose reason says the
+server answered a `POST` with a redirect that cannot carry it, and that `307`
+and `308` are the statuses that can. A server that moves its endpoint should
+answer with one of those.
+
+The rest:
+
+- Up to five redirects are followed for one request, within one deadline. A
+  sixth, or a loop, is refused with
+  ``MCPError/redirectRejected(destination:reason:)`` — not
+  ``MCPError/connectionFailed(reason:)``, because it is the server's
+  configuration and will be the same on the next attempt. Nothing retries it.
+- Every header goes with a followed redirect, and the `authorization:` provider
+  is asked again for each request, so a redirected request carries a current
+  token.
 - A redirected stream still streams.
 
 A `Location` that will not parse is not followed and not refused: the `3xx` is
@@ -242,6 +304,70 @@ reported as the failed request it is.
 There is no option to follow redirects to other origins, and no list of
 additional origins to allow. If a server has moved, point the transport at
 where it is.
+
+## Ending a Streamable HTTP Session
+
+``StreamableHTTPTransport/disconnect()`` sends `DELETE` with the session id.
+It is authenticated like every other request: the `authorization:` provider is
+asked for a current header — once, and without forcing a refresh — and that
+header goes on the `DELETE`, a redirected one included.
+
+Asking can mean a token refresh, and a refresh can stall. So the ask and the
+`DELETE` share one deadline, `connectionTimeout`, and `disconnect()` returns
+within it whether or not the provider does. If no credential arrives in time,
+or the provider throws, **no `DELETE` is sent**: an unauthenticated termination
+is the request a server refuses, so it is not sent at all, and the reason is
+logged at warning level. The server then expires the session on its own
+schedule. A provider that answers `nil` — not signed in — sends the `DELETE`
+with no `Authorization` header, as it does every other request.
+
+## WebSocket
+
+``WebSocketTransport`` makes one HTTP request, the upgrade, and that request is
+where everything it will ever say about who you are is said.
+
+- **The URL** must be `ws://` or `wss://`, read case-insensitively. Anything
+  else — `https://` included — fails ``WebSocketTransport/connect()`` before
+  anything is sent. (`WebSocketKit` on its own compares the scheme with the
+  exact string `wss`, so `WSS://` or `https://` was connected to as plaintext
+  on port 80 in a release build, and stopped a debug build on an assertion.)
+- **Credentials.** `headers` go on the upgrade. Pass `authorization:` to have a
+  provider asked for a current `Authorization` header first; its answer
+  replaces a static one, `nil` sends none, and a provider that throws fails
+  `connect()`. A `401` on the upgrade is retried once with a forced refresh,
+  as a `401` on a `POST` is on the HTTP transports.
+- **Time.** `connectionTimeout` (30 seconds unless you pass another) bounds the
+  upgrade. A server that accepts the connection and never answers — or hangs
+  up without answering, which `WebSocketKit` does not report — fails
+  `connect()` when it runs out, where it used to leave it waiting for ever.
+- **Redirects** are never followed: any answer but `101` fails the upgrade.
+
+```swift
+func connectSocketWithOAuth(session: MCPOAuthSession) async throws {
+    guard let url = URL(string: "wss://mcp.example.com/ws") else { return }
+    let transport = WebSocketTransport(
+        url: url,
+        authorization: { forcing in
+            try await session.authorizationHeader(forcingRefresh: forcing)
+        },
+        connectionTimeout: 15)
+    try await transport.connect()
+}
+```
+
+## Plaintext URLs
+
+None of the network transports refuses `http://` or `ws://`. That is how a
+server on loopback or a private network is reached, and ``ServerTrust`` — below
+— decides *which certificate* an `https://` or `wss://` server may present, not
+whether there is one. The rule is the same for all three: the scheme you
+configure is the scheme that is used, it is never upgraded or downgraded for
+you, and a redirect that would change it is refused.
+
+What all three do is warn. When a transport is configured with headers or an
+`authorization:` provider and its URL is `http://` or `ws://` to any host but
+this machine (`localhost`, `127.0.0.0/8`, `::1`), `connect()` logs one warning
+naming the origin: those credentials are about to cross a network unencrypted.
 
 ## Self-Signed and Private-CA Servers
 
@@ -310,7 +436,8 @@ constructed, before any transport exists. Nothing falls back to the system
 roots.
 
 A server that is refused surfaces as ``MCPError/connectionFailed(reason:)``
-from the first request. The HTTP transports retry a failed connection until
+from the first request, with a reason that says the TLS handshake failed and
+names the server's origin. The HTTP transports retry a failed connection until
 `connectionTimeout` elapses, so a refusal is reported after that long rather
 than at once.
 

@@ -49,6 +49,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   they treat `http` → `https` on the same host and default ports as staying within the
   origin, and this does not.
 
+- **OAuth requests followed redirects to any origin, carrying the authorization code, the
+  PKCE verifier, the refresh token and the client secret (CWE-200, CWE-522).** The transports
+  were held to their origin; the OAuth requests were not. `MCPOAuthSetup`'s metadata fetch and
+  `MCPOAuthSession`'s registration `POST` were made on `URLSession.shared`, and the token,
+  refresh and revocation requests inside `swift-oauth` (0.11.1, the version this package
+  resolves) on the same. `URLSession` follows a redirect wherever it points and, across
+  origins, removes `Authorization` and nothing else. Measured between two loopback servers,
+  the second received:
+
+  | Request | `301` / `302` / `303` | `307` / `308` |
+  |---|---|---|
+  | Metadata `GET` | the `GET`; **the document it served was accepted** | the same |
+  | Dynamic client registration `POST` | a `GET` | the `POST`, with the registration document |
+  | Token exchange, public client | a `GET` | the `POST`: **`code`, `code_verifier`** |
+  | Token exchange, `client_secret_post` | a `GET` | the `POST`: **`client_secret`, `code`, `code_verifier`** |
+  | Token exchange, `client_secret_basic` | a `GET` | the `POST`: **`code`, `code_verifier`** (not `Authorization`) |
+  | Refresh | a `GET` | the `POST`: **`refresh_token`** (and `client_secret` when posted) |
+
+  A custom header and a `Cookie` header crossed on every status. An `https` server redirecting
+  to an `http` one was followed the same way. That is Apple's Foundation. On Linux,
+  `swift-oauth`'s CI measured the reverse emphasis from swift-corelibs-foundation: the body
+  did not cross, but `Authorization: Basic <client_id:client_secret>` was delivered to the
+  other origin on all five statuses.
+
+  **Now** every OAuth request this package makes goes through one function (`OAuthHTTP`), and a
+  redirect is treated by what the request carries:
+
+  - **Metadata** follows a redirect only within the origin of the URL being fetched — same
+    scheme, host and port, by `HTTPOrigin.resolve`, at most five times. RFC 8414 §3 and
+    RFC 9728 §3 put the document on the issuer's or resource's own host, and §3.3 of each
+    forbids using one that names another; neither says what to do with a redirect, so it is
+    held to the origin the document is supposed to describe.
+  - **Registration, token exchange, refresh and revocation follow no redirect at all**, on
+    any status, not even within the origin. RFC 6749 §3.2 has the client `POST` to the token
+    endpoint; RFC 6749, RFC 7009 and RFC 7591 do not mention a redirect from these endpoints,
+    and RFC 9700 §4.12 describes what a `307` does to a `POST` carrying credentials.
+
+  Every cell above is now *nothing*. The request fails with
+  `MCPError.redirectRejected(destination:reason:)`, naming the destination by origin only.
+
+  This holds for the defaults. A `fetch` passed to `MCPOAuthSetup`, or a `tokenTransport`
+  passed to `MCPOAuthSession`, replaces them and decides for itself. `swift-oauth` has the
+  corresponding fix on its `main` (unreleased, after `1.0.0-beta.6`). This package does not
+  wait for it: it resolves `swift-oauth` 0.11.1 under `from: "0.11.1"`, a range no `1.0.0`
+  prerelease or release falls in, and the session's default token transport supplies its own
+  non-redirecting `URLSession` through the `session:` parameter 0.11.1 already has.
+- **An authorization server's metadata could name any issuer it liked (RFC 8414 §3.3).**
+  Endpoints in the document are held to the document's `issuer` — but the `issuer` was never
+  compared with the one the document had been fetched for. A document served for
+  `auth.example.com` that called itself `attacker.example`, with every endpoint there, was
+  self-consistent and was used. It is now refused with the new
+  `MCPOAuthError.issuerMismatch(expected:found:)` before anything in it is read. A single
+  trailing slash is the one difference tolerated.
+- **The session-ending `DELETE` was sent without the OAuth credential.** Every other
+  Streamable HTTP request asks the `authorization:` provider for a header; the `DELETE` in
+  `disconnect()` did not, so the termination of an OAuth session went out unauthenticated and
+  a server that checks refused it, leaving the session open until it expired. The provider is
+  now asked — once, without forcing a refresh, and for no longer than `connectionTimeout`,
+  which the `DELETE` then shares. If no credential arrives in time, or the provider throws,
+  **no `DELETE` is sent** rather than an unauthenticated one, and the reason is logged.
+- **`WebSocketTransport` connected in plaintext to a URL that asked for TLS.** `WebSocketKit`
+  chooses TLS by comparing the scheme with the exact string `wss` and only *asserts* that it is
+  `ws` or `wss`. So `WSS://host` — the same scheme — and `https://host` were connected to as
+  plaintext on port 80 in a release build, with the configured headers, and stopped a debug
+  build on that assertion. The transport now reads the scheme itself, case-insensitively, and
+  fails `connect()` for anything but `ws` and `wss` before anything is sent.
+- **A key in the URL's path was written to errors and logs (CWE-532).** Redaction removed the
+  query and userinfo and kept the path whole, so a deployment at `/mcp/<key>/sse` had its key
+  in every `requestFailed` message and log line that named the URL. A path segment that could
+  be a credential is now replaced with `-redacted-`: anything that is not short words, small
+  numbers and words-with-a-version in `[A-Za-z0-9._~-]`, at most 32 characters. A UUID, hex, a
+  JWT, base64, `sk-live-abc123`, a long number — all redacted; `mcp`, `sse`, `messages`, `v1`,
+  `.well-known`, `oauth-protected-resource`, `2025-06-18` — kept. **Not caught:** a key that is
+  a couple of short words, and a key in the host name.
+
 ### Changed
 - **Cross-origin redirects are no longer followed.** A deployment that answered the configured
   URL with a redirect to another host or port — or from `http://` to `https://` — worked
@@ -56,13 +131,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the server redirects to; the error's `destination` is its origin. There is no opt-out and no
   allow-list: no deployment was found that needs one.
 - **Same-origin redirects are followed by the transports themselves** rather than by
-  `AsyncHTTPClient`, whose following is now switched off for the transports' client. The rules
-  are that client's, kept: `301`/`302`/`303`/`307`/`308`, at most five, loops refused, `303`
-  (and `301`/`302` for a `POST`) repeated as a `GET` without the body, `307`/`308` repeated as
-  sent. Three differences: a `304` or `305` carrying a `Location` is no longer treated as a
-  redirect; `POST /x` → `303` → `/x` is no longer mistaken for a loop; and the
-  `authorization:` provider is asked again for each redirected request instead of the first
-  request's token being reused.
+  `AsyncHTTPClient`, whose following is now switched off for the transports' client. The five
+  statuses are redirects (`301`/`302`/`303`/`307`/`308`), at most five are followed, and
+  `307`/`308` repeat the request as sent. Differences from that client: a `304` or `305`
+  carrying a `Location` is no longer treated as a redirect; the `authorization:` provider is
+  asked again for each redirected request instead of the first request's token being reused;
+  and a redirect that would change the method is refused rather than followed (next entry).
+- **A `POST` answered `301`, `302` or `303` is refused instead of becoming a `GET`.** Those
+  statuses repeat a `POST` as a body-less `GET`, which the transports did — dropping the
+  JSON-RPC message. On Streamable HTTP the `GET` then opened a stream, `send(_:)` returned as
+  though it had worked, and the caller timed out waiting for an answer to a message the server
+  never received (through `MCPConnectionFactory`, `initialize` then waited with no timeout at
+  all). The redirect is now refused with `MCPError.redirectRejected`, whose reason says the
+  server answered a `POST` with a redirect that cannot carry it and that `307` and `308` are
+  the statuses that can. A `303` answering the closing `DELETE` is refused likewise. `GET`
+  requests — the HTTP+SSE stream, the server stream, a resumption — still follow all five
+  statuses within the origin. Both reference clients refuse these redirects too.
+- **A redirect loop, and a sixth redirect in a row, are `redirectRejected`** rather than
+  `connectionFailed`. They are the server's configuration and are the same on the next attempt,
+  so they are no longer the error `HTTPSSETransport.connect()`'s backoff loop retries — it
+  walked the same chain up to four times.
+- **`http` → `https` on the same host is still refused, and the error now says why.** Both
+  reference clients follow it. This does not: the request that drew the redirect has already
+  been sent in the clear, and following quietly would let every later request do the same. The
+  reason says so and names the `https` origin to configure.
+- **`connectionFailed` describes a network failure in this package's words**:
+  `Could not reach <origin>: <kind>` — connection refused, connection attempt timed out, no
+  response before the deadline, server closed the connection, host name not resolved, TLS
+  handshake failed, response not valid HTTP — decided from the error's type and case. It used
+  to carry the networking library's `localizedDescription`, which was the same
+  `HTTPClientError error 1` for three different failures. Nothing in the libraries' own
+  descriptions was found to carry a path, query, header or response body (each failure was
+  provoked and its text recorded), but one of them prints a source path from the build
+  machine, and none of that wording was this package's to promise. Code matching on `NIOSSL`
+  or `NWTLSError` in a reason matches nothing now.
+- **`WebSocketTransport.connect()` has a deadline** — 30 seconds, or `connectionTimeout`. A
+  server that accepted the connection and then said nothing, or hung up without answering the
+  upgrade, left `connect()` waiting for ever. A `401` on the upgrade is retried once with a
+  forced refresh when there is a provider. `send(_:)` reports a failed write as
+  `connectionFailed`, and refuses a payload that is not UTF-8 instead of sending an empty frame.
+- **`StreamableHTTPTransport.disconnect()` calls the `authorization:` provider** (see
+  Security), and so can take up to `connectionTimeout` longer when the provider stalls.
+- **OAuth network failures are `MCPError.connectionFailed`** naming the endpoint's origin,
+  where `URLError` — which carries the whole failing URL — used to surface.
+- **All three network transports log one warning** at `connect()` when headers or a provider
+  are configured and the URL is `http://` or `ws://` to a host other than this machine.
+  Plaintext is still permitted, on all three alike.
 - **A `Location` carrying userinfo is refused** even on the configured origin, as an
   `endpoint` carrying userinfo already was.
 - With an `authorization:` provider that returns `nil`, a static `Authorization` in `headers`
@@ -76,7 +190,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remedy differs: a cross-origin `endpoint` is the server misdescribing itself, while a
   cross-origin redirect is usually a server that moved, and the fix is the configured URL.
 
+- **`WebSocketTransport.init(url:headers:authorization:connectionTimeout:serverTrust:)`.** A
+  provider for the upgrade request's `Authorization` header, and a limit on `connect()`.
+  `authorization` has no default, which is what tells this initialiser from the existing one;
+  the existing one is unchanged.
+- **`MCPOAuthTokenTransport`** — the token transport `MCPOAuthSession` now defaults to: one that
+  follows no redirect. **`MCPOAuthSetup.fetchMetadata(from:)`** — the fetch `MCPOAuthSetup` now
+  defaults to: redirects within the document's origin only.
+- **`MCPOAuthError.issuerMismatch(expected:found:)`.** A new case on a public enum; an
+  exhaustive `switch` over `MCPOAuthError` needs one more arm.
+
 ### Fixed
+- **`MCPConnectionFactory` read one transport from two places, and lost the handshake's answer
+  in 2 of 33 full test runs measured.** Beginning a stateless session starts a dispatcher whose loop
+  waits in `transport.receive()`. When the server turned out to be handshake-era, the factory
+  made a *second* connection on the same transport and called `initialize`, which reads its
+  answer with a `receive()` of its own. Two readers, one response: when the first connection's
+  dispatcher was resumed with it, it was filed under an id nobody there was waiting for, and
+  `initialize` waited on — for ever, against a real transport, since that read has no timeout.
+  The handshake is now sent on the connection already made, through its dispatcher.
+  `beginStateless` likewise no longer starts a second dispatcher when a version is re-declared.
+- **A stateless connection's `disconnect()` did not disconnect its transport.**
+  `beginStateless` connected the transport without recording that it had, so `disconnect()`
+  skipped it — leaving an HTTP client that traps when it is deallocated.
 - **A failed POST put the session id in the error (CWE-532).** `send(_:)`'s
   `MCPError.requestFailed` message was `HTTP 500 from POST to ` followed by the whole request
   URL. A legacy HTTP+SSE endpoint is usually `/messages?sessionId=…`, so the session id went
@@ -109,6 +245,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (look-alike hosts, `https` → `http` on one host), the request rewrite table, and redaction.
 - `TransportErrorRedactionTests` — a failing request per site, with every rendering of the
   error searched for the value that must not be in it.
+- `TransportRedirectWireTests` again, cell by cell, after the method rule: the carried cells
+  are followed with method, headers and body intact; the dropped cells send nothing after the
+  redirect and fail with a reason naming `307` and `308`; loops and the hop limit are
+  `redirectRejected` and are walked once.
+- `MCPOAuthRedirectWireTests` — metadata, registration, token exchange (three client
+  authentication methods) and refresh × five statuses, asserting on the second server.
+- `StreamableHTTPTerminationTests` — the `DELETE` carries the provider's header; the provider
+  is asked exactly once, unforced; a provider that never answers, and ignores cancellation,
+  does not hang `disconnect()` and no `DELETE` is sent.
+- `WebSocketUpgradeWireTests` — the upgrade's headers, the provider, the `401` retry, and the
+  scheme in five spellings. `TransportFailureTests` — refused, silent, hang-up, not-HTTP and two
+  TLS failures against each transport, every rendering of the error searched for the path key,
+  the query, a header and the response.
+- **Two fixed waits are gone.** The negative assertions for the two background `GET`s waited
+  400 ms, and one test slept 2.6 s to outlast a backoff. `StreamableHTTPTransport` now records
+  why its server-stream loop ended (`serverStreamEnding`) and whether any response stream is
+  still being read, both internal, and the tests wait on those.
+- `ConnectionFactoryReaderTests` — a transport with one queue and room for one reader, which
+  made the factory's race fail every time instead of now and then.
 - 0.14.0's `redirectDoesNotForwardAuthorization` pinned `AsyncHTTPClient` following a
   cross-origin `307` without `Authorization`. It now asserts that the redirect is refused and
   the second server hears nothing.

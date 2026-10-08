@@ -121,10 +121,28 @@ let transport = HTTPSSETransport(
 ### Redirects
 
 `HTTPSSETransport` and `StreamableHTTPTransport` follow a redirect only to the origin of the URL
-they were configured with — the same scheme, host and port. A redirect anywhere else, including
-`https` → `http`, is not followed: nothing is sent to the destination, and the request fails with
-`MCPError.redirectRejected(destination:reason:)`. `WebSocketTransport` never follows a redirect
-of its upgrade request. If a server has moved, configure the URL it moved to.
+they were configured with — the same scheme, host and port — and only if it repeats the request
+as it was sent. A redirect anywhere else, including `https` → `http` and `http` → `https`, is not
+followed; nor is a `301`, `302` or `303` answering a `POST`, which would drop the JSON-RPC
+message (`307` and `308` are the statuses that redirect a `POST`); nor a loop, nor a sixth
+redirect in a row. Nothing further is sent, the request fails with
+`MCPError.redirectRejected(destination:reason:)`, and it is not retried. `WebSocketTransport`
+never follows a redirect of its upgrade request. If a server has moved, configure the URL it
+moved to.
+
+The OAuth requests `MCPOAuthSession` makes are held the same way: a metadata fetch follows a
+redirect only within its own origin, and client registration and token requests follow none.
+
+### Plaintext, and what errors say
+
+`http://` and `ws://` URLs are used as configured — they are how a local server is reached — and
+a warning is logged when headers or an `authorization:` provider are configured for a plaintext
+URL on another machine. `WebSocketTransport` accepts only `ws://` and `wss://`.
+
+Error and log text names a URL by origin and path, without userinfo, query or fragment, and with
+any path segment that could be a credential (a UUID, hex, a JWT, a mixed letters-and-digits key)
+replaced by `-redacted-`. A network failure is reported as
+`Could not reach <origin>: <kind of failure>`, never as the networking library's own description.
 
 ### Self-signed and private-CA servers
 

@@ -307,7 +307,85 @@ There is no option that restores the old behaviour.
 ``MCPError/redirectRejected(destination:reason:)`` is a new case on a public enum, so a
 `switch` over `MCPError` with no `default` no longer compiles until it handles it.
 
-Two smaller things a caller could notice:
+### A `POST` answered `301`, `302` or `303` now fails
+
+Those three statuses repeat a `POST` as a `GET` with no body. The transports
+used to do that, which dropped the JSON-RPC message: on Streamable HTTP the
+`GET` opened a stream, `send(_:)` returned, and the request timed out
+unanswered. They now refuse the redirect with
+``MCPError/redirectRejected(destination:reason:)``. A server that moves its
+endpoint must answer `307` or `308`; a client can only be pointed at the new
+URL. A `303` answering the closing `DELETE` is refused the same way. `GET`
+requests still follow all five statuses within the origin.
+
+### A redirect loop is `redirectRejected`, not `connectionFailed`
+
+So is a sixth redirect in a row. Code that retried on `connectionFailed` no
+longer retries these — which is the point: they are the server's
+configuration, and ``HTTPSSETransport/connect()`` no longer spends its
+reconnect attempts on them either.
+
+### The session `DELETE` is authenticated
+
+``StreamableHTTPTransport/disconnect()`` now asks the `authorization:`
+provider for a header — once, unforced, and for no longer than
+`connectionTimeout`. A provider is therefore called during `disconnect()`
+where it was not before. If it does not answer in time, or throws, no `DELETE`
+is sent.
+
+### `WebSocketTransport`
+
+A new initialiser takes an `authorization:` provider and a
+`connectionTimeout`; the existing one is unchanged and still compiles.
+
+```swift
+func connectSocket(header: @escaping AuthorizationProvider) throws {
+    guard let url = URL(string: "wss://mcp.example.com/ws") else { return }
+    // `authorization:` is what selects the new initialiser; pass `nil` to set
+    // only the timeout.
+    _ = WebSocketTransport(url: url, authorization: header, connectionTimeout: 15)
+}
+```
+
+Three behaviour changes apply to both initialisers. `connect()` now fails
+after 30 seconds (or the timeout you pass) against a server that never answers
+the upgrade; it used to wait for ever. A URL whose scheme is not `ws` or `wss`
+fails `connect()` — `https://` was previously connected to as plaintext. And
+`send(_:)` throws ``MCPError/connectionFailed(reason:)`` for a write that
+fails, where it used to throw the socket library's error.
+
+### OAuth requests are held to their origin
+
+``MCPOAuthSetup``'s default `fetch` follows a redirect only within the origin
+of the document it was asked for, and ``MCPOAuthSession``'s registration and
+token requests follow none. A redirect that is not followed throws
+``MCPError/redirectRejected(destination:reason:)`` from
+``MCPOAuthSession/signIn(server:clientName:tenant:openURL:)``,
+``MCPOAuthSession/resume(server:tenant:)`` or
+``MCPOAuthSession/authorizationHeader(forcingRefresh:)``, and a network failure
+throws ``MCPError/connectionFailed(reason:)`` where `URLError` used to
+surface. The defaults are public — ``MCPOAuthSetup/fetchMetadata(from:)`` and
+``MCPOAuthTokenTransport`` — and a `fetch` or `tokenTransport` you supply
+yourself replaces them and decides for itself.
+
+``MCPOAuthError`` has a new case,
+``MCPOAuthError/issuerMismatch(expected:found:)``, thrown when an
+authorization server's metadata names a different issuer from the one it was
+fetched for (RFC 8414 §3.3). A `switch` over `MCPOAuthError` with no `default`
+needs one more arm.
+
+### Smaller things a caller could notice
+
+- **`connectionFailed` text.** The reason for a network failure is now
+  `Could not reach <origin>: <kind of failure>` rather than the networking
+  library's own description. Code that matched on that text — `NIOSSL`,
+  `NWTLSError`, `HTTPClientError` — matches nothing.
+- **Path segments in error text.** A path segment that could be a credential
+  is replaced with `-redacted-`; see
+  <doc:ErrorHandlingGuide#What-an-error-says-about-a-URL>.
+- **`MCPConnectionFactory`** returns the connection it began with when it falls
+  back to a handshake, instead of a second one on the same transport, and a
+  stateless connection's `disconnect()` now disconnects its transport.
 
 - **Error text.** ``MCPError/requestFailed(code:message:data:)`` from a failed POST names the
   endpoint by origin and path — `HTTP 500 from POST to https://mcp.example.com/messages` —
