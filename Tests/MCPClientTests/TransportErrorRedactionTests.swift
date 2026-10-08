@@ -135,7 +135,8 @@ struct TransportErrorRedactionTests {
             #expect(!text.contains(Watched.key), "the error carries the configured URL's query: \(text)")
         }
         #expect(error as? MCPError == .connectionFailed(
-            reason: "The server answered the WebSocket upgrade with HTTP 307"))
+            reason: "Could not reach ws://127.0.0.1:\(try await server.port): "
+                + "the server answered the WebSocket upgrade with HTTP 307"))
         try await transport.disconnect()
         await server.stop()
     }

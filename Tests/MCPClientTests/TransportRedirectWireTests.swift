@@ -86,14 +86,17 @@ enum RedirectedRequest: String, CaseIterable, Sendable, CustomTestStringConverti
         }
     }
 
-    /// The method a same-origin redirect must repeat the request with.
+    /// The method a same-origin redirect repeats the request with, or `nil` if the redirect
+    /// cannot carry the request and is refused instead.
     ///
-    /// What `AsyncHTTPClient` did while it was following: `303` turns anything into a `GET`,
-    /// `301` and `302` turn a `POST` into one, and everything else is repeated as it was.
-    func methodAfter(_ code: Int) -> String {
+    /// A `GET` is a `GET` after any of the five. A `POST` survives only `307` and `308`: the
+    /// other three would repeat it as a `GET` without its body, which for a JSON-RPC message
+    /// is not a redirect but a deletion. A `DELETE` survives everything but `303`, which
+    /// would turn it into a `GET` too.
+    func methodAfter(_ code: Int) -> String? {
         switch method {
-        case .POST: return [307, 308].contains(code) ? "POST" : "GET"
-        case .DELETE: return code == 303 ? "GET" : "DELETE"
+        case .POST: return [307, 308].contains(code) ? "POST" : nil
+        case .DELETE: return code == 303 ? nil : "DELETE"
         default: return "GET"
         }
     }
@@ -154,6 +157,12 @@ struct RedirectRun: Sendable {
     static func refusedDestination(_ error: (any Error)?) -> String? {
         guard case .redirectRejected(let destination, _) = error as? MCPError else { return nil }
         return destination
+    }
+
+    /// Why a redirect was refused, if that is what an error is.
+    static func refusalReason(_ error: (any Error)?) -> String? {
+        guard case .redirectRejected(_, let reason) = error as? MCPError else { return nil }
+        return reason
     }
 
     /// Whether an error is the transport reporting that the request could not be completed.
@@ -277,10 +286,14 @@ struct RedirectRun: Sendable {
                 case .streamableServerStreamGET:
                     try await transport.send(Watched.initialize)
                     await transport.didNegotiate(protocolVersion: "2025-06-18")
-                    try await settle(server: server, other: other, followUp: followUp)
+                    try await settle(server: server, followUp: followUp) {
+                        await transport.serverStreamEnding != nil
+                    }
                 case .streamableResumptionGET:
                     try await transport.send(Watched.body)
-                    try await settle(server: server, other: other, followUp: followUp)
+                    try await settle(server: server, followUp: followUp) {
+                        await transport.responseStreamsAreIdle
+                    }
                 default:
                     try await transport.send(Watched.initialize)
                     try await transport.disconnect()
@@ -299,16 +312,22 @@ struct RedirectRun: Sendable {
         }
     }
 
-    /// Gives a background `GET` time to be sent, redirected, and — if it is going to be —
+    /// Waits for a background `GET` to be sent, redirected, and — if it is going to be —
     /// followed.
     ///
     /// Nothing awaits the two Streamable HTTP streams, so there is no call whose return says
-    /// the request is over. The configured server seeing the `GET` is the first half; the
-    /// second is either the follow-up arriving, or a bounded wait for one that must not.
+    /// the request is over. Both halves are events, not intervals. A redirect that is
+    /// followed is over when the follow-up arrives. One that is not is over when the
+    /// transport says the stream has ended for good — which it can only say after it has
+    /// decided not to follow, so "nothing arrived" is then a fact about the transport and
+    /// not about how long the test was prepared to wait.
+    ///
+    /// The limits are there for a failing run only: they are how long a broken transport is
+    /// given before the assertions that follow report it.
     private static func settle(
         server: RedirectStubServer,
-        other: RedirectStubServer,
-        followUp: String?
+        followUp: String?,
+        ended: @Sendable () async -> Bool
     ) async throws {
         _ = try await wait(atMost: .seconds(5)) {
             await server.requests.contains { $0.method == "GET" }
@@ -318,7 +337,7 @@ struct RedirectRun: Sendable {
                 await server.requests.contains { $0.path == followUp }
             }
         } else {
-            _ = try await wait(atMost: .milliseconds(400)) { await !other.requests.isEmpty }
+            _ = try await wait(atMost: .seconds(5)) { await ended() }
         }
     }
 }
@@ -474,8 +493,14 @@ struct CrossOriginRedirectWireTests {
         try await transport.send(Watched.initialize)
         await transport.didNegotiate(protocolVersion: "2025-06-18")
 
-        // The first reconnect would come two seconds after the first attempt failed.
-        try await Task.sleep(for: .milliseconds(2600))
+        // The loop that would reconnect has returned, and says why. Waiting for that — rather
+        // than for longer than the first backoff — is what makes "it did not reconnect" a
+        // statement about the transport instead of about the clock.
+        let ended = try await RedirectRun.wait(atMost: .seconds(5)) {
+            await transport.serverStreamEnding != nil
+        }
+        #expect(ended, "the server stream's loop is still running")
+        #expect(await transport.serverStreamEnding == .redirectRefused)
         #expect(await server.requests.filter { $0.method == "GET" }.count == 1)
         #expect(await other.requests.isEmpty)
 
@@ -553,9 +578,20 @@ struct CrossOriginRedirectWireTests {
 @Suite("Redirects — within the origin (wire)")
 struct SameOriginRedirectWireTests {
 
-    @Test("A relative redirect is followed, with the method the status asks for",
+    /// The cells of the table in which the redirect can carry the request.
+    static let carried: [(RedirectedRequest, Int)] = RedirectedRequest.allCases.flatMap { request in
+        RedirectRun.statuses.compactMap { code in request.methodAfter(code) == nil ? nil : (request, code) }
+    }
+
+    /// The cells in which it cannot: a `POST` answered `301`, `302` or `303`, and a `DELETE`
+    /// answered `303`.
+    static let dropped: [(RedirectedRequest, Int)] = RedirectedRequest.allCases.flatMap { request in
+        RedirectRun.statuses.compactMap { code in request.methodAfter(code) == nil ? (request, code) : nil }
+    }
+
+    @Test("A relative redirect is followed, as the request that was sent",
           .timeLimit(.minutes(2)),
-          arguments: RedirectedRequest.allCases, RedirectRun.statuses)
+          arguments: carried)
     func relativeRedirectIsFollowed(_ request: RedirectedRequest, _ code: Int) async throws {
         let seen = try await RedirectRun.run(
             request, status: code, location: { _ in "/moved" }, followUp: "/moved")
@@ -564,14 +600,14 @@ struct SameOriginRedirectWireTests {
         #expect(followed.count == 1, "\(request) \(code): /moved received \(RedirectRun.describe(followed))")
         let arrived = try #require(followed.first, "\(request) \(code): the redirect was not followed")
 
-        let method = request.methodAfter(code)
-        #expect(arrived.method == method)
+        // The method is the one that was sent: a redirect that would change it is refused,
+        // and those cells are in the next test.
+        #expect(arrived.method == request.method.rawValue)
         // Same origin, so everything the request carried goes with it.
         #expect(arrived.header(Watched.keyHeader) == Watched.key)
         #expect(arrived.header("Authorization") == Watched.staticAuthorization)
         if request.method == .POST {
-            // The body goes exactly when the method does.
-            #expect(arrived.body.contains(Watched.bodyMarker) == (method == "POST"))
+            #expect(arrived.body.contains(Watched.bodyMarker))
         }
         if request == .streamablePOSTInSession || request == .streamableDELETE {
             #expect(arrived.header("Mcp-Session-Id") == Watched.session)
@@ -579,10 +615,81 @@ struct SameOriginRedirectWireTests {
         if request == .streamableResumptionGET {
             #expect(arrived.header("Last-Event-ID") == Watched.eventID)
         }
-        if request.surfacesFailure, method == request.method.rawValue {
+        if request.surfacesFailure {
             #expect(seen.failure == nil, "\(request) \(code) failed: \(String(describing: seen.failure))")
         }
         #expect(seen.other.isEmpty)
+    }
+
+    /// `301`, `302` and `303` repeat a `POST` as a `GET` with no body. For a JSON-RPC message
+    /// that is the message thrown away: on Streamable HTTP the `GET` then opens a stream, so
+    /// `send` returned as though it had worked and the caller waited for an answer to a
+    /// request the server never received. Both reference clients refuse such a redirect.
+    @Test("A redirect that would turn the request into a GET is refused, and nothing follows it",
+          .timeLimit(.minutes(2)),
+          arguments: dropped)
+    func redirectThatCannotCarryTheRequestIsRefused(_ request: RedirectedRequest, _ code: Int) async throws {
+        let seen = try await RedirectRun.run(request, status: code, location: { _ in "/moved" })
+
+        // The redirect was met, and nothing was sent after it — not a `GET`, not anything.
+        #expect(seen.configured(at: request.path).contains { $0.method == request.method.rawValue })
+        let followed = seen.configured(at: "/moved")
+        #expect(followed.isEmpty, "\(request) \(code): /moved received \(RedirectRun.describe(followed))")
+        #expect(seen.other.isEmpty)
+
+        guard request.surfacesFailure else { return }
+        // The destination is the configured origin itself: the redirect did not leave it.
+        #expect(RedirectRun.refusedDestination(seen.failure) == seen.configuredOrigin,
+                "\(request) \(code) ended with \(String(describing: seen.failure))")
+        let reason = try #require(RedirectRun.refusalReason(seen.failure))
+        #expect(reason.contains("HTTP \(code)"))
+        #expect(reason.contains("POST"))
+        // And it says what would have worked.
+        #expect(reason.contains("307") && reason.contains("308"), "the reason does not name 307 and 308: \(reason)")
+    }
+
+    /// The symptom, stated as the caller met it: `send` must not report success for a message
+    /// that was dropped.
+    @Test("A Streamable HTTP send does not succeed by opening a stream in place of its POST",
+          .timeLimit(.minutes(1)),
+          arguments: [301, 302, 303])
+    func sendDoesNotSucceedWithoutSending(_ code: Int) async throws {
+        let server = try await RedirectStubServer.start(
+            kind: .streamable,
+            redirects: [.init(
+                method: .POST, path: "/mcp",
+                status: HTTPResponseStatus(statusCode: code), location: "/moved")])
+        let transport = StreamableHTTPTransport(
+            url: try await server.url, openServerStream: false, connectionTimeout: 5)
+        try await transport.connect()
+
+        await #expect("send(_:) returned for a message the server never received") {
+            try await transport.send(Watched.body)
+        } throws: { RedirectRun.refusalReason($0) != nil }
+        #expect(await server.requests.map(\.method) == ["POST"])
+        try await transport.disconnect()
+        await server.stop()
+    }
+
+    /// The factory reads a failed `server/discover` as evidence about the era. A `POST` the
+    /// server answered with a `302` says nothing about the era, and `initialize` would be
+    /// sent into the same redirect.
+    @Test("The connection factory does not fall back through a redirect that drops the POST",
+          .timeLimit(.minutes(1)))
+    func factoryDoesNotFallBackThroughADroppingRedirect() async throws {
+        let server = try await RedirectStubServer.start(
+            kind: .streamable,
+            redirects: [.init(method: .POST, status: .found, location: "/moved")])
+        let transport = StreamableHTTPTransport(
+            url: try await server.url, openServerStream: false, connectionTimeout: 5)
+
+        await #expect("the factory connected, or failed some other way") {
+            _ = try await MCPConnectionFactory.connect(
+                transport: transport, clientName: "probe", clientVersion: "1.0")
+        } throws: { RedirectRun.refusalReason($0) != nil }
+        #expect(await server.requests.map(\.method) == ["POST"])
+        try await transport.disconnect()
+        await server.stop()
     }
 
     @Test("An absolute redirect naming the same origin is followed",
@@ -650,35 +757,30 @@ struct SameOriginRedirectWireTests {
         await server.stop()
     }
 
-    /// `POST /mcp` answered `303` to `/mcp` is "now fetch the result", not a loop: the second
-    /// request is a `GET`. `AsyncHTTPClient` compared URLs alone and refused it as a cycle.
-    @Test("A 303 back to the same URL is followed as a GET", .timeLimit(.minutes(1)))
-    func seeOtherToTheSameURL() async throws {
-        let seen = try await RedirectRun.run(
-            .streamablePOSTInitialize, status: 303, location: { _ in "/mcp" })
-        #expect(seen.configured.map(\.method) == ["POST", "GET"])
-        #expect(seen.failure == nil, "failed: \(String(describing: seen.failure))")
-    }
-
     /// `/mcp` → `/again` → `/mcp`. Nothing here leaves the origin; what it must not do is run
-    /// forever.
-    @Test("A redirect loop ends in an error after a bounded number of requests",
+    /// forever — and what it must not be is a *connection failure*, because that is what a
+    /// caller retries. A loop is the server's configuration, and it will be the same loop on
+    /// the next attempt.
+    @Test("A redirect loop is refused as a redirect, naming the origin",
           .timeLimit(.minutes(2)),
-          arguments: [RedirectedRequest.ssePOST, .streamablePOSTInitialize])
-    func loopIsBounded(_ request: RedirectedRequest) async throws {
+          arguments: [RedirectedRequest.ssePOST, .streamablePOSTInitialize, .sseStreamGET])
+    func loopIsRefused(_ request: RedirectedRequest) async throws {
         let seen = try await RedirectRun.run(
             request, status: 307, location: { _ in "/again" },
             more: [.init(path: "/again", status: .temporaryRedirect, location: request.path)])
-        #expect(RedirectRun.isConnectionFailure(seen.failure),
+        #expect(RedirectRun.refusedDestination(seen.failure) == seen.configuredOrigin,
                 "a loop ended with \(String(describing: seen.failure))")
-        #expect(seen.configured.filter { $0.method == "POST" }.count <= 6)
+        let reason = try #require(RedirectRun.refusalReason(seen.failure))
+        #expect(reason.contains("loop"), "the reason does not say it was a loop: \(reason)")
+        #expect(reason.contains(seen.configuredOrigin))
+        #expect(seen.configured.filter { $0.method == request.method.rawValue }.count <= 6)
     }
 
     /// Six redirects in a row, each to somewhere new. Five are followed; the sixth is one
     /// too many.
-    @Test("No more than five redirects are followed",
+    @Test("No more than five redirects are followed, and the sixth is refused as a redirect",
           .timeLimit(.minutes(2)),
-          arguments: [RedirectedRequest.ssePOST, .streamablePOSTInitialize])
+          arguments: [RedirectedRequest.ssePOST, .streamablePOSTInitialize, .sseStreamGET])
     func hopsAreCapped(_ request: RedirectedRequest) async throws {
         let chain = (1...6).map { hop in
             RedirectStubServer.Redirect(
@@ -686,10 +788,59 @@ struct SameOriginRedirectWireTests {
         }
         let seen = try await RedirectRun.run(
             request, status: 307, location: { _ in "/hop1" }, more: chain)
-        #expect(RedirectRun.isConnectionFailure(seen.failure),
+        #expect(RedirectRun.refusedDestination(seen.failure) == seen.configuredOrigin,
                 "seven hops ended with \(String(describing: seen.failure))")
-        #expect(seen.configured.filter { $0.method == "POST" }.map(\.path)
+        let reason = try #require(RedirectRun.refusalReason(seen.failure))
+        #expect(reason.contains("more than 5 redirects"), "the reason does not say why: \(reason)")
+        #expect(seen.configured.filter { $0.method == request.method.rawValue }.map(\.path)
                 == [request.path, "/hop1", "/hop2", "/hop3", "/hop4", "/hop5"])
+    }
+
+    /// `connect()` retries a failed stream with backoff. A loop and an over-long chain are
+    /// not failures of the network, and retrying them walks the same chain again.
+    @Test("A looping or over-long redirect of the legacy stream is not retried",
+          .timeLimit(.minutes(1)),
+          arguments: [false, true])
+    func legacyConnectDoesNotRetryALoop(_ overLong: Bool) async throws {
+        let rules: [RedirectStubServer.Redirect] = overLong
+            ? (0...6).map { hop in
+                .init(path: hop == 0 ? "/sse" : "/hop\(hop)", status: .temporaryRedirect, location: "/hop\(hop + 1)")
+            }
+            : [.init(path: "/sse", status: .temporaryRedirect, location: "/again"),
+               .init(path: "/again", status: .temporaryRedirect, location: "/sse")]
+        let server = try await RedirectStubServer.start(kind: .legacySSE, redirects: rules)
+        let transport = HTTPSSETransport(
+            url: try await server.url,
+            connectionTimeout: 5,
+            maxReconnectAttempts: 3,
+            reconnectBaseDelay: 0.01)
+
+        await #expect("connect() succeeded, or failed as something a caller would retry") {
+            try await transport.connect()
+        } throws: { RedirectRun.refusalReason($0) != nil }
+        // One walk of the chain: two requests for the loop, six for the over-long chain.
+        #expect(await server.requests.count == (overLong ? 6 : 2))
+        try await transport.disconnect()
+        await server.stop()
+    }
+
+    /// Both reference clients treat `http` → `https` on the same host as staying within the
+    /// origin. This one does not follow it: by the time the redirect arrives the request has
+    /// already crossed the network in the clear, headers and body, and following it quietly
+    /// would let that go on happening for every request. What it owes the caller instead is
+    /// a reason that says so.
+    @Test("An http URL redirected to https on the same host is refused, and the reason says to configure https",
+          .timeLimit(.minutes(2)),
+          arguments: [RedirectedRequest.sseStreamGET, .ssePOST, .streamablePOSTInitialize], [301, 308])
+    func upgradeIsRefusedWithAReason(_ request: RedirectedRequest, _ code: Int) async throws {
+        let seen = try await RedirectRun.run(
+            request, status: code, location: { "https://127.0.0.1:\($0)\(request.path)" })
+        #expect(seen.other.isEmpty, "\(request) \(code): the https origin received \(seen.crossed)")
+        let upgraded = seen.otherOrigin.replacingOccurrences(of: "http://", with: "https://")
+        #expect(RedirectRun.refusedDestination(seen.failure) == upgraded)
+        let reason = try #require(RedirectRun.refusalReason(seen.failure))
+        #expect(reason.contains("already been sent in the clear"), "the reason does not say what happened: \(reason)")
+        #expect(reason.contains("Configure the transport with \(upgraded)"), "the reason does not say what to do: \(reason)")
     }
 }
 

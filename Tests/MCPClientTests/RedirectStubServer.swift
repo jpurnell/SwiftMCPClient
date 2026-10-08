@@ -40,19 +40,24 @@ actor RedirectStubServer {
         let location: String
         /// How many matching requests to answer normally first.
         let skipping: Int
+        /// How many matching requests to answer this way before answering normally again.
+        /// The rule also serves for any bare status — a `401` answered once, say.
+        let times: Int
 
         init(
             method: HTTPMethod? = nil,
             path: String? = nil,
             status: HTTPResponseStatus,
             location: String,
-            skipping: Int = 0
+            skipping: Int = 0,
+            times: Int = .max
         ) {
             self.method = method
             self.path = path
             self.status = status
             self.location = location
             self.skipping = skipping
+            self.times = times
         }
     }
 
@@ -107,6 +112,8 @@ actor RedirectStubServer {
     ///   - postReply: How a `POST` that is not redirected is answered.
     ///   - endpoint: The `data` of a legacy stream's `endpoint` event.
     ///   - session: The `Mcp-Session-Id` a Streamable HTTP response assigns.
+    ///   - document: The JSON a `GET` that did not ask for a stream is answered with — a
+    ///     metadata document, when the server is standing in for an authorization server.
     ///   - tls: The identity to present. Supplying one makes this an HTTPS server.
     /// - Returns: The running server.
     static func start(
@@ -115,11 +122,13 @@ actor RedirectStubServer {
         postReply: PostReply = .json,
         endpoint: String = "/messages",
         session: String = "stub-session",
+        document: String = "{}",
         tls: NIOSSLContext? = nil
     ) async throws -> RedirectStubServer {
         let script = RedirectScript(
             kind: kind, redirects: redirects, postReply: postReply,
-            endpoint: endpoint, session: session, scheme: tls == nil ? "http" : "https")
+            endpoint: endpoint, session: session, document: document,
+            scheme: tls == nil ? "http" : "https")
         let server = RedirectStubServer(script: script, servesTLS: tls != nil, kind: kind)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -212,6 +221,7 @@ private final class RedirectScript: @unchecked Sendable {
     let postReply: RedirectStubServer.PostReply
     let endpoint: String
     let session: String
+    let document: String
     let scheme: String
 
     init(
@@ -220,6 +230,7 @@ private final class RedirectScript: @unchecked Sendable {
         postReply: RedirectStubServer.PostReply,
         endpoint: String,
         session: String,
+        document: String,
         scheme: String
     ) {
         self.kind = kind
@@ -227,6 +238,7 @@ private final class RedirectScript: @unchecked Sendable {
         self.postReply = postReply
         self.endpoint = endpoint
         self.session = session
+        self.document = document
         self.scheme = scheme
         self.matches = Array(repeating: 0, count: redirects.count)
     }
@@ -262,7 +274,8 @@ private final class RedirectScript: @unchecked Sendable {
             if let wanted = rule.method, wanted != method { continue }
             if let wanted = rule.path, wanted != request.path { continue }
             matches[index] += 1
-            if matches[index] > rule.skipping { return rule }
+            let applied = matches[index] - rule.skipping
+            if applied > 0, applied <= rule.times { return rule }
             // A rule still skipping has claimed the request: it is answered normally.
             return nil
         }
@@ -311,9 +324,8 @@ private final class RedirectStubHandler: ChannelInboundHandler, @unchecked Senda
             case .GET where head.headers.first(name: "Accept")?.contains("text/event-stream") == true:
                 openStream(context: context)
             case .GET:
-                // A `GET` that did not ask for a stream is a `POST` some redirect turned into
-                // one. Answered and closed, so the request that became it can finish.
-                finish(context: context, status: .ok, contentType: "application/json", body: "{}")
+                // A `GET` that did not ask for a stream: a document fetch. Answered and closed.
+                finish(context: context, status: .ok, contentType: "application/json", body: script.document)
             case .POST:
                 answerPost(context: context)
             default:

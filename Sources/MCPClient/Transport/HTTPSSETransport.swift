@@ -36,10 +36,18 @@ import Logging
 /// ## Redirects Stay on It Too
 ///
 /// A redirect is the same instruction by another route, and is held to the same rule: the
-/// stream's `GET` and every `POST` follow a `301`, `302`, `303`, `307` or `308` only to the
-/// origin of `url`, at most five times. A redirect anywhere else — another host or port, or
-/// `http` for `https` — is not followed: nothing is sent to it, the call fails with
-/// ``MCPError/redirectRejected(destination:reason:)``, and ``connect()`` does not retry.
+/// stream's `GET` and every `POST` follow a redirect only to the origin of `url`. A redirect
+/// anywhere else — another host or port, `http` for `https`, or `https` for `http` — is not
+/// followed and nothing is sent to it.
+///
+/// Within the origin the stream's `GET` follows any of `301`, `302`, `303`, `307` and `308`.
+/// A `POST` follows `307` and `308` only; the other three would repeat it as a `GET` with no
+/// body — the message dropped — and are refused. At most five are followed, and a loop is
+/// refused.
+///
+/// Every refusal fails the call with ``MCPError/redirectRejected(destination:reason:)``, and
+/// ``connect()`` does not retry one: a redirect is the server's answer, and it will be the
+/// same answer next time.
 ///
 /// ## Reconnection
 ///
@@ -164,11 +172,16 @@ public actor HTTPSSETransport: MCPTransport {
     /// - Throws: ``MCPError/endpointRejected(endpoint:reason:)``, without retrying, if the
     ///   server's `endpoint` event names a URL off the origin of the configured stream;
     ///   ``MCPError/redirectRejected(destination:reason:)``, also without retrying, if the
-    ///   stream's `GET` is redirected off that origin; otherwise the last attempt's error
-    ///   once the retries are spent.
+    ///   stream's `GET` is redirected off that origin, in a loop, or more than five times;
+    ///   otherwise the last attempt's error once the retries are spent — a
+    ///   ``MCPError/connectionFailed(reason:)`` whose reason names the kind of failure and
+    ///   the server's origin.
     public func connect() async throws {
         let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
+        HTTPOrigin.warnIfPlaintextToRemote(
+            url, carriesCredentials: authorization != nil || !headers.isEmpty,
+            label: "MCPClient.HTTPSSETransport")
 
         // The same policy the Streamable HTTP server stream uses, rather than a second copy
         // of the arithmetic. Inline, it could only be checked by sleeping, and it grew without
@@ -206,15 +219,15 @@ public actor HTTPSSETransport: MCPTransport {
                     do {
                         try await client.shutdown()
                     } catch {
-                        // logging: cleanup after a refusal; the refusal is the error that matters
-                        logger.debug("HTTP client shutdown failed after a refused redirect: \(error.localizedDescription)")
+                        // logging: cleanup after a refusal; the refusal is the error that matters — the failure's kind and the configured origin
+                        logger.debug("HTTP client shutdown failed after a refused redirect: \(TransportFailure.reason(for: error, reaching: url))")
                     }
                 }
                 throw MCPError.redirectRejected(destination: destination, reason: reason)
             } catch {
                 lastError = error
-                // logging: swift-log Logger does not support privacy annotations
-                logger.warning("SSE connect attempt \(attempt) failed: \(error.localizedDescription)")
+                // logging: swift-log has no privacy annotations; the failure's kind and the configured origin — never the error's own text
+                logger.warning("SSE connect attempt \(attempt) failed: \(TransportFailure.reason(for: error, reaching: url))")
                 // Clean up the HTTP client on failure so it doesn't leak
                 if let client = httpClient {
                     httpClient = nil
@@ -254,7 +267,9 @@ public actor HTTPSSETransport: MCPTransport {
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
     ///   success, naming the endpoint by origin and path only — its query, which is usually
     ///   the session id, is left out; ``MCPError/redirectRejected(destination:reason:)`` if
-    ///   the server redirects the POST off the configured origin.
+    ///   the server redirects the POST off the configured origin, answers it with a `301`,
+    ///   `302` or `303` — which cannot carry a `POST` — or redirects it in a loop or more
+    ///   than five times.
     public func send(_ data: Data) async throws {
         guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -379,7 +394,7 @@ public actor HTTPSSETransport: MCPTransport {
         var iterator = response.body.makeAsyncIterator()
         var parser = SSEParser()
 
-        while let buffer = try await iterator.next() {
+        while let buffer = try await Self.next(&iterator, reaching: url) {
             guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
             let events = parser.append(text)
 
@@ -416,6 +431,22 @@ public actor HTTPSSETransport: MCPTransport {
 
         // If we get here, the stream ended without an endpoint event
         throw MCPError.connectionFailed(reason: "No endpoint event received from SSE stream")
+    }
+
+    /// Reads the next chunk of the stream while `connect()` is still waiting for its
+    /// `endpoint` event.
+    ///
+    /// A stream that fails here fails the connect, and what the caller is told is composed
+    /// from the kind of failure — not handed on as the networking library's own error.
+    private static func next(
+        _ iterator: inout HTTPClientResponse.Body.AsyncIterator,
+        reaching url: URL
+    ) async throws -> NIOCore.ByteBuffer? {
+        do {
+            return try await iterator.next()
+        } catch {
+            throw MCPError.connectionFailed(reason: TransportFailure.reason(for: error, reaching: url))
+        }
     }
 
     // MARK: - Endpoint Origin
@@ -505,8 +536,8 @@ public actor HTTPSSETransport: MCPTransport {
                 logger.debug("SSE stream cancelled by disconnect")
             } catch {
                 let logger = Logger(label: "MCPClient.HTTPSSETransport")
-                // logging: swift-log Logger does not support privacy annotations
-                logger.warning("SSE stream ended with error: \(error.localizedDescription)")
+                // logging: swift-log has no privacy annotations; the failure's kind only — never the error's own text
+                logger.warning("SSE stream ended with error: \(TransportFailure.kind(of: error))")
             }
 
             // Stream has ended

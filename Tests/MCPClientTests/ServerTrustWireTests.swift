@@ -109,12 +109,12 @@ struct ServerTrustWireTests {
     /// Whether an error is the transport reporting a failed TLS handshake.
     ///
     /// "It threw" is not enough: a stub that never started, or a request that timed out,
-    /// throws too. The transport reports a refusal as `connectionFailed` carrying the TLS
-    /// layer's own error — NIOSSL's wherever roots were supplied, and Network.framework's on
-    /// an Apple platform when the system roots are in use.
+    /// throws too. The transport reports a refusal as `connectionFailed` with a reason it
+    /// composes itself — the same words whether the handshake was NIOSSL's, wherever roots
+    /// were supplied, or Network.framework's, on an Apple platform with the system roots.
     private static func isTLSRefusal(_ error: any Error) -> Bool {
         guard case .connectionFailed(let reason) = error as? MCPError else { return false }
-        return reason.contains("NIOSSL") || reason.contains("NWTLSError")
+        return reason.contains("the TLS handshake failed")
     }
 
     /// Sends one request through a Streamable HTTP transport to an HTTPS stub.

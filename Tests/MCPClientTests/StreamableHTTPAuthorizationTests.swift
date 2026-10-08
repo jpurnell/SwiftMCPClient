@@ -147,8 +147,12 @@ struct StreamableHTTPRefusalTests {
             return await server.received.map(\.authorization)
         }
         #expect(seen == ["Bearer rejected", "Bearer forced"], "the refused request was not retried")
-        #expect(await forcings.flags == [false, true],
+        let flags = await forcings.flags
+        #expect(Array(flags.prefix(2)) == [false, true],
                 "the retry did not ask for a forced refresh, so it re-sent what the clock still liked")
+        // Anything after those two is the closing `DELETE` asking for its own credential,
+        // which is an ordinary ask: ending a session does not spend a rotation.
+        #expect(!flags.dropFirst(2).contains(true), "a later request forced a refresh: \(flags)")
     }
 
     /// Once, not in a loop. A server refusing a token that was just refreshed is refusing the

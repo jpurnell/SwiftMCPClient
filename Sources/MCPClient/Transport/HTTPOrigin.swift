@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 /// The origin of an HTTP URL: how two are compared, and how one is named.
 ///
@@ -97,6 +98,73 @@ enum HTTPOrigin {
         }
     }
 
+    /// Whether a redirect is the same host asking for `https` where `http` was configured.
+    ///
+    /// Not followed either way — an origin is not "at least as secure as" — but worth telling
+    /// apart, because the caller's mistake and its remedy are both specific: the configured
+    /// URL is plaintext, and the `https` one should be configured instead.
+    ///
+    /// - Parameters:
+    ///   - configured: The URL the transport was created with.
+    ///   - origin: The destination's origin, as ``description(of:)`` names it.
+    /// - Returns: `true` only for `http` → `https` with the host unchanged.
+    static func isUpgrade(from configured: URL, toOrigin origin: String) -> Bool {
+        guard configured.scheme?.lowercased() == "http",
+              let expectedHost = configured.host?.lowercased(), !expectedHost.isEmpty,
+              let destination = URL(string: origin),
+              destination.scheme?.lowercased() == "https",
+              destination.host?.lowercased() == expectedHost else {
+            return false
+        }
+        return true
+    }
+
+    /// Whether whatever is sent to a URL crosses a network unencrypted.
+    ///
+    /// None of the network transports refuses a plaintext URL. `http://` and `ws://` are how
+    /// a server on loopback or a private network is reached, and ``ServerTrust`` decides
+    /// which certificate an `https` or `wss` server may present, not whether there is one.
+    /// What they do, all three alike, is warn once when a credential is configured and this
+    /// is `true`.
+    ///
+    /// - Parameter url: The URL a transport was configured with.
+    /// - Returns: `true` for `http` or `ws` to any host but this machine — `localhost`, an
+    ///   address in `127.0.0.0/8`, or `::1`. Compared as a parsed host, so
+    ///   `localhost.evil.test` is not loopback.
+    static func isPlaintextToRemote(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "ws" else {
+            return false
+        }
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return false }
+        guard host != "localhost", host != "::1" else { return false }
+
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        let isIPv4 = octets.count == 4 && octets.allSatisfy { octet in
+            !octet.isEmpty && octet.count <= 3 && octet.allSatisfy { $0.isASCII && $0.isNumber }
+        }
+        return !(isIPv4 && octets.first == "127")
+    }
+
+
+    /// Warns, once per connect, that configured credentials are about to cross a network
+    /// unencrypted.
+    ///
+    /// The same line from all three network transports, so that "is this deployment sending
+    /// a token in the clear" has one thing to search a log for.
+    ///
+    /// - Parameters:
+    ///   - url: The URL the transport was configured with.
+    ///   - carriesCredentials: Whether any header or an `authorization:` provider is
+    ///     configured. Every custom header counts: an API key travels in one as often as in
+    ///     `Authorization`.
+    ///   - label: The transport's logger label.
+    static func warnIfPlaintextToRemote(_ url: URL, carriesCredentials: Bool, label: String) {
+        guard carriesCredentials, isPlaintextToRemote(url) else { return }
+        let logger = Logger(label: label)
+        // logging: swift-log has no privacy annotations; an origin only — no path, query, userinfo or header
+        logger.warning("sending configured headers to \(description(of: url)) unencrypted; use an https:// or wss:// URL for a server on another machine")
+    }
+
     /// What is said of a URL that has no origin to name.
     static let noOrigin = "(no origin)"
 
@@ -117,13 +185,27 @@ enum HTTPOrigin {
         return "\(scheme)://\(authority):\(port)"
     }
 
-    /// A URL with everything that can carry a secret taken off: no userinfo, no query, no
-    /// fragment. Origin and path remain.
+    /// What stands in for a path segment that might be a credential.
     ///
-    /// What an error or a log line says about a URL the *caller* is using. The path is kept
-    /// because "which endpoint failed" is the useful part; the query goes because on a legacy
-    /// HTTP+SSE endpoint it is usually the session id, and on a configured URL it is where an
-    /// API key ends up when a server documents `?key=…`.
+    /// Made of characters a URL path does not have to escape, so the redacted URL is still a
+    /// URL, and of a shape no real segment has.
+    static let redactedSegment = "-redacted-"
+
+    /// A URL with everything that can carry a secret taken off: no userinfo, no query, no
+    /// fragment, and no path segment that could be a credential.
+    ///
+    /// What an error or a log line says about a URL the *caller* is using.
+    ///
+    /// - **Userinfo** goes: it is a credential by definition.
+    /// - **The query** goes, whole: on a legacy HTTP+SSE endpoint it is usually the session
+    ///   id, and on a configured URL it is where an API key ends up when a server documents
+    ///   `?key=…`.
+    /// - **The fragment** goes.
+    /// - **The path** is kept segment by segment, because "which endpoint failed" is the
+    ///   useful part — but a deployment can put its key there too (`/mcp/<key>/sse`), so each
+    ///   segment that ``couldBeCredential(_:)`` is replaced with ``redactedSegment``.
+    /// - **Scheme, host and port** stay. They are the origin, and an error that does not say
+    ///   which server it is about is not worth having.
     ///
     /// - Parameter url: The URL to describe.
     /// - Returns: The redacted URL, or `nil` if it cannot be taken apart at all.
@@ -135,14 +217,92 @@ enum HTTPOrigin {
         components.password = nil
         components.query = nil
         components.fragment = nil
+        components.percentEncodedPath = components.percentEncodedPath
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map { segment -> String in
+                // A segment that will not decode is not one that can be vouched for.
+                guard let decoded = String(segment).removingPercentEncoding,
+                      !couldBeCredential(decoded) else {
+                    return redactedSegment
+                }
+                return String(segment)
+            }
+            .joined(separator: "/")
         return components.url
+    }
+
+    /// The longest a path segment may be and still be kept.
+    static let longestOrdinarySegment = 32
+
+    /// The longest run of letters taken for a word.
+    static let longestWord = 16
+
+    /// Whether a path segment could be a credential, and so is left out of error text.
+    ///
+    /// The question is asked the safe way round. Nothing can recognise every key, so this
+    /// recognises what an *ordinary* segment looks like — `mcp`, `sse`, `messages`, `v1`,
+    /// `.well-known`, `oauth-protected-resource`, `2025-06-18` — and treats everything else
+    /// as a possible credential. A segment is ordinary only if **all** of these hold:
+    ///
+    /// 1. It is at most ``longestOrdinarySegment`` characters.
+    /// 2. It uses only ASCII letters, digits, `-`, `_`, `.` and `~`.
+    /// 3. Split at `-`, `_`, `.` and `~`, every piece is one of:
+    ///    - a **word**: letters only, at most ``longestWord`` of them, with no more than two
+    ///      capitals after its first letter unless it is capitals throughout (`messages`,
+    ///      `getToolsList`, `MCP`);
+    ///    - a **small number**: one to four digits (`42`, `2025`);
+    ///    - a **word and a version**: a word of at most eight letters followed by one to three
+    ///      digits (`v1`, `oauth2`).
+    ///
+    /// So a UUID, a run of hex, a JWT, anything base64, a prefixed key such as
+    /// `sk-live-abc123`, a long number, and any segment mixing letters and digits freely are
+    /// all redacted — as is anything with a character outside that set once percent-decoded.
+    ///
+    /// **What this does not catch:** a credential that *is* a few short words —
+    /// `/mcp/correct-horse/sse`, or a key that happens to be eight lowercase letters — is
+    /// indistinguishable from a path and is kept. And only the path is examined: a key in the
+    /// host name (`https://<key>.mcp.example`) is part of the origin, and stays. A deployment
+    /// that needs its URL kept out of logs entirely should carry the key in a header.
+    ///
+    /// - Parameter segment: One path segment, percent-decoded.
+    /// - Returns: `true` if it is replaced in error and log text.
+    static func couldBeCredential(_ segment: String) -> Bool {
+        guard !segment.isEmpty else { return false }
+        guard segment.count <= longestOrdinarySegment else { return true }
+
+        let separators: Set<Character> = ["-", "_", ".", "~"]
+        guard segment.allSatisfy({ ($0.isASCII && ($0.isLetter || $0.isNumber)) || separators.contains($0) }) else {
+            return true
+        }
+        return !segment
+            .split(omittingEmptySubsequences: true) { separators.contains($0) }
+            .allSatisfy(isOrdinaryPiece)
+    }
+
+    /// Whether one piece of a segment is a word, a small number, or a word and a version.
+    private static func isOrdinaryPiece(_ piece: Substring) -> Bool {
+        let letters = piece.prefix { $0.isLetter }
+        let digits = piece[letters.endIndex...]
+        guard digits.allSatisfy(\.isNumber) else { return false }
+
+        if letters.isEmpty { return digits.count <= 4 }
+        guard isWord(letters) else { return false }
+        return digits.isEmpty || (letters.count <= 8 && digits.count <= 3)
+    }
+
+    /// Whether a run of letters reads as a word rather than as key material.
+    private static func isWord(_ letters: Substring) -> Bool {
+        guard letters.count <= longestWord else { return false }
+        let capitals = letters.dropFirst().filter(\.isUppercase).count
+        return capitals <= 2 || letters.allSatisfy(\.isUppercase)
     }
 
     /// ``redactedURL(_:)`` as text, for a message.
     ///
     /// - Parameter url: The URL to describe.
-    /// - Returns: Origin and path, or ``noOrigin`` if the URL cannot be taken apart. Never the
-    ///   original string: a fallback that printed what it could not redact would be the leak.
+    /// - Returns: Origin and redacted path, or ``noOrigin`` if the URL cannot be taken apart.
+    ///   Never the original string: a fallback that printed what it could not redact would
+    ///   be the leak.
     static func redacted(_ url: URL) -> String {
         redactedURL(url)?.absoluteString ?? noOrigin
     }

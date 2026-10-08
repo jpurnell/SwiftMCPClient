@@ -47,12 +47,28 @@ public typealias AuthorizationProvider = @Sendable (_ forcingRefresh: Bool) asyn
 /// ## Redirects Stay on the Configured Origin
 ///
 /// Every request — each `POST`, the server stream's `GET`, a resumption `GET`, the closing
-/// `DELETE` — follows a `301`, `302`, `303`, `307` or `308` only to the origin of `url`: the
-/// same scheme, host and port. At most five are followed. A redirect anywhere else — another
-/// host or port, or `http` for `https` — is not followed and nothing is sent to it: no
-/// header, no `Mcp-Session-Id`, no body. ``send(_:)`` fails with
-/// ``MCPError/redirectRejected(destination:reason:)``; the server stream, which nobody is
-/// awaiting, logs the refusal at error level and stops rather than reconnecting.
+/// `DELETE` — follows a redirect only to the origin of `url`: the same scheme, host and port.
+/// A redirect anywhere else — another host or port, `http` for `https`, or `https` for
+/// `http` — is not followed and nothing is sent to it: no header, no `Mcp-Session-Id`, no
+/// body.
+///
+/// Within the origin, a redirect is followed only if it repeats the request as it was sent.
+/// A `GET` follows any of `301`, `302`, `303`, `307` and `308`. A `POST` follows `307` and
+/// `308` only: the other three would repeat it as a `GET` with no body, which drops the
+/// JSON-RPC message, so they are refused — as is a `303` answering the `DELETE`. At most five
+/// are followed, and a loop is refused.
+///
+/// Every refusal is ``MCPError/redirectRejected(destination:reason:)``, and none is retried:
+/// ``send(_:)`` fails with it; the server stream, which nobody is awaiting, logs the refusal
+/// at error level and stops rather than reconnecting.
+///
+/// ## Ending the Session
+///
+/// ``disconnect()`` sends `DELETE` with the session id, authenticated like every other
+/// request: the `authorization:` provider is asked once, without forcing a refresh, and the
+/// wait for it shares the `DELETE`'s deadline (`connectionTimeout`). If the provider does not
+/// answer in time, or throws, no `DELETE` is sent — it is not sent unauthenticated — and the
+/// reason is logged.
 ///
 /// ## Compared with legacy HTTP+SSE
 ///
@@ -88,6 +104,32 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// One at a time: the specification permits a single `GET` stream, and a client that opens
     /// another on every prompt leaks them server-side.
     private var serverStreamTask: Task<Void, Never>?
+
+    /// Why the server-initiated stream's loop ended, once it has.
+    ///
+    /// The loop runs for the life of the transport unless something ends it for good, and
+    /// "it will not be reopened" is otherwise visible only as the absence of a request. Kept
+    /// so that a test — or a debugger — can ask what happened instead of waiting to see what
+    /// does not.
+    enum ServerStreamEnding: Sendable, Equatable {
+        /// The server answered `405`: it originates no messages.
+        case notOffered
+        /// The `GET` was answered with a redirect this client does not follow.
+        case redirectRefused
+        /// The transport was disconnected.
+        case cancelled
+    }
+
+    /// Why the server stream's loop ended; `nil` while it is running or was never started.
+    private(set) var serverStreamEnding: ServerStreamEnding?
+
+    /// Whether every response stream handed to the background has finished — delivered,
+    /// failed, and, if it was going to be, resumed. Test visibility only.
+    private(set) var finishedResponsePumps = 0
+    private var startedResponsePumps = 0
+
+    /// Whether no response stream is still being read in the background. Test visibility only.
+    var responseStreamsAreIdle: Bool { finishedResponsePumps == startedResponsePumps }
 
     /// Tasks draining SSE response bodies into the receive queue.
     ///
@@ -257,16 +299,23 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // silent: a cancelled sleep is the disconnect path, checked on the next line
                 try? await Task.sleep(for: delay)
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                serverStreamEnding = .cancelled
+                return
+            }
 
             do {
                 guard let body = try await openServerStream(resuming: isReconnect ? .get : nil) else {
+                    serverStreamEnding = .notOffered
                     return
                 }
                 isReconnect = true
                 var delivered = false
                 for try await event in SSEEventStream.events(from: body) {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled else {
+                        serverStreamEnding = .cancelled
+                        return
+                    }
                     if let id = event.id {
                         await session.record(eventID: id, for: .get)
                     }
@@ -277,7 +326,10 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // A cancelled stream ends the same way a finished one does — quietly — so the
                 // reason has to be established before anything acts on it. Without this, a
                 // disconnect is scored as a server that closed early and feeds the backoff.
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else {
+                    serverStreamEnding = .cancelled
+                    return
+                }
 
                 // A clean close is the server exercising its right to disconnect, which
                 // 2025-11-25 (SEP-1699) explicitly permits and expects clients to poll
@@ -296,15 +348,17 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // it was made; this says what it cost.
                 let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
                 // logging: the consequence of a refused redirect — no value from the request or the response
-                logger.warning("the server stream will not be reopened: its GET was redirected off the configured origin")
+                logger.warning("the server stream will not be reopened: its GET was answered with a redirect this client does not follow")
+                serverStreamEnding = .redirectRefused
                 return
             } catch {
                 attempt += 1
                 let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
-                // logging: why the server stream dropped, which no caller is awaiting
-                logger.debug("server stream dropped: \(error.localizedDescription)")
+                // logging: why the server stream dropped, which no caller is awaiting — the failure's kind and the configured origin
+                logger.debug("server stream dropped: \(TransportFailure.reason(for: error, reaching: url))")
             }
         }
+        serverStreamEnding = .cancelled
     }
 
     /// Asks the server to open its stream.
@@ -312,8 +366,8 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// - Parameter resuming: Whether to carry `Last-Event-ID` and pick up where the previous
     ///   stream stopped.
     /// - Returns: The stream body, or `nil` if the server offers no such channel.
-    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the `GET` is redirected
-    ///   off the configured origin.
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the `GET` is answered
+    ///   with a redirect that is not followed.
     private func openServerStream(resuming stream: StreamableHTTPSession.StreamKind?) async throws -> HTTPClientResponse.Body? {
         guard let client = httpClient else { return nil }
 
@@ -358,34 +412,29 @@ public actor StreamableHTTPTransport: MCPTransport {
             isConnected = true
             return
         }
+        HTTPOrigin.warnIfPlaintextToRemote(
+            url, carriesCredentials: authorization != nil || !headers.isEmpty,
+            label: "MCPClient.StreamableHTTPTransport")
         httpClient = makeHTTPClient()
         isConnected = true
     }
 
     /// Send a DELETE request to terminate the session and shut down the HTTP client.
+    ///
+    /// The `DELETE` is authenticated like every other request: the `authorization:`
+    /// provider is asked for a current header — once, without forcing a refresh — and that
+    /// header goes on it. The ask and the `DELETE` share one deadline, the connection
+    /// timeout, so a provider that cannot answer (its authorization server is down, say)
+    /// delays this by at most that long. If no credential arrives in time, or the provider
+    /// throws, **no `DELETE` is sent**: an unauthenticated termination is the request the
+    /// server refuses, and the reason is logged instead. The server then expires the session
+    /// on its own schedule.
     public func disconnect() async throws {
         defer { isConnected = false }
 
         // Terminate the session on the server if we have a session ID
         if let client = httpClient, let sid = await session.sessionID {
-            var request = HTTPClientRequest(url: url.absoluteString)
-            request.method = .DELETE
-            request.headers.add(name: "Mcp-Session-Id", value: sid)
-            for (key, value) in headers {
-                request.headers.replaceOrAdd(name: key, value: value)
-            }
-            do {
-                // Through the same door as every other request, so a redirected `DELETE`
-                // cannot carry the session id somewhere a `POST` would not have gone.
-                _ = try await redirects.execute(
-                    request, on: client, timeout: connectionTimeout, authorization: nil)
-            } catch {
-                // Best effort: the session is being abandoned either way, and the server
-                // expires what it is not told about.
-                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
-                // logging: a session the server was not told had ended; the error names no URL beyond an origin
-                logger.debug("session termination was not delivered: \(error.localizedDescription)")
-            }
+            await terminateSession(sid, on: client)
         }
 
         serverStreamTask?.cancel()
@@ -412,12 +461,68 @@ public actor StreamableHTTPTransport: MCPTransport {
         }
     }
 
+    /// Tells the server the session is over. Best effort, bounded, and never unauthenticated
+    /// when there is a provider to authenticate it.
+    private func terminateSession(_ sid: String, on client: HTTPClient) async {
+        let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+        // One deadline for asking the provider and for the request it authorises.
+        let deadline = NIODeadline.now() + connectionTimeout
+
+        // The credential is resolved here, once, and handed to the request as a fixed
+        // answer: a redirected `DELETE` re-uses it rather than asking again, because a second
+        // ask would be a second wait.
+        var credential: AuthorizationProvider?
+        if let authorization {
+            switch await BoundedAuthorization.ask(
+                authorization, within: .nanoseconds(connectionTimeout.nanoseconds)) {
+            case .header(let header):
+                credential = { _ in header }
+            case .timedOut:
+                // logging: why the server was not told — no value from the request or the provider
+                logger.warning("session termination was not sent: the authorization provider did not answer before the deadline, and it is not sent unauthenticated")
+                return
+            case .failed(let kind):
+                // logging: why the server was not told — the provider's error by type name only
+                logger.warning("session termination was not sent: the authorization provider failed (\(kind)), and it is not sent unauthenticated")
+                return
+            }
+        }
+
+        let remaining = deadline - NIODeadline.now()
+        guard remaining > .zero else {
+            // logging: why the server was not told — no value from the request
+            logger.warning("session termination was not sent: the deadline passed while the credential was being obtained")
+            return
+        }
+
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = .DELETE
+        request.headers.add(name: "Mcp-Session-Id", value: sid)
+        for (key, value) in headers {
+            request.headers.replaceOrAdd(name: key, value: value)
+        }
+        do {
+            // Through the same door as every other request, so a redirected `DELETE`
+            // cannot carry the session id somewhere a `POST` would not have gone.
+            _ = try await redirects.execute(
+                request, on: client, timeout: remaining, authorization: credential)
+        } catch {
+            // Best effort: the session is being abandoned either way, and the server
+            // expires what it is not told about.
+            // logging: a session the server was not told had ended — the failure's kind and the configured origin
+            logger.debug("session termination was not delivered: \(TransportFailure.reason(for: error, reaching: url))")
+        }
+    }
+
     /// Post a JSON-RPC message to the MCP endpoint and enqueue the response.
     ///
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` for a status that is not a
     ///   success, naming the endpoint by origin and path only — never its query;
     ///   ``MCPError/redirectRejected(destination:reason:)`` if the server redirects the POST
-    ///   off the configured origin.
+    ///   off the configured origin, answers it with a `301`, `302` or `303` — which cannot
+    ///   carry a `POST` — or redirects it in a loop or more than five times;
+    ///   ``MCPError/connectionFailed(reason:)`` if the request could not be made, with a
+    ///   reason that names the kind of failure and the server's origin.
     public func send(_ data: Data) async throws {
         guard let client = httpClient, isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -470,6 +575,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         // delivered after the response closes is not a progress notification.
         if StreamableHTTPBodyDecoder.isEventStream(contentType) {
             let requestID = Self.requestID(of: data)
+            startedResponsePumps += 1
             let pump = Task {
                 // Captured strongly: these tasks are owned by this transport and cancelled in
                 // `disconnect()`, so there is no cycle to break — and a `weak self` here would
@@ -516,6 +622,9 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// it the way it learns about any missing response — the request it is waiting on does not
     /// arrive — which is the same outcome the collected path produced.
     private func consume(_ body: HTTPClientResponse.Body, forRequest requestID: String?) async {
+        // Counted on every way out, a resumption included: "idle" means nothing is still
+        // being read, not merely that the first body ended.
+        defer { finishedResponsePumps += 1 }
         do {
             for try await event in SSEEventStream.events(from: body) {
                 // Recorded before the payload is delivered: a consumer that acts on the
@@ -528,8 +637,8 @@ public actor StreamableHTTPTransport: MCPTransport {
             }
         } catch {
             let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
-            // logging: a response stream that died, which the waiting caller sees only as silence
-            logger.warning("response stream ended in failure: \(error.localizedDescription)")
+            // logging: a response stream that died, which the waiting caller sees only as silence — the failure's kind and the configured origin
+            logger.warning("response stream ended in failure: \(TransportFailure.reason(for: error, reaching: url))")
 
             // Picked back up rather than abandoned. 2025-11-25 (SEP-1699) is specific about
             // how: resumption is always via `GET`, whichever stream dropped — the request is
@@ -566,8 +675,8 @@ public actor StreamableHTTPTransport: MCPTransport {
             // request with no answer — and retrying a stream the server has stopped feeding is
             // how a lost response becomes a loop.
             let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
-            // logging: the second failure, after which the request is genuinely lost
-            logger.warning("resuming a dropped response stream failed: \(error.localizedDescription)")
+            // logging: the second failure, after which the request is genuinely lost — the failure's kind and the configured origin
+            logger.warning("resuming a dropped response stream failed: \(TransportFailure.reason(for: error, reaching: url))")
         }
     }
 
