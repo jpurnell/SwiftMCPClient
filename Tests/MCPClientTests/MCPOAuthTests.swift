@@ -51,6 +51,36 @@ struct MCPOAuthDiscoveryTests {
         }
     }
 
+    /// RFC 8414 §3.3: the `issuer` in the document MUST be identical to the issuer the
+    /// document was looked up by, and if it is not the document MUST NOT be used. Without
+    /// the check, the binding of endpoints to "the issuer" binds them to whatever the
+    /// document chose to call itself: a document served for `auth.example.com` that says it
+    /// is `attacker.example`, with every endpoint on `attacker.example`, is self-consistent
+    /// and was accepted.
+    @Test("A metadata document that names a different issuer is not used")
+    func issuerMismatchRefused() async {
+        let setup = MCPOAuthSetup(fetch: stubFetch(
+            issuer: "https://attacker.example",
+            authorizationServers: ["https://auth.example.com"]))
+
+        await #expect(throws: MCPOAuthError.issuerMismatch(
+            expected: "https://auth.example.com", found: "https://attacker.example")) {
+            try await setup.discover(server: url("https://mcp.example.com"), identifier: "mcp")
+        }
+    }
+
+    /// A trailing slash is the one difference tolerated, because it is the one difference
+    /// that is routinely there and names nothing else.
+    @Test("An issuer that differs only by a trailing slash is the same issuer",
+          arguments: [("https://auth.example.com/", "https://auth.example.com"),
+                      ("https://auth.example.com", "https://auth.example.com/")])
+    func issuerTrailingSlash(_ served: String, _ advertised: String) async throws {
+        let setup = MCPOAuthSetup(fetch: stubFetch(issuer: served, authorizationServers: [advertised]))
+        let (configuration, _) = try await setup.discover(
+            server: url("https://mcp.example.com"), identifier: "mcp")
+        #expect(configuration.tokenEndpoint.host() == "auth.example.com")
+    }
+
     /// The origin binding still applies through this path. An MCP server that names an
     /// authorization server whose own metadata points its token endpoint elsewhere must not
     /// get the client to post credentials there.
@@ -162,7 +192,8 @@ private func stubFetch(
     let servers = authorizationServers ?? [issuer]
     // Derived from the issuer so the origin binding is satisfied by default, and a test that
     // wants to break it says so explicitly.
-    let token = tokenEndpoint ?? "\(issuer)/token"
+    let base = issuer.hasSuffix("/") ? String(issuer.dropLast()) : issuer
+    let token = tokenEndpoint ?? "\(base)/token"
 
     return { requested in
         await log?.record(requested)
@@ -178,9 +209,9 @@ private func stubFetch(
         if requested.path.contains("oauth-authorization-server") {
             let metadata = AuthorizationServerMetadata(
                 issuer: issuer,
-                authorizationEndpoint: "\(issuer)/authorize",
+                authorizationEndpoint: "\(base)/authorize",
                 tokenEndpoint: token,
-                registrationEndpoint: "\(issuer)/register",
+                registrationEndpoint: "\(base)/register",
                 codeChallengeMethodsSupported: challengeMethods,
                 scopesSupported: ["mcp:tools"])
             return try JSONEncoder().encode(metadata)

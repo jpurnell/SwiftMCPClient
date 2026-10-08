@@ -38,9 +38,23 @@ public enum MCPOAuthError: Error, Equatable, Sendable {
     ///
     /// A `status` of `0` means no candidate URL could be formed from the server URL at all.
     ///
-    /// The URL is where the client looked, without userinfo, query or fragment — an error is
-    /// printed and logged, and those are the parts of a URL that carry secrets.
+    /// The URL is where the client looked, without userinfo, query or fragment, and with any
+    /// path segment that could be a credential replaced — an error is printed and logged,
+    /// and those are the parts of a URL that carry secrets.
     case metadataNotFound(url: URL, status: Int)
+
+    /// The authorization server's metadata names a different issuer from the one it was
+    /// fetched for.
+    ///
+    /// RFC 8414 §3.3: the `issuer` in the document MUST be identical to the issuer whose
+    /// well-known URL it was retrieved from, and a document where it is not MUST NOT be
+    /// used. Every endpoint in the document is held to the document's issuer, so a document
+    /// allowed to choose its own issuer chooses where the authorization code goes.
+    ///
+    /// - Parameters:
+    ///   - expected: The issuer the MCP server advertised, and the metadata was fetched for.
+    ///   - found: The issuer the document claims, as an origin only.
+    case issuerMismatch(expected: String, found: String)
 }
 
 /// RFC 9728 protected resource metadata — how an MCP server names its authorization server.
@@ -110,12 +124,33 @@ public struct MCPOAuthSetup: Sendable {
 
     /// Creates a setup helper.
     ///
-    /// - Parameter fetch: How to retrieve a document. Defaults to `URLSession.shared`.
-    public init(fetch: @escaping Fetch = { url in
-        let (data, response) = try await URLSession.shared.data(from: url)
-        return try MCPOAuthSetup.validate(data: data, response: response, url: url)
-    }) {
+    /// - Parameter fetch: How to retrieve a document. Defaults to
+    ///   ``fetchMetadata(from:)``, which follows a redirect only within the origin of the
+    ///   URL it was asked for. A `fetch` of your own decides that for itself.
+    public init(fetch: @escaping Fetch = { url in try await MCPOAuthSetup.fetchMetadata(from: url) }) {
         self.fetch = fetch
+    }
+
+    /// Fetches a metadata document, following a redirect only within the document's origin.
+    ///
+    /// A discovery document names where this client will shortly send an authorization
+    /// code and a refresh token, so where the document itself came from matters: RFC 8414 §3
+    /// and RFC 9728 §3 locate it at a well-known path on the issuer's — or the protected
+    /// resource's — own host. A redirect to the same scheme, host and port is followed, up
+    /// to five times; a redirect anywhere else is not, nothing is sent to it, and the fetch
+    /// fails. `https` to `http` is somewhere else.
+    ///
+    /// - Parameter url: The document's URL.
+    /// - Returns: The document.
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the server redirected
+    ///   the request off the URL's origin, naming the destination by origin only;
+    ///   ``MCPError/connectionFailed(reason:)`` if the request could not be made, naming the
+    ///   URL's origin; ``MCPOAuthError/metadataNotFound(url:status:)`` for a status that is
+    ///   not a success.
+    public static func fetchMetadata(from url: URL) async throws -> Data {
+        let (data, response) = try await OAuthHTTP.data(
+            for: URLRequest(url: url), policy: .withinOrigin, purpose: "metadata")
+        return try validate(data: data, response: response, url: url)
     }
 
     /// Rejects a response that carries a failing HTTP status.
@@ -219,6 +254,15 @@ public struct MCPOAuthSetup: Sendable {
             throw MCPOAuthError.discovery(error)
         }
 
+        // RFC 8414 §3.3, before anything in the document is used. The endpoints below are
+        // held to the document's own `issuer`, which protects nothing if the document may
+        // name any issuer it likes.
+        guard Self.isSameIssuer(metadata.issuer, issuer) else {
+            throw MCPOAuthError.issuerMismatch(
+                expected: URL(string: issuer).map(HTTPOrigin.redacted) ?? HTTPOrigin.noOrigin,
+                found: URL(string: metadata.issuer).map(HTTPOrigin.description(of:)) ?? HTTPOrigin.noOrigin)
+        }
+
         do {
             // The **issuer** identifies the configuration, not the MCP server's host. MCP
             // 2026-07-28 (SEP-2352) requires a client to key persisted credentials by the
@@ -243,6 +287,23 @@ public struct MCPOAuthSetup: Sendable {
         }
     }
 
+    /// Whether the issuer a metadata document claims is the one it was fetched for.
+    ///
+    /// RFC 8414 §3.3 says identical, and this compares the two strings as they are — with
+    /// one allowance, a single trailing slash on either, which is how the same issuer is
+    /// routinely written two ways and which names no other server.
+    ///
+    /// - Parameters:
+    ///   - claimed: The `issuer` in the document.
+    ///   - requested: The issuer the well-known URL was built from.
+    /// - Returns: `true` if they are the same issuer.
+    static func isSameIssuer(_ claimed: String, _ requested: String) -> Bool {
+        func trimmed(_ issuer: String) -> Substring {
+            issuer.hasSuffix("/") ? issuer.dropLast() : Substring(issuer)
+        }
+        return !claimed.isEmpty && trimmed(claimed) == trimmed(requested)
+    }
+
     /// Fetches an MCP server's protected resource metadata.
     ///
     /// - Parameter server: The MCP server's base URL.
@@ -264,8 +325,8 @@ public struct MCPOAuthSetup: Sendable {
                 // publish only at the origin root. The last failure is rethrown below if
                 // every candidate is exhausted.
                 let logger = Logger(label: "MCPClient.MCPOAuth")
-                // logging: swift-log has no privacy annotations; the candidate by origin and path only — no userinfo or query
-                logger.debug("protected-resource metadata not at \(HTTPOrigin.redacted(candidate)): \(error.localizedDescription)")
+                // logging: swift-log has no privacy annotations; the candidate by origin and redacted path, the failure by kind — no userinfo, query or error text
+                logger.debug("protected-resource metadata not at \(HTTPOrigin.redacted(candidate)): \(TransportFailure.kind(of: error))")
                 lastError = error
             }
         }

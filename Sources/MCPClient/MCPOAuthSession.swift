@@ -43,7 +43,9 @@ public actor MCPOAuthSession {
     /// - Parameters:
     ///   - setup: How discovery is performed. Injected for tests.
     ///   - storage: Where the credential lives.
-    ///   - tokenTransport: How token requests reach the provider. Injected for tests.
+    ///   - tokenTransport: How token requests reach the provider. Defaults to
+    ///     ``MCPOAuthTokenTransport``, which follows no redirect. Injected for tests; a
+    ///     transport supplied here decides for itself what a redirect does.
     ///   - registrations: Where this client's registration with the server lives. Defaults to
     ///     memory, which is the behaviour of a session that cannot be resumed: a caller that
     ///     wants ``resume(server:tenant:)`` to work across launches has to say where the
@@ -53,7 +55,7 @@ public actor MCPOAuthSession {
         setup: MCPOAuthSetup = MCPOAuthSetup(),
         storage: any OAuthClientStorage,
         registrations: any RegistrationRecordStore = InMemoryRegistrationStore(),
-        tokenTransport: any TokenTransport = URLSessionTokenTransport()
+        tokenTransport: any TokenTransport = MCPOAuthTokenTransport()
     ) {
         self.setup = setup
         self.storage = storage
@@ -119,7 +121,9 @@ public actor MCPOAuthSession {
     ///   - openURL: How to send the user to the authorization page. Injected so a test never
     ///     opens a browser.
     /// - Returns: The stored credential.
-    /// - Throws: ``MCPOAuthError``, ``LoopbackError``, `CallbackError` or `OAuthError`.
+    /// - Throws: ``MCPOAuthError``, ``LoopbackError``, `CallbackError` or `OAuthError`; or
+    ///   ``MCPError/redirectRejected(destination:reason:)`` if a metadata fetch was redirected
+    ///   off its origin, or the registration or token request was redirected at all.
     @discardableResult
     public func signIn(
         server: URL,
@@ -141,7 +145,7 @@ public actor MCPOAuthSession {
         // accepting authorization codes.
         defer { Task { await listener.stop() } }
 
-        let registration = try await register(
+        let registration = try await Self.register(
             at: registrationEndpoint,
             request: ClientRegistrationRequest(
                 clientName: clientName,
@@ -350,7 +354,11 @@ public actor MCPOAuthSession {
     }
 
     /// Registers this client with the authorization server.
-    private func register(
+    ///
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the endpoint answered
+    ///   with a redirect, which is never followed; ``MCPError/connectionFailed(reason:)`` if
+    ///   it could not be reached; `OAuthError` if the server refused the registration.
+    static func register(
         at endpoint: URL,
         request: ClientRegistrationRequest
     ) async throws -> ClientRegistrationResponse {
@@ -360,7 +368,10 @@ public actor MCPOAuthSession {
         httpRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         httpRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, response) = try await URLSession.shared.data(for: httpRequest)
+        // Never redirected: the response to this request is the client's credentials, and a
+        // registration carried elsewhere is a client registered with whoever answered.
+        let (data, response) = try await OAuthHTTP.data(
+            for: httpRequest, policy: .never, purpose: "client registration")
         guard let http = response as? HTTPURLResponse else {
             throw OAuthError.serverError("the registration response was not HTTP")
         }
