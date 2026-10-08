@@ -105,11 +105,9 @@ public enum MCPConnectionFactory {
             return try await recover(
                 from: error,
                 connection: connection,
-                transport: transport,
                 clientName: clientName,
                 clientVersion: clientVersion,
                 capabilities: capabilities,
-                requestTimeout: requestTimeout,
                 preferred: preferred)
         }
     }
@@ -140,11 +138,9 @@ public enum MCPConnectionFactory {
     private static func recover(
         from error: MCPError,
         connection: MCPClientConnection,
-        transport: any MCPTransport,
         clientName: String,
         clientVersion: String,
         capabilities: ClientCapabilities,
-        requestTimeout: Duration,
         preferred: String
     ) async throws -> Connected {
         let code: Int?
@@ -169,19 +165,23 @@ public enum MCPConnectionFactory {
             // logging: which answer led to the fallback, since the choice is not otherwise visible
             logger.debug("server did not answer server/discover (\(error)); using the handshake era")
 
-            let handshake = MCPClientConnection(
-                transport: transport, requestTimeout: requestTimeout)
+            // On the connection already made, not on a second one. That connection's
+            // dispatcher is reading the transport, and a transport has one reader: a second
+            // connection would race it for the `initialize` response, and lose often enough
+            // to matter — the answer delivered to a dispatcher with nobody waiting for it,
+            // and the handshake waiting for an answer that had already arrived.
+            //
             // The newest this client speaks, not `initialize`'s default. A handshake negotiates
             // *down* — the client names its best and the server answers with the best it
             // shares — so asking for an old revision does not play safe, it caps the result and
             // leaves the server no way to offer better.
-            let result = try await handshake.initialize(
+            let result = try await connection.initialize(
                 clientName: clientName,
                 clientVersion: clientVersion,
                 capabilities: capabilities,
                 protocolVersion: preferred)
             return Connected(
-                connection: handshake,
+                connection: connection,
                 era: .handshake,
                 protocolVersion: result.protocolVersion,
                 serverCapabilities: result.capabilities,

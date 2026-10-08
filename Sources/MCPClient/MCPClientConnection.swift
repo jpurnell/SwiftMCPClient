@@ -146,9 +146,15 @@ public actor MCPClientConnection: MCPClientProtocol {
                 ])
             ])
 
-            // Initialize uses direct transport.receive() since the dispatcher
-            // isn't running yet and no notifications can arrive before handshake.
-            let response = try await sendRequestDirect(method: "initialize", params: params)
+            // Ordinarily the dispatcher is not running yet, so the answer is read straight
+            // from the transport. If it *is* running — the connection began as a stateless
+            // one and the server turned out to want a handshake — the answer has to come
+            // through it. A transport has one reader. A second `receive()` beside the
+            // dispatcher's is a race for the response, and when the dispatcher wins it files
+            // the answer under an id nobody on its side is waiting for, while this waits on.
+            let response = dispatcher == nil
+                ? try await sendRequestDirect(method: "initialize", params: params)
+                : try await sendRequest(method: "initialize", params: params, statingProtocol: false)
             let resultData = try JSONEncoder().encode(response)
             let initResult = try JSONDecoder().decode(InitializeResult.self, from: resultData)
 
@@ -174,13 +180,22 @@ public actor MCPClientConnection: MCPClientProtocol {
             let notificationData = try JSONEncoder().encode(notification)
             try await transport.send(notificationData)
 
-            // Start the message dispatcher for all subsequent communication
-            let newDispatcher = MCPMessageDispatcher(transport: transport)
-            await newDispatcher.start()
-            self.dispatcher = newDispatcher
+            // Start the message dispatcher for all subsequent communication — unless one is
+            // already reading this transport, in which case it carries on.
+            if dispatcher == nil {
+                let newDispatcher = MCPMessageDispatcher(transport: transport)
+                await newDispatcher.start()
+                self.dispatcher = newDispatcher
+            }
 
             return initResult
         } catch {
+            // The reader goes first, so nothing is left waiting on a transport that is about
+            // to be released.
+            if let dispatcher {
+                await dispatcher.stop()
+                self.dispatcher = nil
+            }
             // A failed handshake leaves the transport half-open. Release it before
             // rethrowing: a transport dropped while holding a live HTTP client trips
             // AsyncHTTPClient's shutdown-before-deinit precondition and crashes the
@@ -619,13 +634,20 @@ public actor MCPClientConnection: MCPClientProtocol {
         clientVersion: String
     ) async throws {
         try await transport.connect()
+        // Recorded, so that `disconnect()` releases the transport. Without it a stateless
+        // connection that was disconnected left its transport connected — and an HTTP
+        // transport holding a live client traps when that client is deallocated.
+        isConnected = true
         await transport.didNegotiate(protocolVersion: protocolVersion)
 
         self.negotiatedVersion = protocolVersion
         self.clientIdentity = ClientIdentity(name: clientName, version: clientVersion)
 
         // The dispatcher is what routes responses to their requests; without a handshake there
-        // is no other moment to start it.
+        // is no other moment to start it. Started once: declaring a second version — which is
+        // what a server correcting the first one leads to — must not put a second reader on
+        // the transport beside the first.
+        guard dispatcher == nil else { return }
         let newDispatcher = MCPMessageDispatcher(transport: transport)
         await newDispatcher.start()
         self.dispatcher = newDispatcher
@@ -1194,12 +1216,25 @@ public actor MCPClientConnection: MCPClientProtocol {
     }
 
     /// Sends a JSON-RPC request using the dispatcher (post-initialization).
-    private func sendRequest(method: String, params: AnyCodableValue?) async throws -> AnyCodableValue {
+    ///
+    /// - Parameters:
+    ///   - method: The method to call.
+    ///   - params: Its parameters.
+    ///   - statingProtocol: Whether the request states the negotiated version and client
+    ///     identity in `_meta`, as every stateless-era request does. `false` only for an
+    ///     `initialize` sent through a dispatcher that is already running: a handshake is
+    ///     the negotiation, and has nothing negotiated to state.
+    private func sendRequest(
+        method: String,
+        params: AnyCodableValue?,
+        statingProtocol: Bool = true
+    ) async throws -> AnyCodableValue {
         let requestID = nextRequestID
         nextRequestID += 1
 
         let request = JSONRPCRequest(
-            id: requestID, method: method, params: protocolMeta(attachedTo: params))
+            id: requestID, method: method,
+            params: statingProtocol ? protocolMeta(attachedTo: params) : params)
         // The result is checked for an interim tag before it reaches a caller — see
         // `refusingInterimResult(_:)`.
         let requestData = try JSONEncoder().encode(request)
