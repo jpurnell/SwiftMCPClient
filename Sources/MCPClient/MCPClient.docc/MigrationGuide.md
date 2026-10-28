@@ -396,3 +396,82 @@ needs one more arm.
 - **A provider that returns `nil`.** With an `authorization:` provider that returns `nil`, a
   static `Authorization` in `headers` is now left off the Streamable HTTP server stream's
   `GET`, as it already was off every `POST`.
+
+## Migrating to 0.15.0: the Keychain types are SwiftKeychain's
+
+``CredentialStoreKey`` keeps its key through
+[SwiftKeychain](https://github.com/jpurnell/SwiftKeychain) instead of Keychain code
+written here. **Stored credentials are unaffected:** the key is read from the same Keychain
+item every earlier version wrote — the same service and account, readable after the first
+unlock on this device only, not synchronized, in the application's own access group, and on
+macOS in the login keychain rather than the data-protection keychain. Nothing is migrated,
+and nobody is asked to sign in again.
+
+What changes is the API around it. MCPClient no longer declares `KeychainAccess`,
+`SystemKeychain` or `CredentialKeyError`; SwiftKeychain's types take their place, and
+MCPClient does not re-export them. Code that names any of them adds the dependency and
+imports `SwiftKeychain` itself. In `Package.swift`, beside the dependency on this package:
+
+<!-- docs:illustrative -->
+```swift
+.package(url: "https://github.com/jpurnell/SwiftKeychain.git", from: "0.1.1"),
+```
+
+Code that only calls ``CredentialStoreKey/loadOrCreate()`` or
+`MCPOAuthSession.persistent()` and catches errors generically needs no change.
+
+| Before (0.14.0) | After (0.15.0) |
+|---|---|
+| `MCPClient.KeychainAccess` | `SwiftKeychain.KeychainAccess` |
+| `MCPClient.SystemKeychain()` | `SwiftKeychain.SystemKeychain(dataProtection: false)` — the default ``CredentialStoreKey`` uses |
+| a test double conforming to `KeychainAccess` | `SwiftKeychain.InMemoryKeychain()` |
+| `CredentialKeyError.keychain(OSStatus)` | `KeychainError.locked`, `.missingEntitlement` or `.status(Int32)` |
+| `CredentialKeyError.malformedKey` | `KeychainError.malformed(String)` |
+| `throws` (untyped) | `throws(KeychainError)` |
+
+### Before (0.14.0)
+
+<!-- docs:illustrative -->
+```swift
+import MCPClient
+
+do {
+    let key = try CredentialStoreKey(keychain: SystemKeychain()).loadOrCreate()
+    use(key)
+} catch CredentialKeyError.keychain(let status) where status == errSecInteractionNotAllowed {
+    showLockedBanner()
+} catch CredentialKeyError.malformedKey {
+    showCorruptKeyBanner()
+}
+```
+
+### After (0.15.0)
+
+<!-- docs:illustrative -->
+```swift
+import MCPClient
+import SwiftKeychain
+
+do {
+    let key = try CredentialStoreKey().loadOrCreate()
+    use(key)
+} catch .locked {
+    showLockedBanner()
+} catch .malformed {
+    showCorruptKeyBanner()
+} catch {
+    showKeychainFailure(error)
+}
+```
+
+In tests, `CredentialStoreKey(keychain: InMemoryKeychain())` replaces a hand-written fake.
+A fake of your own now conforms to SwiftKeychain's `KeychainAccess`, whose methods take a
+`KeychainItem` rather than a service and an account; ``CredentialStoreKey/item`` is the item
+the key lives in.
+
+### Platforms
+
+``CredentialStoreKey`` and `MCPOAuthSession.persistent()` exist on macOS, iOS and visionOS,
+the platforms SwiftKeychain supports. On tvOS and watchOS they are no longer compiled, as on
+Linux: construct the session with `EncryptedFileClientStorage` and
+``EncryptedFileRegistrationStore`` and a key from the platform's own secret store.

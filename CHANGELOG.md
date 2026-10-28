@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking — the Keychain types are SwiftKeychain's (0.15.0)
+- **`KeychainAccess`, `SystemKeychain` and `CredentialKeyError` are removed.**
+  `CredentialStoreKey` now keeps its key through
+  [SwiftKeychain](https://github.com/jpurnell/SwiftKeychain) 0.1.1, and takes SwiftKeychain's
+  `KeychainAccess` (`SystemKeychain`, `InMemoryKeychain`, or your own). MCPClient does not
+  re-export them: code that names them depends on SwiftKeychain and imports it. See
+  "Migrating to 0.15.0" in the migration guide for each old name's replacement.
+- **`CredentialStoreKey.loadOrCreate()` and `delete()` throw `KeychainError`**, typed.
+  `CredentialKeyError.keychain(OSStatus)` becomes `.locked` (`errSecInteractionNotAllowed`),
+  `.missingEntitlement`, or `.status(Int32)`; `.malformedKey` becomes `.malformed(String)`.
+  `MCPOAuthSession.persistent()` throws them too.
+- **`CredentialStoreKey` and `MCPOAuthSession.persistent()` are macOS, iOS and visionOS
+  only.** They were compiled wherever `Security` could be imported, which included tvOS and
+  watchOS; SwiftKeychain does not support those, so there they are now compiled out as on
+  Linux.
+- **Stored credentials are not affected.** The key is read from the item every earlier version
+  wrote: service `com.swiftmcpclient.credential-store`, account `credential-encryption-key`,
+  after first unlock on this device only, not synchronized, no access group, and on macOS the
+  login keychain (`SystemKeychain(dataProtection: false)`), not the data-protection keychain.
+  `CredentialStoreKey.item` and the default `keychain` are public, and tests pin every field
+  of both.
+
 ### Security
 - **A redirect could send a request — custom headers, session id and body — to any origin,
   and from `https` to `http` (CWE-200, CWE-522, CWE-319).** `StreamableHTTPTransport` and
@@ -125,6 +147,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a couple of short words, and a key in the host name.
 
 ### Changed
+- **Two processes starting at once now agree on the key.** A new key is added, never stored
+  over another; the process that loses the race reads the winner's key
+  (`KeychainKey.loadOrCreate`). Before, each stored its own and the second replaced the first,
+  stranding anything the first had already sealed.
+- The hand-written `SecItem` code is gone. `Package.resolved` gains one package,
+  `swiftkeychain`, with no traits enabled; it is linked on macOS, iOS and visionOS only.
 - **Cross-origin redirects are no longer followed.** A deployment that answered the configured
   URL with a redirect to another host or port — or from `http://` to `https://` — worked
   before and fails now with `MCPError.redirectRejected`. Configure the transport with the URL
@@ -235,6 +263,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   server adds.
 
 ### Tests
+- `CredentialStoreKeyTests` run against SwiftKeychain's `InMemoryKeychain` instead of a fake
+  of their own, through the public API rather than `@testable`. New: the item's identity is
+  pinned field by field against literal strings; the default store is
+  `SystemKeychain(dataProtection: false)`; a key seeded at the old identity is returned
+  unchanged; a locked keychain throws `.locked` and writes nothing.
 - `TransportRedirectWireTests` — two loopback servers, every request each HTTP transport makes
   × `301`/`302`/`303`/`307`/`308`, asserting on what the *second* server received; the same
   with an `authorization:` provider; four spellings of "elsewhere"; an HTTPS first server

@@ -19,6 +19,12 @@ var targets: [Target] = [
             // does, so the dependency is declared rather than borrowed.
             .product(name: "NIOSSL", package: "swift-nio-ssl"),
             .product(name: "WebSocketKit", package: "websocket-kit"),
+            // The Keychain, for the one key that seals the credential files. Apple-only:
+            // there is no Keychain on Linux, and SwiftKeychain imports Security. tvOS and
+            // watchOS are left out because SwiftKeychain does not support them.
+            .product(
+                name: "SwiftKeychain", package: "SwiftKeychain",
+                condition: .when(platforms: [.macOS, .iOS, .visionOS])),
         ],
         // Declared rather than left implicit. SwiftPM does not claim this catalog on a
         // plain build and warns that it is unhandled; the obvious quietening — `exclude` —
@@ -51,6 +57,10 @@ var targets: [Target] = [
             .product(name: "X509", package: "swift-certificates"),
             .product(name: "SwiftASN1", package: "swift-asn1"),
             .product(name: "Crypto", package: "swift-crypto"),
+            // `InMemoryKeychain`, so the credential key's tests never touch the real Keychain.
+            .product(
+                name: "SwiftKeychain", package: "SwiftKeychain",
+                condition: .when(platforms: [.macOS, .iOS, .visionOS])),
         ]
     ),
 ]
@@ -142,6 +152,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-asn1.git", from: "1.6.0"),
         .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
+        // Where the credential store's key lives, in place of SecItem code written here. No
+        // traits: the core store and `KeychainKey` are all this needs, and SwiftPM resolves
+        // nothing a disabled trait names.
+        .package(url: "https://github.com/jpurnell/SwiftKeychain.git", from: "0.1.1"),
     ],
     targets: targets
 )
