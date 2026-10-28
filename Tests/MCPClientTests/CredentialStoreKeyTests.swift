@@ -1,135 +1,189 @@
-#if canImport(Security)
+#if canImport(SwiftKeychain)
 import Foundation
 import Testing
 import Crypto
-import Security
-@testable import MCPClient
+import SwiftKeychain
+import os
+import MCPClient
 
 /// The key that every stored credential is sealed with.
 ///
 /// Its failure modes are quiet ones. A key that changes between launches does not report an
 /// error — it makes the credential file undecryptable, and the user is asked to sign in again
-/// with no explanation. So the tests here are mostly about *not* silently minting a new key.
+/// with no explanation. So the tests here are mostly about *not* silently minting a new key,
+/// and about finding the key that earlier versions of this package stored.
 @Suite("Credential store key")
 struct CredentialStoreKeyTests {
+
+    /// The service every version up to 0.14.0 filed the key under. Written out, not read from
+    /// the type under test, so a change to the type cannot quietly move this too.
+    static let legacyService = "com.swiftmcpclient.credential-store"
+
+    /// The account every version up to 0.14.0 filed the key under.
+    static let legacyAccount = "credential-encryption-key"
+
+    // MARK: - Compatibility with the key earlier versions stored
+
+    /// The item's identity is what finds an existing user's key. Every field is pinned:
+    /// service and account name it; the accessibility class is what 0.14.0 wrote; an item
+    /// that synchronized, or sat in an access group, would be a different item, and the old
+    /// one — with every credential sealed by it — would be left where nothing reads it.
+    @Test("The key's Keychain item is the one earlier versions stored")
+    func itemIdentityIsPinned() {
+        let item = CredentialStoreKey.item
+
+        #expect(item.service == Self.legacyService)
+        #expect(item.account == Self.legacyAccount)
+        #expect(item.accessibility == .afterFirstUnlockThisDeviceOnly)
+        #expect(item.synchronizable == false)
+        #expect(item.accessGroup == nil)
+        #expect(item == KeychainItem(
+            service: Self.legacyService,
+            account: Self.legacyAccount,
+            accessibility: .afterFirstUnlockThisDeviceOnly,
+            synchronizable: false,
+            accessGroup: nil))
+    }
+
+    /// Earlier versions wrote the key without `kSecUseDataProtectionKeychain`, which on macOS
+    /// is the login (file-based) keychain. The data-protection keychain is a different store:
+    /// reading there finds nothing, and the next step would mint a new key. On iOS the flag is
+    /// ignored, since there is only one keychain.
+    @Test("By default the key is read from the keychain earlier versions wrote it to")
+    func defaultKeychainIsTheLoginKeychain() throws {
+        let system = try #require(
+            CredentialStoreKey().keychain as? SystemKeychain,
+            "the default store is not the system Keychain")
+        #expect(system.dataProtection == false, "the data-protection keychain does not hold the existing key")
+    }
+
+    /// The upgrade, end to end against a stand-in: a key stored at the old identity by an
+    /// earlier version is the key this version returns, byte for byte, and nothing is added.
+    @Test("A key stored by an earlier version is found and returned unchanged")
+    func findsKeyStoredByEarlierVersion() throws {
+        let keychain = InMemoryKeychain()
+        let existing = Data((0..<32).map { UInt8($0) })
+        try keychain.store(existing, as: KeychainItem(service: Self.legacyService, account: Self.legacyAccount))
+
+        let key = try CredentialStoreKey(keychain: keychain).loadOrCreate()
+
+        #expect(key == SymmetricKey(data: existing), "a different key was returned; every stored credential is now unreadable")
+        #expect(try keychain.accounts(service: Self.legacyService) == [Self.legacyAccount])
+    }
+
+    // MARK: - Behaviour
 
     /// First run: there is no key, so one is created and kept.
     @Test("A key is created on first use and stored")
     func createsOnFirstUse() throws {
-        let keychain = FakeKeychain()
-        let store = CredentialStoreKey(keychain: keychain)
+        let keychain = InMemoryKeychain()
 
-        let key = try store.loadOrCreate()
+        let key = try CredentialStoreKey(keychain: keychain).loadOrCreate()
 
         #expect(key.bitCount == 256)
-        #expect(keychain.items.count == 1, "the key was not persisted")
+        #expect(try keychain.data(for: CredentialStoreKey.item)?.count == 32, "the key was not persisted")
     }
 
     /// The one that matters. A second launch must get the *same* key — a new one each time
-    /// makes every stored credential unreadable, and that surfaces as an unexplained request
-    /// to sign in again rather than as an error anyone can act on.
+    /// makes every stored credential unreadable.
     @Test("The same key comes back on a later launch")
     func sameKeyOnSecondLaunch() throws {
-        let keychain = FakeKeychain()
+        let keychain = InMemoryKeychain()
 
         let first = try CredentialStoreKey(keychain: keychain).loadOrCreate()
         // A separate instance, as though the process had restarted.
         let second = try CredentialStoreKey(keychain: keychain).loadOrCreate()
 
         #expect(first == second, "a different key was returned; every credential is now unreadable")
-        #expect(keychain.items.count == 1, "a second key was stored over the first")
+        #expect(try keychain.accounts(service: Self.legacyService) == [Self.legacyAccount])
     }
 
     /// Two keys generated fresh must differ, or "generation" is not generating anything.
     @Test("Separate keychains get separate keys")
     func separateKeychainsDiffer() throws {
-        let first = try CredentialStoreKey(keychain: FakeKeychain()).loadOrCreate()
-        let second = try CredentialStoreKey(keychain: FakeKeychain()).loadOrCreate()
+        let first = try CredentialStoreKey(keychain: InMemoryKeychain()).loadOrCreate()
+        let second = try CredentialStoreKey(keychain: InMemoryKeychain()).loadOrCreate()
         #expect(first != second)
     }
 
     /// A stored item of the wrong size must be refused rather than replaced. Replacing it
-    /// would be the silent path to an unreadable credential file; throwing at least says
-    /// which layer failed.
+    /// would be the silent path to an unreadable credential file.
     @Test("A malformed stored key is refused, not replaced")
-    func malformedKeyRefused() {
-        let keychain = FakeKeychain()
-        keychain.items[FakeKeychain.Key(service: CredentialStoreKey.service,
-                                        account: CredentialStoreKey.account)] = Data([1, 2, 3])
+    func malformedKeyRefused() throws {
+        let keychain = InMemoryKeychain()
+        let malformed = Data([1, 2, 3])
+        try keychain.store(malformed, as: CredentialStoreKey.item)
 
-        let store = CredentialStoreKey(keychain: keychain)
-        #expect(throws: CredentialKeyError.malformedKey) {
-            try store.loadOrCreate()
-        }
-        #expect(keychain.items.count == 1, "the malformed item was overwritten")
-    }
-
-    /// A keychain that refuses must surface the status. "Keychain failed" is unactionable;
-    /// the status is what distinguishes a locked keychain from a missing entitlement.
-    @Test("A refusing keychain surfaces its status")
-    func refusalSurfacesStatus() {
-        let keychain = FakeKeychain()
-        keychain.readStatus = errSecInteractionNotAllowed
-
-        #expect(throws: CredentialKeyError.keychain(errSecInteractionNotAllowed)) {
+        let error = #expect(throws: KeychainError.self) {
             try CredentialStoreKey(keychain: keychain).loadOrCreate()
         }
+        guard case .malformed = error else {
+            Issue.record("expected .malformed, got \(String(describing: error))")
+            return
+        }
+        #expect(try keychain.data(for: CredentialStoreKey.item) == malformed, "the malformed item was overwritten")
     }
 
-    /// A write that fails must throw rather than handing back a key that was never stored —
+    /// A locked keychain must surface as locked, never as "no key yet" — that reading would
+    /// mint a new key and replace the real one.
+    @Test("A locked keychain is reported, not read as empty")
+    func lockedKeychainReported() {
+        let keychain = RefusingKeychain(refuseReads: .locked)
+
+        #expect(throws: KeychainError.locked) {
+            try CredentialStoreKey(keychain: keychain).loadOrCreate()
+        }
+        #expect(keychain.attemptedWrite == false, "a key was written while the keychain was locked")
+    }
+
+    /// A write that fails must throw rather than hand back a key that was never stored —
     /// that key would work for this launch and be gone by the next one.
     @Test("A failed write is reported rather than returning an unstored key")
     func failedWriteReported() {
-        let keychain = FakeKeychain()
-        keychain.writeStatus = errSecDuplicateItem
+        let keychain = RefusingKeychain(refuseWrites: .missingEntitlement)
 
-        #expect(throws: CredentialKeyError.keychain(errSecDuplicateItem)) {
+        #expect(throws: KeychainError.missingEntitlement) {
             try CredentialStoreKey(keychain: keychain).loadOrCreate()
         }
     }
 
-    /// Deleting the key is how a caller discards every credential at once, without having to
-    /// reach each one.
+    /// Deleting the key is how a caller discards every credential at once.
     @Test("Deleting the key removes it")
     func deleteRemovesKey() throws {
-        let keychain = FakeKeychain()
+        let keychain = InMemoryKeychain()
         let store = CredentialStoreKey(keychain: keychain)
 
-        _ = try store.loadOrCreate()
-        #expect(keychain.items.count == 1)
-
+        let first = try store.loadOrCreate()
         try store.delete()
-        #expect(keychain.items.isEmpty)
+        #expect(try keychain.data(for: CredentialStoreKey.item) == nil)
 
         // And the next call mints a fresh one rather than failing.
-        _ = try store.loadOrCreate()
-        #expect(keychain.items.count == 1)
+        let second = try store.loadOrCreate()
+        #expect(first != second)
+        #expect(try keychain.data(for: CredentialStoreKey.item)?.count == 32, "the fresh key was not persisted")
     }
 
-    /// Deleting a key that is not there is not an error — a user pressing "sign out" twice
-    /// should not see a failure.
+    /// Deleting a key that is not there is not an error — "sign out" pressed twice should not
+    /// fail.
     @Test("Deleting an absent key is harmless")
     func deleteAbsentKeyIsHarmless() throws {
-        let keychain = FakeKeychain()
+        let keychain = InMemoryKeychain()
         let store = CredentialStoreKey(keychain: keychain)
 
         try store.delete()
-        #expect(keychain.items.isEmpty)
 
-        // And the store is still usable afterwards, rather than left in some half-state.
         let key = try store.loadOrCreate()
         #expect(key.bitCount == 256)
-        #expect(keychain.items.count == 1)
     }
 
     /// The key round-trips through storage byte for byte, or the credential file sealed with
     /// it on one launch cannot be opened on the next.
     @Test("The stored bytes reconstruct the same key")
     func storedBytesReconstructKey() throws {
-        let keychain = FakeKeychain()
+        let keychain = InMemoryKeychain()
         let created = try CredentialStoreKey(keychain: keychain).loadOrCreate()
 
-        let stored = try #require(keychain.items.values.first)
+        let stored = try #require(try keychain.data(for: CredentialStoreKey.item))
         #expect(stored.count == 32)
         #expect(SymmetricKey(data: stored) == created)
     }
@@ -137,65 +191,47 @@ struct CredentialStoreKeyTests {
 
 // MARK: - Helpers
 
-/// A keychain that lives in memory.
+/// A keychain that refuses reads, writes, or both, with a chosen error, and holds nothing.
 ///
-/// The real one prompts, behaves differently under an unsigned test bundle, and leaves items
-/// on the developer's machine. None of that exercises the logic being tested here, which is
-/// entirely about what happens on the second launch and on refusal.
-// Justification: every stored property is private and reached only under `lock`.
-private final class FakeKeychain: KeychainAccess, @unchecked Sendable {
+/// `InMemoryKeychain` never refuses, and the cases worth testing are the refusals: a locked
+/// device and an unsigned process.
+private final class RefusingKeychain: KeychainAccess {
 
-    struct Key: Hashable {
-        let service: String
-        let account: String
+    private let readError: KeychainError?
+    private let writeError: KeychainError?
+    private let wrote = OSAllocatedUnfairLock(initialState: false)
+
+    init(refuseReads readError: KeychainError? = nil, refuseWrites writeError: KeychainError? = nil) {
+        self.readError = readError
+        self.writeError = writeError
     }
 
-    private let lock = NSLock()
-    private var storage: [Key: Data] = [:]
-    private var injectedReadStatus: OSStatus?
-    private var injectedWriteStatus: OSStatus?
+    /// Whether anything tried to store or add an item.
+    var attemptedWrite: Bool { wrote.withLock { $0 } }
 
-    /// A status to return from reads instead of succeeding.
-    var readStatus: OSStatus? {
-        get { withLock { injectedReadStatus } }
-        set { withLock { injectedReadStatus = newValue } }
+    func data(for item: KeychainItem) throws(KeychainError) -> Data? {
+        if let readError { throw readError }
+        return nil
     }
 
-    /// A status to return from writes instead of succeeding.
-    var writeStatus: OSStatus? {
-        get { withLock { injectedWriteStatus } }
-        set { withLock { injectedWriteStatus = newValue } }
+    func store(_ data: Data, as item: KeychainItem) throws(KeychainError) {
+        wrote.withLock { $0 = true }
+        if let writeError { throw writeError }
     }
 
-    var items: [Key: Data] {
-        get { withLock { storage } }
-        set { withLock { storage = newValue } }
+    func add(_ data: Data, as item: KeychainItem) throws(KeychainError) -> Bool {
+        wrote.withLock { $0 = true }
+        if let writeError { throw writeError }
+        return true
     }
 
-    private func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body()
+    func delete(_ item: KeychainItem) throws(KeychainError) {
+        if let writeError { throw writeError }
     }
 
-    func data(service: String, account: String) throws -> Data? {
-        try withLock {
-            if let injectedReadStatus { throw CredentialKeyError.keychain(injectedReadStatus) }
-            return storage[Key(service: service, account: account)]
-        }
-    }
-
-    func store(_ data: Data, service: String, account: String) throws {
-        try withLock {
-            if let injectedWriteStatus { throw CredentialKeyError.keychain(injectedWriteStatus) }
-            storage[Key(service: service, account: account)] = data
-        }
-    }
-
-    func delete(service: String, account: String) throws {
-        withLock {
-            _ = storage.removeValue(forKey: Key(service: service, account: account))
-        }
+    func accounts(service: String) throws(KeychainError) -> [String] {
+        if let readError { throw readError }
+        return []
     }
 }
 #endif

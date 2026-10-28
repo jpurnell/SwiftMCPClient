@@ -63,7 +63,7 @@ public actor MCPOAuthSession {
         self.tokenTransport = tokenTransport
     }
 
-    #if canImport(Security)
+    #if canImport(SwiftKeychain)
     /// Creates a session that keeps its credential across launches.
     ///
     /// The credential file is sealed with a key from the Keychain — one small key there, and
@@ -82,7 +82,7 @@ public actor MCPOAuthSession {
     /// deployment already has — which is the decision this method takes on an Apple platform.
     ///
     /// - Returns: A session backed by encrypted storage.
-    /// - Throws: ``CredentialKeyError`` if the Keychain refused, or a file error.
+    /// - Throws: SwiftKeychain's `KeychainError` if the Keychain refused, or a file error.
     public static func persistent(
         directory: URL? = nil,
         setup: MCPOAuthSetup = MCPOAuthSetup()
