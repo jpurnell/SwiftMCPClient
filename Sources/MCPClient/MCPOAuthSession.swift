@@ -76,7 +76,8 @@ public actor MCPOAuthSession {
     ///     support directory.
     ///   - setup: How discovery is performed. Injected for tests.
     /// Available only where a Keychain is: the encrypted stores themselves are portable, but
-    /// *where the key lives* is a platform decision and this convenience makes it. On Linux,
+    /// *where the key lives* is a platform decision and this convenience makes it. That means
+    /// macOS, iOS and visionOS, where SwiftKeychain runs. On Linux, tvOS and watchOS,
     /// construct the session directly with `EncryptedFileClientStorage` and
     /// ``EncryptedFileRegistrationStore``, supplying a key from whatever secret store that
     /// deployment already has — which is the decision this method takes on an Apple platform.

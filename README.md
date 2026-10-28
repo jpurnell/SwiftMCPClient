@@ -19,6 +19,13 @@ A Swift 6 client library for the [Model Context Protocol (MCP)](https://modelcon
 - macOS 14+ / iOS 17+ / tvOS 17+ / watchOS 10+
 - Linux (Ubuntu 22.04+) — built and tested in CI
 
+`MCPOAuthSession.persistent()` and `CredentialStoreKey`, which keep the key that seals stored
+credentials in the Keychain, are available on macOS, iOS and visionOS. They use
+[SwiftKeychain](https://github.com/jpurnell/SwiftKeychain) and take its `KeychainAccess`, so
+code that passes its own store (an `InMemoryKeychain` in tests, say) imports `SwiftKeychain`.
+On Linux, tvOS and watchOS, build the session from `EncryptedFileClientStorage` and
+`EncryptedFileRegistrationStore` with a key from that platform's own secret store.
+
 ## Installation
 
 Add to your `Package.swift`:
@@ -303,7 +310,8 @@ version, and a Developer ID signature.
 The signature is not decoration. `MCPOAuthSession` seals its credentials with a key from the
 Keychain, and the Keychain decides what may read that key by the program's code identity. An
 unsigned build has a new identity every time it is compiled, so every rebuild would lose the
-saved OAuth tokens. A signed one keeps them.
+saved OAuth tokens. A signed one keeps them. The key is in the login keychain, not the
+data-protection keychain, which an unsigned build cannot write to at all.
 
 The first Developer ID signing on a machine raises a system dialog asking to use the key, so
 run that command from a terminal you are sitting at and choose **Always Allow**. It is
