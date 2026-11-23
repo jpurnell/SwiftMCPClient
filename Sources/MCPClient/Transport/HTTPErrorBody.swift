@@ -30,9 +30,9 @@ enum HTTPErrorBody {
         do {
             collected = try await body.collect(upTo: maximumBytes)
         } catch {
-            let logger = Logger(label: "MCPClient.HTTPErrorBody")
-            // logging: the error body could not be read within its bound, so the HTTP status is reported instead
-            logger.debug("error body not read: \(type(of: error))")
+            // The body was too large or could not be read: the HTTP status is reported instead. Nothing about the
+            // error is interpolated: it can name the peer.
+            Logger(label: "MCPClient.HTTPErrorBody").debug("an error response's body could not be read within its bound")
             return nil
         }
         return jsonRPCError(in: Data(buffer: collected))
@@ -50,12 +50,14 @@ enum HTTPErrorBody {
             let jsonrpc: String
             let error: JSONRPCError
         }
-        // silent: a body that is not a JSON-RPC error is the ordinary case (an HTML page, an
-        // OAuth error), and the caller reports the HTTP status for it
-        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
-              envelope.jsonrpc == "2.0" else {
+        do {
+            let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+            return envelope.jsonrpc == "2.0" ? envelope.error : nil
+        } catch {
+            // The ordinary case: an HTML page, or an OAuth error object is not a JSON-RPC error, and the caller reports
+            // the HTTP status for it. Logged at debug, without the body or the error, which can echo the peer's text.
+            Logger(label: "MCPClient.HTTPErrorBody").debug("an error response's body is not a JSON-RPC error")
             return nil
         }
-        return envelope.error
     }
 }
