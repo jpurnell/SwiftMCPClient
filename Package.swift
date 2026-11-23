@@ -130,11 +130,11 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.105.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         // Already present transitively via async-http-client and websocket-kit; declared
         // because `ServerTrust` builds a `TLSConfiguration` directly.
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.36.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
         // Test-only: mints the self-signed and private-CA certificates the trust tests
         // handshake against. Both were already in the graph through async-http-client's
         // dependencies; neither reaches the library target.

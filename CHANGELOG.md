@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **swift-nio family brought to the latest, with floors that stop a downgrade.** Resolved:
+  swift-nio 2.105.0 (was 2.103.0), swift-nio-ssl 2.37.6 (was 2.36.1), swift-nio-http2 1.46.0,
+  swift-nio-extras 1.35.2, swift-nio-transport-services 1.28.0, async-http-client 1.37.0.
+  The manifest floors are now `swift-nio from: 2.105.0` and `swift-nio-ssl from: 2.37.6`.
+  Advisories: swift-nio-ssl GHSA-xfxg-9975-pc2j (critical; vulnerable 2.18.0 to 2.37.1, this
+  repository was resolved at 2.36.1), swift-nio GHSA-qcc5-f287-vgmq, GHSA-r3rc-9hpw-54v9,
+  GHSA-rj37-6j9x-74q6. 678 tests pass on this state.
+
 ### Changed
 - **`swift-oauth` is pinned `exact: "1.0.0-beta.13"`, up from `from: "0.11.1"`.** beta.13 is swift-oauth's
   current tag, and a prerelease: SwiftPM version ranges (`from:`) never select a prerelease, so an
