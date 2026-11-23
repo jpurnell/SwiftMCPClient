@@ -119,6 +119,16 @@ enum OAuthHTTP {
             if let refusal = guardian.refusal {
                 throw refuse(refusal, policy: policy, purpose: purpose)
             }
+            // swift-oauth 1.0.0-beta.2 and later decline the redirect themselves, on a task
+            // delegate of their own, so this session's guard is never asked. What comes back
+            // is their `OAuthRedirectRefused`; it is the same event and is reported the same way.
+            if let refused = error as? OAuthRedirectRefused {
+                throw refuse(
+                    RedirectGuard.Refusal(
+                        status: refused.status, from: refused.endpoint,
+                        destination: refused.destination, cause: .policy),
+                    policy: policy, purpose: purpose)
+            }
             // `URLError` describes itself with the failing URL, whole. Named by kind and
             // origin instead, as a transport's failure is.
             guard error is URLError else { throw error }
@@ -274,6 +284,26 @@ public struct MCPOAuthTokenTransport: TokenTransport {
     ) async throws -> TokenResponse {
         try await OAuthHTTP.withSession(policy: .never, purpose: "token", reaching: endpoint) { session in
             try await URLSessionTokenTransport(session: session).exchange(
+                endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
+        }
+    }
+
+    /// Asks a revocation endpoint to revoke a token, following no redirect.
+    ///
+    /// Forwarded to `URLSessionTokenTransport`, which reads only the status (RFC 7009 §2.2).
+    /// The protocol's default would decode a token response from a body that has none.
+    ///
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the endpoint answered
+    ///   with a redirect; ``MCPError/connectionFailed(reason:)`` if it could not be reached;
+    ///   `OAuthError` for anything the provider rejected.
+    public func revoke(
+        endpoint: URL,
+        parameters: [String: String],
+        credentials: ClientCredentials,
+        method: ClientAuthenticationMethod
+    ) async throws {
+        try await OAuthHTTP.withSession(policy: .never, purpose: "token", reaching: endpoint) { session in
+            try await URLSessionTokenTransport(session: session).revoke(
                 endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
         }
     }

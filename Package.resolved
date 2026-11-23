@@ -1,5 +1,5 @@
 {
-  "originHash" : "9b200c4bb58354a1395bedae996bffb7cc7f7f25f53c9d40c9f09d299a25cba4",
+  "originHash" : "b590449d7ce51fa42e01a50b550fbbecdd83978a311c4a29348e2721436849e0",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -137,6 +137,15 @@
       }
     },
     {
+      "identity" : "swift-identity",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpurnell/swift-identity.git",
+      "state" : {
+        "revision" : "5e660a694dbd108baf0110d6bd4c3431b64e8d68",
+        "version" : "0.10.0"
+      }
+    },
+    {
       "identity" : "swift-log",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-log.git",
@@ -213,8 +222,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/jpurnell/swift-oauth",
       "state" : {
-        "revision" : "45897092d49568fbae986ec0084e7708f1ab6c0e",
-        "version" : "0.11.1"
+        "revision" : "ebb169585372f946d7f4561eaa4eed9cac5ea6b3",
+        "version" : "1.0.0-beta.13"
       }
     },
     {

@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`swift-oauth` is pinned `exact: "1.0.0-beta.13"`, up from `from: "0.11.1"`.** beta.13 is swift-oauth's
+  current tag, and a prerelease: SwiftPM version ranges (`from:`) never select a prerelease, so an
+  `exact:` pin is the only form that can name it (and the form SwiftMCPServer already uses). The
+  old range floated to the newest 0.x, which no longer compiles against this client (an
+  unhandled `.tlsClientAuth` case), and left a client and its server on different OAuth code. Nothing in
+  the client's own sources needed to change to compile against beta.13. Consumers that also depend on
+  swift-oauth must now resolve exactly `1.0.0-beta.13` (or raise their pin together with this one).
+
+### Fixed
+- **A redirected token, refresh or revocation request was reported as the wrong error.** swift-oauth
+  1.0.0-beta.2 and later decline a credential-bearing redirect themselves and throw
+  `OAuthRedirectRefused`; the client's own session guard was never asked, so
+  `MCPOAuthTokenTransport` let that error through instead of
+  `MCPError.redirectRejected(destination:reason:)`. It is mapped back, with the same
+  wording and origin-only destination; nothing is sent to the destination either way. Found by the
+  existing 25 `MCPOAuthRedirectWireTests` cases failing after the bump.
+- **`MCPOAuthTokenTransport` now implements `revoke`** (forwarding to swift-oauth's status-only
+  RFC 7009 request, with no redirect followed). It previously inherited the protocol default, which
+  decodes a token response from a revocation answer that has none.
+
+### Added
+- Tests: refresh-token rotation (each refresh presents the token the last response returned and the
+  client stores the new one; two concurrent forced refreshes do not spend a token twice; a
+  replayed token is refused) against a single-use token endpoint; a revocation is never redirected.
+  These are against a stub provider, not swift-oauth's in-memory provider store: pulling the provider
+  product (and its SQLite target) into the client's test target was not worth it, and swift-oauth
+  tests the same rotation against its own provider.
+
 ### Security
 - **A redirect could send a request — custom headers, session id and body — to any origin,
   and from `https` to `http` (CWE-200, CWE-522, CWE-319).** `StreamableHTTPTransport` and

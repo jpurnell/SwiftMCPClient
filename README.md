@@ -18,6 +18,7 @@ A Swift 6 client library for the [Model Context Protocol (MCP)](https://modelcon
 - Swift 6.0+
 - macOS 14+ / iOS 17+ / tvOS 17+ / watchOS 10+
 - Linux (Ubuntu 22.04+) — built and tested in CI
+- `swift-oauth` exactly `1.0.0-beta.13` (a prerelease, so it is pinned with `exact:`). A package that also depends on `swift-oauth` must agree on that version.
 
 ## Installation
 
