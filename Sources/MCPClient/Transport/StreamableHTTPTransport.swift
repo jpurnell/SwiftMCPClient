@@ -556,6 +556,17 @@ public actor StreamableHTTPTransport: MCPTransport {
         }
 
         guard (200...299).contains(response.status.code) else {
+            // A server that refuses at the HTTP layer may still answer in JSON-RPC, and the code
+            // and data in that answer are what a caller decides from (`-32022` lists the versions
+            // the server speaks). Surfaced as the error, with the status it travelled under
+            // logged rather than lost; any other body keeps the status as the code.
+            if let rpcError = await HTTPErrorBody.jsonRPCError(in: response.body) {
+                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+                // logging: a JSON-RPC refusal that travelled under a non-2xx status; the status, the code and the configured origin
+                logger.debug("HTTP \(response.status.code) from POST to \(HTTPOrigin.redacted(url)) carried JSON-RPC error \(rpcError.code)")
+                throw MCPError.requestFailed(
+                    code: rpcError.code, message: rpcError.message, data: rpcError.data)
+            }
             throw MCPError.requestFailed(
                 code: Int(response.status.code),
                 message: "HTTP \(response.status.code) from POST to \(HTTPOrigin.redacted(url))",

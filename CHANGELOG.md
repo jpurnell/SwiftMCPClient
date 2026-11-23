@@ -25,6 +25,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   swift-oauth must now resolve exactly `1.0.0-beta.13` (or raise their pin together with this one).
 
 ### Fixed
+- **A non-2xx POST response's JSON-RPC error body is no longer discarded (`StreamableHTTPTransport`).**
+  A server such as SwiftMCPServer refuses an unsupported protocol revision with HTTP `400` and a
+  JSON-RPC body (`-32022`, with the versions it speaks in `data.supported`); the transport threw
+  `requestFailed(code: 400, ..., data: nil)` without reading the body. So
+  `MCPClientConnection.supportedVersions(from:)` returned `[]`, and `MCPConnectionFactory` read `400`
+  as "old server", sent `initialize` to a server that had removed it, and failed. Now, when the body
+  (read with a 64 KiB bound) is a JSON-RPC 2.0 error, the thrown error carries its code, message and
+  data; any other body keeps the HTTP-status error as before. The HTTP status is no longer in the
+  thrown error for those responses (it is logged at debug). The 401 refresh, the 404 session
+  clearing, 202 and redirect handling run before this and are unchanged. Tests use a real loopback
+  HTTP 400 (`HTTPErrorBodyTests`). Not changed: the `HTTPSSETransport` POST and the stream-open `GET`
+  have the same status-only throw.
 - **A redirected token, refresh or revocation request was reported as the wrong error.** swift-oauth
   1.0.0-beta.2 and later decline a credential-bearing redirect themselves and throw
   `OAuthRedirectRefused`; the client's own session guard was never asked, so
