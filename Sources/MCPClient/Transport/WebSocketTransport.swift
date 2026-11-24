@@ -3,6 +3,7 @@ import Logging
 import WebSocketKit
 import NIOCore
 import NIOHTTP1
+import NIOWebSocket
 import NIOSSL
 import NIOFoundationCompat
 import NIOPosix
@@ -51,12 +52,24 @@ import NIOPosix
 /// with ``MCPError/connectionFailed(reason:)`` naming the status, and nothing is sent to
 /// wherever its `Location` pointed.
 ///
+/// ## Message Size
+///
+/// A message is limited to ``MCPResponseLimits/maximumMessageBytes`` — 10 MiB unless
+/// configured — whether it arrives as one frame or as any number of fragments. A peer that
+/// goes past it is disconnected, and ``receive()`` throws
+/// ``MCPError/connectionFailed(reason:)`` whose reason names the limit. It cannot say
+/// ``MCPError/responseTooLarge(limit:reason:)``, as the HTTP transports do: `WebSocketKit`
+/// drops the connection without saying why, and what it leaves behind is shared with other
+/// protocol errors. Its own defaults are a limit of 16 KiB on one frame, which refuses an
+/// ordinary message, and none on a message sent as fragments, which lets a peer fill memory.
+///
 /// ## Reconnection
 ///
 /// If the WebSocket connection drops, create a new transport instance —
 /// `WebSocketTransport` does not auto-reconnect.
 public actor WebSocketTransport: MCPTransport {
     private let url: URL
+    private let limits: MCPResponseLimits
     private let headers: [String: String]
 
     /// Asked for a current `Authorization` header before the upgrade request.
@@ -66,6 +79,9 @@ public actor WebSocketTransport: MCPTransport {
     private var eventLoopGroup: (any EventLoopGroup)?
     private var webSocket: WebSocket?
     private var isConnected: Bool = false
+
+    /// Why the socket closed, when that is more than "it closed".
+    private var closedBy: MCPError?
 
     /// Queue of received messages from WebSocket frames.
     private var messageQueue: [Data] = []
@@ -110,12 +126,16 @@ public actor WebSocketTransport: MCPTransport {
     ///     ``ServerTrust/system``. For a self-signed or privately issued certificate, supply
     ///     it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``; the
     ///     chain and the hostname are verified either way.
+    ///   - limits: How much one message may hold; only ``MCPResponseLimits/maximumMessageBytes``
+    ///     applies. Defaults to ``MCPResponseLimits/standard``, 10 MiB. See "Message Size".
     public init(
         url: URL,
         headers: [String: String] = [:],
-        serverTrust: ServerTrust = .system
+        serverTrust: ServerTrust = .system,
+        limits: MCPResponseLimits = .standard
     ) {
         self.url = url
+        self.limits = limits
         self.headers = headers
         self.authorization = nil
         self.connectionTimeout = .seconds(clamping: Self.defaultConnectionTimeout)
@@ -136,14 +156,18 @@ public actor WebSocketTransport: MCPTransport {
     ///     ``connect()`` when this runs out, rather than leaving it waiting.
     ///   - serverTrust: Which certificate roots a `wss://` server may chain to. Defaults to
     ///     ``ServerTrust/system``.
+    ///   - limits: How much one message may hold; only ``MCPResponseLimits/maximumMessageBytes``
+    ///     applies. Defaults to ``MCPResponseLimits/standard``, 10 MiB. See "Message Size".
     public init(
         url: URL,
         headers: [String: String] = [:],
         authorization: AuthorizationProvider?,
         connectionTimeout: TimeInterval = 30.0,
-        serverTrust: ServerTrust = .system
+        serverTrust: ServerTrust = .system,
+        limits: MCPResponseLimits = .standard
     ) {
         self.url = url
+        self.limits = limits
         self.headers = headers
         self.authorization = authorization
         self.connectionTimeout = .seconds(clamping: connectionTimeout)
@@ -166,6 +190,7 @@ public actor WebSocketTransport: MCPTransport {
         trustSelfSignedCertificates: Bool
     ) {
         self.url = url
+        self.limits = .standard
         self.headers = headers
         self.authorization = nil
         self.connectionTimeout = .seconds(clamping: Self.defaultConnectionTimeout)
@@ -283,8 +308,14 @@ public actor WebSocketTransport: MCPTransport {
         }
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let configuration = WebSocketClient.Configuration(
+        var configuration = WebSocketClient.Configuration(
             tlsConfiguration: target.usesTLS ? tlsConfiguration : nil)
+        // `WebSocketKit` limits one frame to 16 KiB by default, which refuses an ordinary
+        // message — a tool listing — sent as one frame, and does not limit a message sent as
+        // fragments at all. Both are held to the one limit: a frame is no larger than the
+        // message it belongs to, and a message is no larger than what the caller allowed.
+        configuration.maxFrameSize = limits.maximumMessageBytes
+        configuration.maxAccumulatedFrameSize = limits.maximumMessageBytes
         let limit = connectionTimeout
 
         // The first of three things to happen decides the attempt: the upgrade completes,
@@ -323,8 +354,9 @@ public actor WebSocketTransport: MCPTransport {
         case .success(let socket):
             self.eventLoopGroup = group
             self.webSocket = socket
+            self.closedBy = nil
             self.isConnected = true
-            setupHandlers(socket)
+            try await setupHandlers(socket)
         case .failure(let error):
             // Shutting the group down closes whatever the attempt had open, a connection
             // that was still waiting included.
@@ -417,7 +449,9 @@ public actor WebSocketTransport: MCPTransport {
     /// Return the next queued WebSocket message, or suspend until one arrives.
     public func receive() async throws -> Data {
         guard isConnected else {
-            throw MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
+            // A socket that closed on an oversized message says so, rather than only that it
+            // is not connected.
+            throw closedBy ?? MCPError.connectionFailed(reason: "WebSocketTransport is not connected")
         }
 
         if !messageQueue.isEmpty {
@@ -431,24 +465,33 @@ public actor WebSocketTransport: MCPTransport {
 
     // MARK: - Private
 
-    private func setupHandlers(_ ws: WebSocket) {
-        ws.onText { [weak self] _, text in
-            guard let self = self else { return }
+    /// Registers what to do with a message, and with the socket closing.
+    ///
+    /// On the socket's own event loop, not here: `WebSocketKit` keeps these callbacks in
+    /// storage that only that loop may touch, and asserts as much. Registering them from
+    /// this actor — which is what this did — ends the process on the first connection that
+    /// succeeds. The closures hop back to the actor to queue what they are given.
+    private func setupHandlers(_ ws: WebSocket) async throws {
+        let onText: @Sendable (WebSocket, String) -> Void = { [weak self] _, text in
+            guard let self else { return }
             if let data = text.data(using: .utf8) {
                 Task { await self.enqueueMessage(data) }
             }
         }
-
-        ws.onBinary { [weak self] _, buffer in
-            guard let self = self else { return }
+        let onBinary: @Sendable (WebSocket, ByteBuffer) -> Void = { [weak self] _, buffer in
+            guard let self else { return }
             let data = Data(buffer: buffer)
             Task { await self.enqueueMessage(data) }
         }
-
-        ws.onClose.whenComplete { [weak self] _ in
-            guard let self = self else { return }
-            Task { await self.handleClose() }
+        let onClose: @Sendable (WebSocketErrorCode?) -> Void = { [weak self] code in
+            guard let self else { return }
+            Task { await self.handleClose(code: code) }
         }
+        try await ws.eventLoop.submit {
+            ws.onText(onText)
+            ws.onBinary(onBinary)
+            ws.onClose.whenComplete { _ in onClose(ws.closeCode) }
+        }.get()
     }
 
     private func enqueueMessage(_ data: Data) {
@@ -460,11 +503,40 @@ public actor WebSocketTransport: MCPTransport {
         }
     }
 
-    private func handleClose() {
+    /// The socket closed — by the peer, by an error in the stream, or by the library when a
+    /// frame or message went past its limit.
+    ///
+    /// - Parameter code: The close code `WebSocketKit` recorded, if it recorded one.
+    private func handleClose(code: WebSocketErrorCode?) {
         isConnected = false
+        let error = MCPError.connectionFailed(
+            reason: Self.reason(forClosing: code, limit: limits.maximumMessageBytes))
+        closedBy = error
         if let continuation = messageContinuation {
             messageContinuation = nil
-            continuation.resume(throwing: MCPError.connectionFailed(reason: "WebSocket closed"))
+            continuation.resume(throwing: error)
+        }
+    }
+
+    /// What to say about a close.
+    ///
+    /// `WebSocketKit` does not report why it dropped a connection it found a fault in, and
+    /// the two signals it leaves — no close code at all, for a frame past the frame limit, and
+    /// an unexpected-error code, for fragments past the aggregate limit — are shared with
+    /// other protocol errors. So a limit is named as a possible cause, never as the cause:
+    /// a message that went past it is the likeliest, not the only, way to arrive here.
+    ///
+    /// - Parameters:
+    ///   - code: The close code recorded, if any.
+    ///   - limit: The message limit the transport was configured with.
+    /// - Returns: The reason for the ``MCPError/connectionFailed(reason:)``.
+    static func reason(forClosing code: WebSocketErrorCode?, limit: Int) -> String {
+        switch code {
+        case nil, .unexpectedServerError?:
+            return "WebSocket closed after an error in the stream — a frame or message larger "
+                + "than the \(limit)-byte limit closes it this way"
+        default:
+            return "WebSocket closed"
         }
     }
 }
