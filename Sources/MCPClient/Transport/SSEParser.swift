@@ -72,6 +72,15 @@ struct SSEParser: Sendable {
         return events
     }
 
+    /// How many bytes are being held for an event that has not ended yet: the unfinished
+    /// line, and the `data:` lines already read for it.
+    ///
+    /// What a reader compares with its limit after each ``append(_:)``. Nothing else bounds
+    /// it — an event ends at a blank line, and a server need never send one.
+    var pendingBytes: Int {
+        currentData.reduce(buffer.utf8.count) { $0 + $1.utf8.count }
+    }
+
     /// Clear all buffered state.
     mutating func reset() { // LIVE: public API for callers who reuse the parser
         buffer = ""

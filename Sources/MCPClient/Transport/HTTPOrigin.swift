@@ -146,24 +146,31 @@ enum HTTPOrigin {
     }
 
 
-    /// Warns, once per connect, that configured credentials are about to cross a network
-    /// unencrypted.
+    /// Warns that configured credentials are about to cross a network unencrypted.
     ///
     /// The same line from all three network transports, so that "is this deployment sending
-    /// a token in the clear" has one thing to search a log for.
+    /// a token in the clear" has one thing to search a log for. A transport says it once in
+    /// its life, however many times it connects: the fact does not change between connects,
+    /// and a line repeated on every reconnect is a line an operator learns to skip.
     ///
     /// - Parameters:
     ///   - url: The URL the transport was configured with.
     ///   - carriesCredentials: Whether any header or an `authorization:` provider is
     ///     configured. Every custom header counts: an API key travels in one as often as in
     ///     `Authorization`.
-    ///   - label: The transport's logger label.
-    static func warnIfPlaintextToRemote(_ url: URL, carriesCredentials: Bool, label: String) {
-        guard carriesCredentials, isPlaintextToRemote(url) else { return }
-        let logger = Logger(label: label)
+    ///   - logger: The transport's logger.
+    /// - Returns: `true` if the warning was written — which is what a transport records so
+    ///   as not to write it again.
+    @discardableResult
+    static func warnIfPlaintextToRemote(_ url: URL, carriesCredentials: Bool, logger: Logger) -> Bool {
+        guard carriesCredentials, isPlaintextToRemote(url) else { return false }
         // logging: swift-log has no privacy annotations; an origin only — no path, query, userinfo or header
-        logger.warning("sending configured headers to \(description(of: url)) unencrypted; use an https:// or wss:// URL for a server on another machine")
+        logger.warning("\(plaintextWarningPrefix) \(description(of: url)) unencrypted; use an https:// or wss:// URL for a server on another machine")
+        return true
     }
+
+    /// How the plaintext warning begins — the fixed part, which is what a log is searched for.
+    static let plaintextWarningPrefix = "sending configured headers to"
 
     /// What is said of a URL that has no origin to name.
     static let noOrigin = "(no origin)"

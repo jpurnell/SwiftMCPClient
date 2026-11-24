@@ -91,7 +91,11 @@ func handleRequestFailure() async throws {
 
 ### timeout
 
-Thrown when a request exceeds the configured timeout duration.
+Thrown when a request exceeds the configured timeout duration —
+`requestTimeout` on ``MCPClientConnection``, 30 seconds unless you pass
+another. It applies to every request, the `initialize` handshake included: a
+server that accepts the handshake and never answers fails it with this error,
+and the transport is disconnected as after any failed handshake.
 
 ```swift
 func handleTimeout() async throws {
@@ -232,6 +236,43 @@ the server can fix that. A cross-origin redirect is very often a server that
 moved, or one you reached over `http` that wants `https` — and the fix is the
 URL you configured.
 
+### responseTooLarge
+
+Thrown when a server sends one piece of a response larger than the client will
+read into memory. Reading stops at the limit — the rest is not buffered — so a
+body with no end, or an event whose closing blank line never comes, costs a
+bounded amount of memory instead of all of it.
+
+| What is read | Limit | Configurable |
+|---|---|---|
+| A JSON response body (``StreamableHTTPTransport``, ``HTTPSSETransport``) | 10 MiB | ``MCPResponseLimits/maximumResponseBytes`` |
+| One Server-Sent Event, on any stream | 10 MiB | ``MCPResponseLimits/maximumEventBytes`` |
+| An OAuth metadata, registration or token response | 1 MiB | no |
+
+```swift
+func allowLargerResponses() async throws {
+    guard let url = URL(string: "https://mcp.example.com/mcp") else { return }
+    // A server known to return very large tool results.
+    let transport = StreamableHTTPTransport(
+        url: url,
+        limits: MCPResponseLimits(maximumResponseBytes: 64 * 1024 * 1024))
+    let client = MCPClientConnection(transport: transport)
+    do {
+        _ = try await client.initialize(clientName: "app", clientVersion: "1.0")
+    } catch MCPError.responseTooLarge(let limit, let reason) {
+        print("Stopped reading at \(limit) bytes: \(reason)")
+        // Not transient: the same request draws the same response.
+    }
+}
+```
+
+`send(_:)` throws it for a JSON body. An oversized *event* arrives on a stream
+nobody is awaiting, so it is logged at error level instead and that stream is
+not reopened or resumed — a reconnect would be answered with the same event.
+A request whose response was in that event then fails with
+``MCPError/timeout``. ``HTTPSSETransport/connect()`` throws it, without
+retrying, if the oversized event comes before the `endpoint` event.
+
 ### What an error says about a URL
 
 An error message and a log line outlive the request, so a URL reaches them only
@@ -304,6 +345,8 @@ func logEveryErrorCase() async throws {
             logger.error("Refused endpoint on \(endpoint): \(reason)")
         case .redirectRejected(let destination, let reason):
             logger.error("Refused redirect to \(destination): \(reason)")
+        case .responseTooLarge(let limit, let reason):
+            logger.error("Stopped reading at \(limit) bytes: \(reason)")
         }
     }
 }
@@ -313,6 +356,6 @@ func logEveryErrorCase() async throws {
 
 Timeouts and transport closures may be transient. Implement exponential
 backoff for these cases while treating `requestFailed` errors as
-non-retryable server-side issues. `endpointRejected` and `redirectRejected` are
-never worth retrying: each is the server's answer, and it will give the same
-one again.
+non-retryable server-side issues. `endpointRejected`, `redirectRejected` and
+`responseTooLarge` are never worth retrying: each is the server's answer, and
+it will give the same one again.

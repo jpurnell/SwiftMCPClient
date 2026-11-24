@@ -41,6 +41,21 @@ enum TransportFailure {
         return "Could not reach \(HTTPOrigin.description(of: url)): \(kind(of: error))"
     }
 
+    /// What a caller is told when reading from a transport failed.
+    ///
+    /// The transports in this package fail a read with an ``MCPError`` already, and that is
+    /// passed on as it is. A transport somebody else wrote — ``MCPTransport`` is a public
+    /// protocol — fails with whatever its own library threw, and that error's description is
+    /// not this package's to repeat: it is named by kind, as a connection failure is.
+    ///
+    /// - Parameter error: What `receive()` threw.
+    /// - Returns: `error` itself if it is an ``MCPError``; otherwise
+    ///   ``MCPError/connectionFailed(reason:)`` naming the kind of failure.
+    static func receiveFailure(_ error: any Error) -> MCPError {
+        if let own = error as? MCPError { return own }
+        return .connectionFailed(reason: "The transport stopped receiving: \(kind(of: error))")
+    }
+
     /// The kind of failure an error is, in words chosen here.
     ///
     /// - Parameter error: What was thrown.
@@ -76,6 +91,7 @@ enum TransportFailure {
         case .processSpawnFailed: return "the server process could not be started"
         case .endpointRejected(let endpoint, _): return "the message endpoint on \(endpoint) was refused"
         case .redirectRejected(let destination, _): return "a redirect to \(destination) was refused"
+        case .responseTooLarge(let limit, _): return "a response was larger than the \(limit)-byte limit"
         }
     }
 

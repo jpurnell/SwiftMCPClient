@@ -78,6 +78,9 @@ public actor HTTPSSETransport: MCPTransport {
     private let reconnectBaseDelay: TimeInterval
     private let serverTrust: ServerTrust
 
+    /// How much one response body, and one event, may hold.
+    private let limits: MCPResponseLimits
+
     /// The endpoint URL extracted from the SSE `endpoint` event during connect.
     private var endpointURL: URL?
 
@@ -96,6 +99,31 @@ public actor HTTPSSETransport: MCPTransport {
     /// Whether the transport is currently connected.
     private var isConnected: Bool = false
 
+    /// Where this transport's diagnostics go.
+    ///
+    /// A `Logger` of its own rather than one made at each call site, so that what the
+    /// transport says can be observed: a test hands it a logger that records, through
+    /// ``useDiagnostics(_:)``. Nothing outside the module can replace it.
+    private var logger = Logger(label: "MCPClient.HTTPSSETransport")
+
+    /// Whether the plaintext-credentials warning has been written by this transport.
+    private var hasWarnedOfPlaintext = false
+
+    /// Sends this transport's diagnostics to another logger. Test visibility only.
+    ///
+    /// - Parameter logger: The logger to write to from now on.
+    func useDiagnostics(_ logger: Logger) {
+        self.logger = logger
+    }
+
+    /// Warns — once in this transport's life — that configured credentials are about to
+    /// cross a network unencrypted.
+    private func warnOfPlaintextOnce() {
+        guard !hasWarnedOfPlaintext else { return }
+        hasWarnedOfPlaintext = HTTPOrigin.warnIfPlaintextToRemote(
+            url, carriesCredentials: authorization != nil || !headers.isEmpty, logger: logger)
+    }
+
     /// Creates a new HTTP/SSE transport.
     ///
     /// - Parameters:
@@ -105,13 +133,18 @@ public actor HTTPSSETransport: MCPTransport {
     ///     after a `401`, and when the stream is opened. Supplying one is how a session that
     ///     refreshes reaches the wire; without it the header in `headers` is frozen for the
     ///     life of the transport.
-    ///   - connectionTimeout: Maximum time to wait for the initial endpoint event. Default 30s.
+    ///   - connectionTimeout: Maximum time to wait for the stream's response head, and then
+    ///     again for the `endpoint` event that follows it. Also the limit on each `POST`.
+    ///     Default 30s.
     ///   - maxReconnectAttempts: Number of reconnection attempts on stream drop. Default 3.
     ///   - reconnectBaseDelay: Base delay for exponential backoff in seconds. Default 1.0.
     ///   - serverTrust: Which certificate roots an `https://` server may chain to. Defaults
     ///     to ``ServerTrust/system``. For a self-signed or privately issued certificate,
     ///     supply it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``;
     ///     the chain and the hostname are verified either way.
+    ///   - limits: How much one response body, and one Server-Sent Event, may hold before
+    ///     the read is abandoned with ``MCPError/responseTooLarge(limit:reason:)``. Defaults
+    ///     to ``MCPResponseLimits/standard``, 10 MiB each.
     public init(
         url: URL,
         headers: [String: String] = [:],
@@ -119,7 +152,8 @@ public actor HTTPSSETransport: MCPTransport {
         connectionTimeout: TimeInterval = 30.0,
         maxReconnectAttempts: Int = 3,
         reconnectBaseDelay: TimeInterval = 1.0,
-        serverTrust: ServerTrust = .system
+        serverTrust: ServerTrust = .system,
+        limits: MCPResponseLimits = .standard
     ) {
         self.url = url
         self.headers = headers
@@ -128,6 +162,7 @@ public actor HTTPSSETransport: MCPTransport {
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
         self.serverTrust = serverTrust
+        self.limits = limits
     }
 
     /// Removed: this did not trust a self-signed certificate, it disabled verification.
@@ -160,6 +195,7 @@ public actor HTTPSSETransport: MCPTransport {
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
         self.serverTrust = .system
+        self.limits = .standard
     }
 
     /// The TLS configuration every request is made with.
@@ -173,15 +209,15 @@ public actor HTTPSSETransport: MCPTransport {
     ///   server's `endpoint` event names a URL off the origin of the configured stream;
     ///   ``MCPError/redirectRejected(destination:reason:)``, also without retrying, if the
     ///   stream's `GET` is redirected off that origin, in a loop, or more than five times;
+    ///   ``MCPError/responseTooLarge(limit:reason:)``, also without retrying, if an event
+    ///   on the stream is larger than ``MCPResponseLimits/maximumEventBytes`` before the
+    ///   `endpoint` event has arrived;
     ///   otherwise the last attempt's error once the retries are spent — a
     ///   ``MCPError/connectionFailed(reason:)`` whose reason names the kind of failure and
     ///   the server's origin.
     public func connect() async throws {
-        let logger = Logger(label: "MCPClient.HTTPSSETransport")
         var lastError: (any Error)?
-        HTTPOrigin.warnIfPlaintextToRemote(
-            url, carriesCredentials: authorization != nil || !headers.isEmpty,
-            label: "MCPClient.HTTPSSETransport")
+        warnOfPlaintextOnce()
 
         // The same policy the Streamable HTTP server stream uses, rather than a second copy
         // of the arithmetic. Inline, it could only be checked by sleeping, and it grew without
@@ -196,7 +232,7 @@ public actor HTTPSSETransport: MCPTransport {
             }
 
             do {
-                try await performConnect()
+                try await performConnectWithinDeadline()
                 return
             } catch let MCPError.endpointRejected(endpoint, reason) {
                 // Not retried. This is a decision about the server, not a failure of the
@@ -224,6 +260,21 @@ public actor HTTPSSETransport: MCPTransport {
                     }
                 }
                 throw MCPError.redirectRejected(destination: destination, reason: reason)
+            } catch let MCPError.responseTooLarge(limit, reason) {
+                // Not retried either: the stream's first event is the same size next time,
+                // and every attempt reads up to the limit again to find that out.
+                // logging: swift-log has no privacy annotations; the limit and the configured origin — nothing the server sent
+                logger.error("Stopped reading the SSE stream: \(reason)")
+                if let client = httpClient {
+                    httpClient = nil
+                    do {
+                        try await client.shutdown()
+                    } catch {
+                        // logging: cleanup after an oversized event; that is the error that matters — the failure's kind and the configured origin
+                        logger.debug("HTTP client shutdown failed after an oversized event: \(TransportFailure.reason(for: error, reaching: url))")
+                    }
+                }
+                throw MCPError.responseTooLarge(limit: limit, reason: reason)
             } catch {
                 lastError = error
                 // logging: swift-log has no privacy annotations; the failure's kind and the configured origin — never the error's own text
@@ -269,7 +320,11 @@ public actor HTTPSSETransport: MCPTransport {
     ///   the session id, is left out; ``MCPError/redirectRejected(destination:reason:)`` if
     ///   the server redirects the POST off the configured origin, answers it with a `301`,
     ///   `302` or `303` — which cannot carry a `POST` — or redirects it in a loop or more
-    ///   than five times.
+    ///   than five times; ``MCPError/responseTooLarge(limit:reason:)`` if the `POST`'s own
+    ///   response body is larger than ``MCPResponseLimits/maximumResponseBytes``;
+    ///   ``MCPError/connectionFailed(reason:)`` if the request could not be made or its
+    ///   response could not be read, with a reason that names the kind of failure and the
+    ///   server's origin.
     public func send(_ data: Data) async throws {
         guard let endpointURL = endpointURL, let client = httpClient else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -295,7 +350,8 @@ public actor HTTPSSETransport: MCPTransport {
 
         // Some MCP servers return the JSON-RPC response directly in the POST
         // response body rather than via the SSE stream.
-        let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB limit
+        let body = try await MCPResponseLimits.collect(
+            response, upTo: limits.maximumResponseBytes, from: url)
         let responseData = Data(buffer: body)
         if !responseData.isEmpty {
             enqueueMessage(responseData)
@@ -355,7 +411,63 @@ public actor HTTPSSETransport: MCPTransport {
 
     // MARK: - Connection
 
-    private func performConnect() async throws {
+    /// Makes one connect attempt, and gives up if the `endpoint` event does not follow the
+    /// response head within `connectionTimeout`.
+    ///
+    /// The timeout on the request bounds the response head. What `connect()` is waiting for
+    /// comes after it — the `endpoint` event — and a server that opens the stream and never
+    /// sends one would otherwise hold `connect()` for ever. So the same limit is applied a
+    /// second time, counted from the head's arrival: counted from the start it would tie
+    /// with the request's own deadline and replace a specific failure — refused, a TLS
+    /// error — with a vague one.
+    ///
+    /// The attempt is raced against the clock in a task group, which is safe here where it
+    /// was not for a request's answer: the read being abandoned is `AsyncHTTPClient`'s, and
+    /// it ends when it is cancelled.
+    ///
+    /// - Throws: ``MCPError/connectionFailed(reason:)`` naming the origin if the `endpoint`
+    ///   event has not arrived in time; otherwise whatever the attempt threw.
+    private func performConnectWithinDeadline() async throws {
+        let limit = Duration.nanoseconds(connectionTimeout.nanoseconds)
+        let origin = HTTPOrigin.description(of: url)
+        let (heads, head) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            // `true` is the attempt finishing; `false` is the timer finishing with nothing
+            // to report. Only the first decides the outcome.
+            group.addTask {
+                try await self.performConnect(headArrived: head)
+                return true
+            }
+            group.addTask {
+                // Nothing to time until the head is in; the request's own deadline covers
+                // everything before it. A stream that ends without one means the attempt
+                // is over, and there is nothing to report.
+                var arrived = false
+                for await _ in heads {
+                    arrived = true
+                    break
+                }
+                guard arrived else { return false }
+                try await Task.sleep(for: limit)
+                throw MCPError.connectionFailed(
+                    reason: "Could not reach \(origin): no response before the deadline — "
+                        + "the stream opened, but the server's endpoint event did not arrive in time")
+            }
+            defer {
+                head.finish()
+                group.cancelAll()
+            }
+            // The attempt returning, or either child throwing, decides. The timer returning
+            // without a verdict — the attempt ended before a head arrived — does not, and
+            // neither does waiting on the timer once the attempt has already succeeded.
+            for try await attemptFinished in group where attemptFinished {
+                return
+            }
+        }
+    }
+
+    private func performConnect(headArrived: AsyncStream<Void>.Continuation) async throws {
+        defer { headArrived.finish() }
         // A client already here is one this transport is responsible for. Replacing it without
         // shutting it down orphans it, and `AsyncHTTPClient` traps in `deinit` rather than
         // leaking quietly — so the cost of forgetting is the process, not memory.
@@ -388,6 +500,8 @@ public actor HTTPSSETransport: MCPTransport {
             )
         }
 
+        headArrived.yield()
+
         // Create a single iterator — NIO async sequences only allow one.
         // We read until we find the endpoint event, then hand the iterator
         // off to a background task for ongoing SSE messages.
@@ -397,6 +511,11 @@ public actor HTTPSSETransport: MCPTransport {
         while let buffer = try await Self.next(&iterator, reaching: url) {
             guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
             let events = parser.append(text)
+            // Checked after every chunk: an event ends at a blank line, and a server need
+            // never send one.
+            guard parser.pendingBytes <= limits.maximumEventBytes else {
+                throw MCPResponseLimits.exceeded(limits.maximumEventBytes, reading: "event", from: url)
+            }
 
             for event in events {
                 if event.event == "endpoint" {
@@ -417,7 +536,9 @@ public actor HTTPSSETransport: MCPTransport {
                     }
 
                     // Hand off the iterator to a background task
-                    startBackgroundStream(iterator: iterator, parser: parser)
+                    startBackgroundStream(
+                        iterator: iterator, parser: parser,
+                        maximumEventBytes: limits.maximumEventBytes, logger: logger)
                     return
 
                 } else if event.event == "message" || event.event == nil {
@@ -504,8 +625,11 @@ public actor HTTPSSETransport: MCPTransport {
     /// Continue reading SSE messages in the background using the same iterator.
     private func startBackgroundStream(
         iterator: sending HTTPClientResponse.Body.AsyncIterator,
-        parser: sending SSEParser
+        parser: sending SSEParser,
+        maximumEventBytes: Int,
+        logger: Logger
     ) {
+        let url = self.url
         // Justification: iterator and parser are transferred via `sending` and used only inside this Task
         nonisolated(unsafe) var iterator = iterator
         // Justification: parser is transferred via `sending` and used only inside this Task
@@ -516,6 +640,9 @@ public actor HTTPSSETransport: MCPTransport {
                     guard let self = self else { return }
                     guard let text = String(buffer: buffer, encoding: .utf8) else { continue }
                     let events = parser.append(text)
+                    guard parser.pendingBytes <= maximumEventBytes else {
+                        throw MCPResponseLimits.exceeded(maximumEventBytes, reading: "event", from: url)
+                    }
 
                     for event in events {
                         guard event.event == "message" || event.event == nil else { continue }
@@ -531,11 +658,12 @@ public actor HTTPSSETransport: MCPTransport {
                 // A disconnect cancels this task, and a cancelled stream is not a failed one.
                 // Logged at debug because "SSE stream ended with error" on every clean
                 // shutdown trains an operator to ignore the line that matters.
-                let logger = Logger(label: "MCPClient.HTTPSSETransport")
                 // logging: an expected end, kept below warning so a real failure stands out
                 logger.debug("SSE stream cancelled by disconnect")
+            } catch let MCPError.responseTooLarge(_, reason) {
+                // logging: swift-log has no privacy annotations; the limit and the configured origin — nothing the server sent
+                logger.error("Stopped reading the SSE stream: \(reason)")
             } catch {
-                let logger = Logger(label: "MCPClient.HTTPSSETransport")
                 // logging: swift-log has no privacy annotations; the failure's kind only — never the error's own text
                 logger.warning("SSE stream ended with error: \(TransportFailure.kind(of: error))")
             }

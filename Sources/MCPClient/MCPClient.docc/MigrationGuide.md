@@ -374,6 +374,66 @@ authorization server's metadata names a different issuer from the one it was
 fetched for (RFC 8414 §3.3). A `switch` over `MCPOAuthError` with no `default`
 needs one more arm.
 
+``MCPOAuthError`` has a second new case,
+``MCPOAuthError/resourceMismatch(expected:found:)``, thrown when a server's
+protected-resource metadata names a different `resource` from the server it
+was fetched for (RFC 9728 §3.3). **A server whose metadata misnames itself
+worked before and fails now.** The document must name the MCP server's URL —
+or, at the root well-known location, the URL or its origin — exactly, apart
+from scheme and host case, a default port, and one trailing slash. The error
+carries both values; the fix is the server's `resource`, or the URL you
+configured.
+
+A `fetch` or `tokenTransport` of your own is not held to the redirect rules,
+the 1 MiB response limit or the cookie-free session — it makes the request,
+and the library never sees it. The checks on what comes *back* are applied to
+a custom `fetch` too: `resource`, `issuer`, and `https` endpoints on the
+issuer's origin.
+
+### `MCPError` gains `responseTooLarge`, and responses have limits
+
+``MCPError/responseTooLarge(limit:reason:)`` is a new case on a public enum, so
+a `switch` over ``MCPError`` with no `default` needs one more arm:
+
+```swift
+func describeOversizedResponse(_ error: MCPError) -> String {
+    switch error {
+    case .responseTooLarge(let limit, let reason):
+        return "The server sent more than \(limit) bytes in one piece: \(reason)."
+    default:
+        return String(describing: error)
+    }
+}
+```
+
+A JSON response body was already limited to 10 MB; passing that limit threw
+`NIOTooManyBytesError` and now throws this. A Server-Sent Event had no limit
+and now has one of 10 MiB. Both are set per transport with the new `limits:`
+parameter (``MCPResponseLimits``). OAuth metadata, registration and token
+responses are limited to 1 MiB, which is not configurable. (`swift-oauth` has limited
+token responses since 1.0.0-beta.10 and throws its own `OAuthResponseTooLarge`; this
+release reports it as ``MCPError/responseTooLarge(limit:reason:)`` like the others.)
+
+### Requests time out when the server says nothing
+
+`requestTimeout` on ``MCPClientConnection`` did not take effect against a
+server that accepted a request and never answered: the timeout fired and then
+waited for the read it was meant to end. It now ends the wait, so
+``MCPError/timeout`` is thrown after `requestTimeout` (30 seconds by default)
+— from ``MCPClientConnection/initialize(clientName:clientVersion:capabilities:protocolVersion:)``
+too, which had no limit at all. Code that relied on a call waiting
+indefinitely needs a longer `requestTimeout`.
+
+### A failed read is an `MCPError`
+
+A response body that fails part-way throws
+``MCPError/connectionFailed(reason:)`` from `send(_:)`, where the networking
+library's own error used to escape. A custom ``MCPTransport`` whose
+`receive()` throws an error of its own has that error reported to callers as
+``MCPError/connectionFailed(reason:)`` naming the error's type; an
+``MCPError`` it throws is passed on unchanged. Code that caught a transport's
+own error type from ``MCPClientConnection`` catches ``MCPError`` instead.
+
 ### Smaller things a caller could notice
 
 - **`connectionFailed` text.** The reason for a network failure is now
@@ -383,6 +443,11 @@ needs one more arm.
 - **Path segments in error text.** A path segment that could be a credential
   is replaced with `-redacted-`; see
   <doc:ErrorHandlingGuide#What-an-error-says-about-a-URL>.
+- **The plaintext-credentials warning** is logged once per transport, not once
+  per `connect()`.
+- **`MCPOAuthSession/signOut()`'s documentation** said a failed revocation
+  throws. It does not — `swift-oauth` 0.11.1 discards it — and the
+  documentation now says so.
 - **`MCPConnectionFactory`** returns the connection it began with when it falls
   back to a handshake, instead of a second one on the same transport, and a
   stateless connection's `disconnect()` now disconnects its transport.

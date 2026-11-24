@@ -121,6 +121,8 @@ public actor MCPClientConnection: MCPClientProtocol {
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if the transport cannot connect.
     /// - Throws: ``MCPError/requestFailed(code:message:data:)`` if the server rejects the handshake.
     /// - Throws: ``MCPError/invalidResponse`` if the response cannot be decoded.
+    /// - Throws: ``MCPError/timeout`` if the server has not answered the handshake within
+    ///   `requestTimeout`. The transport is disconnected, as after any failed handshake.
     public func initialize(
         clientName: String,
         clientVersion: String,
@@ -1243,12 +1245,23 @@ public actor MCPClientConnection: MCPClientProtocol {
 
         let response: JSONRPCResponse
         if let dispatcher {
-            response = try await withThrowingTimeout(duration: requestTimeout) {
-                try await dispatcher.waitForResponse(id: requestID)
-            }
+            response = try await withThrowingTimeout(
+                duration: requestTimeout,
+                // The wait that lost is still registered with the dispatcher. Withdrawn, so
+                // that it ends and a late answer is not held for a caller that has gone.
+                onTimeout: { await dispatcher.abandon(id: requestID) },
+                operation: { try await dispatcher.waitForResponse(id: requestID) })
         } else {
             // Fallback for pre-initialization calls (shouldn't happen in normal use)
-            let responseData = try await transport.receive()
+            let responseData: Data
+            do {
+                let transport = self.transport
+                responseData = try await withThrowingTimeout(duration: requestTimeout) {
+                    try await transport.receive()
+                }
+            } catch {
+                throw TransportFailure.receiveFailure(error)
+            }
             do {
                 response = try JSONDecoder().decode(JSONRPCResponse.self, from: responseData)
             } catch {
@@ -1267,24 +1280,59 @@ public actor MCPClientConnection: MCPClientProtocol {
         return try refusingInterimResult(result)
     }
 
-    /// Races an async operation against a timeout.
+    /// Waits for an operation, but no longer than a limit.
+    ///
+    /// Whichever finishes first — the operation or the clock — decides, and this returns
+    /// then. It does **not** wait for the loser. A task group would: it returns only when
+    /// every child has, and the child being bounded here is a read that does not notice
+    /// cancellation — a transport's `receive()` waits on a continuation that only a message
+    /// or a disconnect resumes. That is how the limit this replaced never fired against a
+    /// server that said nothing: the timeout was thrown, and then waited for the read.
+    ///
+    /// - Parameters:
+    ///   - duration: How long to wait.
+    ///   - onTimeout: Run when the clock wins, before this throws — what ends the abandoned
+    ///     operation, since cancelling it may not.
+    ///   - operation: The work.
+    /// - Returns: What `operation` returned, if it finished first.
+    /// - Throws: ``MCPError/timeout`` if the limit passed first; otherwise whatever
+    ///   `operation` threw.
     private func withThrowingTimeout<T: Sendable>(
         duration: Duration,
+        onTimeout: @Sendable @escaping () async -> Void = {},
         operation: @Sendable @escaping () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await operation()
-            }
-            group.addTask {
-                try await Task.sleep(for: duration)
-                throw MCPError.timeout
-            }
-            guard let result = try await group.next() else {
-                throw MCPError.timeout
-            }
-            group.cancelAll()
-            return result
+        let (outcomes, outcome) = AsyncStream<Result<T, any Error>>.makeStream(
+            bufferingPolicy: .bufferingOldest(1))
+
+        // lifecycle: cancelled below once the first outcome is in; a read that ignores
+        // cancellation is ended by `onTimeout`, or by the disconnect that follows a failure.
+        let working = Task { try await operation() }
+        // lifecycle: ends when `working` does — it only carries that task's outcome, success
+        // or failure, to the stream.
+        Task { outcome.yield(await working.result) }
+        // lifecycle: cancelled below once the first outcome is in.
+        let timing = Task {
+            // silent: a cancelled sleep means the operation finished first, and there is nothing to report
+            guard (try? await Task.sleep(for: duration)) != nil else { return }
+            outcome.yield(.failure(MCPError.timeout))
+        }
+
+        var first: Result<T, any Error> = .failure(MCPError.timeout)
+        for await result in outcomes {
+            first = result
+            break
+        }
+        working.cancel()
+        timing.cancel()
+        outcome.finish()
+
+        switch first {
+        case .success(let value):
+            return value
+        case .failure(let error):
+            if case .timeout = error as? MCPError { await onTimeout() }
+            throw error
         }
     }
 
@@ -1297,7 +1345,20 @@ public actor MCPClientConnection: MCPClientProtocol {
         let requestData = try JSONEncoder().encode(request)
 
         try await transport.send(requestData)
-        let responseData = try await transport.receive()
+        let responseData: Data
+        do {
+            // Held to the same limit as every later request. The read that is abandoned
+            // when the limit passes is ended by the disconnect `initialize` performs on any
+            // failure.
+            let transport = self.transport
+            responseData = try await withThrowingTimeout(duration: requestTimeout) {
+                try await transport.receive()
+            }
+        } catch {
+            // As the dispatcher does for every later read: this package's own error passed
+            // on, a library's named by kind.
+            throw TransportFailure.receiveFailure(error)
+        }
 
         let response: JSONRPCResponse
         do {

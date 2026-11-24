@@ -73,6 +73,31 @@ public actor WebSocketTransport: MCPTransport {
     /// Continuation for waiting `receive()` calls when no messages are queued.
     private var messageContinuation: CheckedContinuation<Data, any Error>?
 
+    /// Where this transport's diagnostics go.
+    ///
+    /// A `Logger` of its own rather than one made at each call site, so that what the
+    /// transport says can be observed: a test hands it a logger that records, through
+    /// ``useDiagnostics(_:)``. Nothing outside the module can replace it.
+    private var logger = Logger(label: "MCPClient.WebSocketTransport")
+
+    /// Whether the plaintext-credentials warning has been written by this transport.
+    private var hasWarnedOfPlaintext = false
+
+    /// Sends this transport's diagnostics to another logger. Test visibility only.
+    ///
+    /// - Parameter logger: The logger to write to from now on.
+    func useDiagnostics(_ logger: Logger) {
+        self.logger = logger
+    }
+
+    /// Warns — once in this transport's life — that configured credentials are about to
+    /// cross a network unencrypted.
+    private func warnOfPlaintextOnce() {
+        guard !hasWarnedOfPlaintext else { return }
+        hasWarnedOfPlaintext = HTTPOrigin.warnIfPlaintextToRemote(
+            url, carriesCredentials: authorization != nil || !headers.isEmpty, logger: logger)
+    }
+
     /// How long ``connect()`` waits when no other limit is given.
     static let defaultConnectionTimeout: TimeInterval = 30.0
 
@@ -210,9 +235,7 @@ public actor WebSocketTransport: MCPTransport {
     public func connect() async throws {
         let target = try Self.target(of: url)
 
-        HTTPOrigin.warnIfPlaintextToRemote(
-            url, carriesCredentials: authorization != nil || !headers.isEmpty,
-            label: "MCPClient.WebSocketTransport")
+        warnOfPlaintextOnce()
 
         do {
             try await upgrade(to: target, forcingRefresh: false)
@@ -308,7 +331,6 @@ public actor WebSocketTransport: MCPTransport {
             do {
                 try await group.shutdownGracefully()
             } catch {
-                let logger = Logger(label: "MCPClient.WebSocketTransport")
                 // logging: cleanup after a failed connect — the failure's kind and the configured origin
                 logger.debug("event loop shutdown failed after a failed upgrade: \(TransportFailure.reason(for: error, reaching: url))")
             }
