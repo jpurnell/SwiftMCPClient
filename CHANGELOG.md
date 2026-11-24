@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-23
+
+### Changed
+- **swift-crypto minimum is now 5.1.2** (`from: "5.1.2"`; was `from: "3.0.0"`, which allowed only 3.x), and **swift-oauth moves to exactly `1.0.0-beta.15`** (was `1.0.0-beta.13`), the first release that allows swift-crypto 5. A crypto release is usually a security fix, so the owner's rule is to stay current. **A package that depends on SwiftMCPClient 0.15.0 must itself allow swift-crypto 5.1.2 or later**, and must pin swift-oauth no lower than beta.15. No source change; 687 tests pass on 5.1.2. This release also carries everything that had accumulated under Unreleased since 0.14.0, listed below.
+
 ### Security
 - **swift-nio family brought to the latest, with floors that stop a downgrade.** Resolved:
   swift-nio 2.105.0 (was 2.103.0), swift-nio-ssl 2.37.6 (was 2.36.1), swift-nio-http2 1.46.0,
