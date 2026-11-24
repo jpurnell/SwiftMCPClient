@@ -1,5 +1,5 @@
 {
-  "originHash" : "11f2ccbd8606ef21cdea529914899a442975a56c94bbffd183606bc5550060e7",
+  "originHash" : "791c85eac72daedd2da440758ddd726ff00f7be7796d72a1985d5d73fe72ac9b",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -251,6 +251,15 @@
       "state" : {
         "revision" : "640e5755b5826f4437eaeedd366fd776737db62c",
         "version" : "1.9.0"
+      }
+    },
+    {
+      "identity" : "swiftkeychain",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpurnell/SwiftKeychain.git",
+      "state" : {
+        "revision" : "9d51af02448a0d5d5a836d452dd362c67636519f",
+        "version" : "0.3.0"
       }
     },
     {
