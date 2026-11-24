@@ -247,7 +247,14 @@ bounded amount of memory instead of all of it.
 |---|---|---|
 | A JSON response body (``StreamableHTTPTransport``, ``HTTPSSETransport``) | 10 MiB | ``MCPResponseLimits/maximumResponseBytes`` |
 | One Server-Sent Event, on any stream | 10 MiB | ``MCPResponseLimits/maximumEventBytes`` |
+| One subprocess line (``StdioTransport``) | 10 MiB | ``MCPResponseLimits/maximumMessageBytes`` |
+| One WebSocket message, frame or fragments (``WebSocketTransport``) — see below | 10 MiB | ``MCPResponseLimits/maximumMessageBytes`` |
 | An OAuth metadata, registration or token response | 1 MiB | no |
+
+A WebSocket cannot report ``MCPError/responseTooLarge(limit:reason:)``. `WebSocketKit` drops a
+connection that went past its limit without saying why, so ``WebSocketTransport`` throws
+``MCPError/connectionFailed(reason:)`` whose reason names the limit as a possible cause. The
+limit holds either way: nothing past it is buffered.
 
 ```swift
 func allowLargerResponses() async throws {

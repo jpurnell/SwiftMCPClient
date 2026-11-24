@@ -19,6 +19,9 @@ var targets: [Target] = [
             // does, so the dependency is declared rather than borrowed.
             .product(name: "NIOSSL", package: "swift-nio-ssl"),
             .product(name: "WebSocketKit", package: "websocket-kit"),
+            // `WebSocketErrorCode`, to tell a message that went past its limit from a socket that
+            // simply closed. Reached through WebSocketKit until the transport named a type of its own.
+            .product(name: "NIOWebSocket", package: "swift-nio"),
             // The Keychain, for the one key that seals the credential files. Apple-only:
             // there is no Keychain on Linux, and SwiftKeychain imports Security. tvOS and
             // watchOS are left out because SwiftKeychain does not support them.
@@ -47,6 +50,9 @@ var targets: [Target] = [
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            // A WebSocket peer that finishes the upgrade and then sends frames, so the
+            // WebSocket transport is exercised on a connection that works.
+            .product(name: "NIOWebSocket", package: "swift-nio"),
             // What a redirect does to a request is decided on an `HTTPClientRequest`, and the
             // tests of that decision build one.
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
