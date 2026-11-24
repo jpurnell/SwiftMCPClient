@@ -47,8 +47,9 @@ public actor MCPOAuthSession {
     ///     ``MCPOAuthTokenTransport``.
     ///
     ///     **A transport of your own replaces every protection the default has.** The
-    ///     default follows no redirect, reads at most 1 MiB, and sends no cookie or stored
-    ///     credential. None of that is applied to a transport passed here — the request is
+    ///     default follows no redirect and sends no cookie or stored credential. (It does not
+    ///     limit the size of a response: `swift-oauth` reads that, and asks no limit of itself.)
+    ///     None of that is applied to a transport passed here — the request is
     ///     its to make, and this session never sees it. `swift-oauth`'s own
     ///     `URLSessionTokenTransport`, at the version this package resolves, follows a
     ///     `307` to any origin and re-posts the authorization code, the PKCE verifier, the

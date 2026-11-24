@@ -30,16 +30,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   held to the same checks, and nothing was sent to the redirect's destination), but when
   neither serves a usable document the error is now the first refused redirect or resource
   mismatch, if there was one.
-- **OAuth responses were read without limit (CWE-400, CWE-770).** A metadata, registration or
-  token response was read to its end, whatever its size; a body with no end was read until
+- **OAuth responses were read without limit (CWE-400, CWE-770).** A metadata or registration
+  response was read to its end, whatever its size; a body with no end was read until
   memory ran out. Each is now read up to 1 MiB — hundreds of times the largest such document
   found — and cut off there: a declared `Content-Length` over the limit is refused before any
   of it is read, an undeclared one at the chunk that crosses it, and the request fails with
   the new `MCPError.responseTooLarge(limit:reason:)`. To do this on both Foundations the
   requests are made as delegate-driven data tasks rather than with `data(for:)`, which hands
-  a body over only when it is complete; and `MCPOAuthTokenTransport` now posts the token
-  request itself instead of handing a session to `swift-oauth` 0.11.1's transport, which
-  reads the same way.
+  a body over only when it is complete. A token response is **not** covered: it is read by
+  `swift-oauth`'s transport, which `MCPOAuthTokenTransport` forwards to, and a limit there
+  is `swift-oauth`'s to add (see Known limitations).
 - **A Server-Sent Event had no size limit, on any stream (CWE-400, CWE-770).** An event ends
   at a blank line and a server need never send one: the pending event was accumulated
   without bound. Each event is now limited — 10 MiB by default,
@@ -58,15 +58,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and then waited for the read it was meant to end.
 
 ### Changed
-
-- **`MCPOAuthTokenTransport` no longer forwards to swift-oauth's `URLSessionTokenTransport`.**
-  0.15.0 made `exchange` and `revoke` forwards, so that swift-oauth read the response. They now
-  go through this package's own bounded read, so a token or revocation response is cut off at
-  1 MiB and fails with `MCPError.responseTooLarge`, which a forward cannot do. `revoke` is
-  still implemented and still reads only the status (RFC 7009 §2.2). The two mTLS methods
-  swift-oauth added (`tlsClientAuth`, `selfSignedTLSClientAuth`) send `client_id` only, as
-  swift-oauth's own transport does: `URLSession` cannot present a client certificate, so a
-  server that requires one refuses the request.
 
 - **A server whose protected-resource metadata misnames itself no longer works.** Sign-in
   fails with `MCPOAuthError.resourceMismatch` where it used to proceed with whatever the
@@ -141,7 +132,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   discovery through a caller's own `fetch` returning a mismatched resource, a mismatched
   issuer, a plaintext token endpoint and an off-origin one; and which error survives when
   locations fail differently.
-- `MCPOAuthHardeningWireTests` — metadata, registration and token requests against a server
+- `MCPOAuthHardeningWireTests` — metadata and registration requests (a token response is
+  swift-oauth's to read, and is not capped) against a server
   whose body never ends (asserting how much the *server* managed to write before it was
   stopped), one that declares 2 MB, and the exact boundary; a `Set-Cookie` on a redirect hop
   and on a token response, asserting no later request carries it; and — through an internal,
@@ -165,6 +157,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   provider; never for `127.0.0.1`, `localhost`, `::1`, `https`/`wss`, or with no credentials.
 
 ### Known limitations
+
+- **A token response has no size limit.** `MCPOAuthTokenTransport` forwards `exchange` and
+  `revoke` to `swift-oauth`'s `URLSessionTokenTransport`, which reads the response to its end.
+  This package cannot cap what `swift-oauth` reads, and does not try to: the limit belongs in
+  `swift-oauth`'s transport. Metadata and registration responses, which this package reads
+  itself, are capped at 1 MiB.
 - **`MCPOAuthSession.signOut()` cannot report a failed revocation.** `swift-oauth` 0.11.1's
   `OAuthConnection.disconnect()` discards it, and its `TokenTransport` returns a decoded token
   response, so a successful revocation (an empty `200`) and a failed one look the same from

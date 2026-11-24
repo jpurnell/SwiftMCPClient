@@ -385,7 +385,7 @@ carries both values; the fix is the server's `resource`, or the URL you
 configured.
 
 A `fetch` or `tokenTransport` of your own is not held to the redirect rules,
-the 1 MiB response limit or the cookie-free session — it makes the request,
+the 1 MiB response limit (which a `tokenTransport` is not held to in any case: `swift-oauth` reads a token response) or the cookie-free session — it makes the request,
 and the library never sees it. The checks on what comes *back* are applied to
 a custom `fetch` too: `resource`, `issuer`, and `https` endpoints on the
 issuer's origin.
@@ -409,8 +409,9 @@ func describeOversizedResponse(_ error: MCPError) -> String {
 A JSON response body was already limited to 10 MB; passing that limit threw
 `NIOTooManyBytesError` and now throws this. A Server-Sent Event had no limit
 and now has one of 10 MiB. Both are set per transport with the new `limits:`
-parameter (``MCPResponseLimits``). OAuth metadata, registration and token
-responses are limited to 1 MiB, which is not configurable.
+parameter (``MCPResponseLimits``). OAuth metadata and registration
+responses are limited to 1 MiB, which is not configurable. A token response is not:
+`swift-oauth` reads it, and has no limit to apply.
 
 ### Requests time out when the server says nothing
 

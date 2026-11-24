@@ -12,7 +12,8 @@ import SwiftOAuthClient
 /// What an OAuth request reads, and what it carries that nobody put in it.
 ///
 /// Every OAuth request this package makes goes through `OAuthHTTP`. These hold that one
-/// function to three things on the wire: a response is read up to 1 MiB and no further; no
+/// function to three things on the wire: a metadata or registration response is read up to
+/// 1 MiB and no further (a token response is swift-oauth's to read); no
 /// cookie a server set is ever sent back; and — with a TLS stub — an `https` endpoint that
 /// redirects to `http` is refused with nothing sent in the clear.
 @Suite("OAuth requests — size, cookies and downgrade (wire)")
@@ -23,7 +24,7 @@ struct MCPOAuthHardeningWireTests {
 
     static let grantAnswer = #"{"access_token":"fixture-access","token_type":"Bearer","expires_in":3600,"refresh_token":"fixture-refresh-next"}"#
 
-    /// The three kinds of OAuth request, each made against `url`.
+    /// The kinds of OAuth request, each made against `url`.
     enum Request: String, CaseIterable, Sendable {
         case metadata, registration, token
 
@@ -44,6 +45,11 @@ struct MCPOAuthHardeningWireTests {
         }
     }
 
+    /// The requests this package reads itself, and so can cap. A token request is
+    /// swift-oauth's to read: `MCPOAuthTokenTransport` forwards to it, and no limit is
+    /// asked of it from here.
+    static let readByThisPackage: [Request] = [.metadata, .registration]
+
     static func failure(of operation: () async throws -> Void) async -> (any Error)? {
         await MCPOAuthRedirectWireTests.failure(of: operation)
     }
@@ -51,7 +57,7 @@ struct MCPOAuthHardeningWireTests {
     // MARK: - Size
 
     @Test("A response with no end is cut off at 1 MiB, not read until it stops",
-          .timeLimit(.minutes(2)), arguments: Request.allCases)
+          .timeLimit(.minutes(2)), arguments: Self.readByThisPackage)
     func endlessBody(_ request: Request) async throws {
         let ceiling = 256 * 1024 * 1024
         let server = try await FaultStubServer.start(.endlessBody(
@@ -75,7 +81,7 @@ struct MCPOAuthHardeningWireTests {
     }
 
     @Test("A response declaring more than 1 MiB is refused without being read",
-          .timeLimit(.minutes(1)), arguments: Request.allCases)
+          .timeLimit(.minutes(1)), arguments: Self.readByThisPackage)
     func declaredTooLarge(_ request: Request) async throws {
         let server = try await FaultStubServer.start(.byMethod(
             get: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2000000\r\n\r\n{",

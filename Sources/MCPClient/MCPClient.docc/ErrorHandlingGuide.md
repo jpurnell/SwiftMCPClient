@@ -247,7 +247,7 @@ bounded amount of memory instead of all of it.
 |---|---|---|
 | A JSON response body (``StreamableHTTPTransport``, ``HTTPSSETransport``) | 10 MiB | ``MCPResponseLimits/maximumResponseBytes`` |
 | One Server-Sent Event, on any stream | 10 MiB | ``MCPResponseLimits/maximumEventBytes`` |
-| An OAuth metadata, registration or token response | 1 MiB | no |
+| An OAuth metadata or registration response | 1 MiB | no |
 
 ```swift
 func allowLargerResponses() async throws {

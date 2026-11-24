@@ -174,6 +174,107 @@ enum OAuthHTTP {
         }
     }
 
+    /// Runs an operation on a `URLSession` held to a redirect policy.
+    ///
+    /// The session is made for the operation and invalidated after it. That costs a
+    /// connection that might have been reused — on requests made a handful of times per
+    /// sign-in — and buys a delegate that belongs to exactly one request, so "was *this*
+    /// request redirected, and where to" needs no table of tasks to answer.
+    ///
+    /// - Parameters:
+    ///   - policy: What a redirect may do.
+    ///   - purpose: What the request is, for the error and the log.
+    ///   - url: Where the request is going. Only its origin is ever named.
+    ///   - operation: The work, given the session to do it on.
+    /// - Returns: What `operation` returned.
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if a redirect was refused
+    ///   while `operation` ran — whatever `operation` itself made of the `3xx` it was then
+    ///   handed; ``MCPError/connectionFailed(reason:)`` for a `URLError`; otherwise whatever
+    ///   `operation` threw.
+    static func withSession<Value: Sendable>(
+        policy: RedirectPolicy,
+        purpose: String,
+        reaching url: URL?,
+        _ operation: (URLSession) async throws -> Value
+    ) async throws -> Value {
+        // Read here, in the caller's task: a delegate is called on the session's queue, where a
+        // task-local has no value.
+        let guardian = RedirectGuard(policy: policy, trustedRoots: trustedRootsForTesting)
+        let session = URLSession(configuration: configuration(), delegate: guardian, delegateQueue: nil)
+        // A session holds its delegate until it is invalidated.
+        defer { session.finishTasksAndInvalidate() }
+
+        do {
+            let value = try await operation(session)
+            // The refusal first. Whatever the operation made of the redirect response it
+            // was left holding — even a success — the thing that happened is that the
+            // server tried to send the request elsewhere.
+            if let refusal = guardian.refusal {
+                throw refuse(refusal, policy: policy, purpose: purpose)
+            }
+            return value
+        } catch {
+            // The same, when the operation failed on that response instead: an OAuth error,
+            // a decoding failure, a status it did not expect.
+            if let refusal = guardian.refusal {
+                throw refuse(refusal, policy: policy, purpose: purpose)
+            }
+            // swift-oauth 1.0.0-beta.2 and later decline the redirect themselves, on a task
+            // delegate of their own, so this session's guard is never asked. What comes back
+            // is their `OAuthRedirectRefused`; it is the same event and is reported the same way.
+            if let refused = error as? OAuthRedirectRefused {
+                throw refuse(
+                    Exchange.Refusal(
+                        status: refused.status, from: refused.endpoint,
+                        destination: refused.destination, cause: .policy),
+                    policy: policy, purpose: purpose)
+            }
+            // `URLError` describes itself with the failing URL, whole. Named by kind and
+            // origin instead, as a transport's failure is.
+            guard error is URLError else { throw error }
+            guard let url else {
+                throw MCPError.connectionFailed(
+                    reason: "The \(purpose) request failed: \(TransportFailure.kind(of: error))")
+            }
+            throw MCPError.connectionFailed(reason: TransportFailure.reason(for: error, reaching: url))
+        }
+    }
+
+    #if canImport(Security)
+    /// Answers a server-trust challenge with `roots` as the only anchors, or leaves it to the
+    /// system when there are none. Tests only — see ``trustedRootsForTesting``.
+    ///
+    /// - Parameters:
+    ///   - challenge: The challenge.
+    ///   - roots: DER certificates to anchor on instead of the system's.
+    ///   - completionHandler: Resumed with the decision.
+    static func answer(
+        _ challenge: URLAuthenticationChallenge,
+        trusting roots: [Data],
+        _ completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        // Empty outside this package's tests — see `OAuthHTTP.trustedRootsForTesting` — and
+        // then the system decides, exactly as if this method were not here.
+        guard !roots.isEmpty,
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        // These roots *instead of* the system's, and the policy the system attached —
+        // which checks the hostname — left as it is.
+        let anchors = roots.compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
+        guard anchors.count == roots.count,
+              SecTrustSetAnchorCertificates(trust, anchors as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+              SecTrustEvaluateWithError(trust, nil) else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+    #endif
+
     /// The configuration every OAuth request's session is made with.
     ///
     /// Ephemeral, and then stripped of the three stores an ephemeral configuration still
@@ -396,52 +497,102 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        // Empty outside this package's tests — see `OAuthHTTP.trustedRootsForTesting` — and
-        // then the system decides, exactly as if this method were not here.
-        guard !trustedRoots.isEmpty,
-              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        // These roots *instead of* the system's, and the policy the system attached —
-        // which checks the hostname — left as it is.
-        let anchors = trustedRoots.compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
-        guard anchors.count == trustedRoots.count,
-              SecTrustSetAnchorCertificates(trust, anchors as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
-              SecTrustEvaluateWithError(trust, nil) else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-        completionHandler(.useCredential, URLCredential(trust: trust))
+        OAuthHTTP.answer(challenge, trusting: trustedRoots, completionHandler)
     }
     #endif
 }
 
+/// Decides, for one request, whether a redirect is followed — and remembers a refusal.
+// Justification: RedirectGuard's refusal and hop count live in `state`, private and read or written only under `lock`; its policy and trusted roots are immutable lets.
+private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+
+    private struct State {
+        var refusal: Exchange.Refusal?
+        var followed = 0
+    }
+
+    private let policy: OAuthHTTP.RedirectPolicy
+    private let trustedRoots: [Data]
+    private let lock = NSLock()
+    private var state = State()
+
+    init(policy: OAuthHTTP.RedirectPolicy, trustedRoots: [Data]) {
+        self.policy = policy
+        self.trustedRoots = trustedRoots
+    }
+
+    #if canImport(Security)
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        OAuthHTTP.answer(challenge, trusting: trustedRoots, completionHandler)
+    }
+    #endif
+
+    /// The redirect this refused, if it refused one.
+    var refusal: Exchange.Refusal? {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.refusal
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        // `nil` is "do not follow": the task completes with the redirect response itself,
+        // and no request is made to the destination.
+        completionHandler(decide(task: task, status: response.statusCode, next: request))
+    }
+
+    /// The request to make next, or `nil` to stop here.
+    private func decide(task: URLSessionTask, status: Int, next: URLRequest) -> URLRequest? {
+        let fetched = task.originalRequest?.url
+        let from = fetched.map(HTTPOrigin.description(of:)) ?? HTTPOrigin.noOrigin
+        let destination = next.url.map(HTTPOrigin.description(of:)) ?? HTTPOrigin.noOrigin
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard policy == .withinOrigin, let fetched, let target = next.url else {
+            state.refusal = Exchange.Refusal(status: status, from: from, destination: destination, cause: .policy)
+            return nil
+        }
+        // Held to the origin of the URL that was asked for — not of the hop before, so a
+        // chain cannot walk away from it one step at a time.
+        guard case .sameOrigin = HTTPOrigin.resolve(target.absoluteString, relativeTo: fetched, heldTo: fetched) else {
+            state.refusal = Exchange.Refusal(status: status, from: from, destination: destination, cause: .policy)
+            return nil
+        }
+        guard state.followed < OAuthHTTP.maximumRedirects else {
+            state.refusal = Exchange.Refusal(status: status, from: from, destination: destination, cause: .tooMany)
+            return nil
+        }
+        state.followed += 1
+        return next
+    }
+}
+
 /// The token transport ``MCPOAuthSession`` uses unless it is given another.
 ///
-/// It posts the form `swift-oauth`'s `URLSessionTokenTransport` posts, and reads the answer
-/// the same way, on this package's own request path — because three things are decided
-/// there that a `URLSession` handed to that transport cannot decide:
-///
-/// - **No redirect is followed.** A token request carries the authorization code and its
-///   PKCE verifier, or the refresh token, and the client secret when there is one; a `307`
-///   or `308` from the token endpoint re-sends all of that to wherever its `Location`
-///   points. Here a redirected token request — an exchange, a refresh or a revocation — is
-///   not followed on any status, to any destination: nothing is sent, and the request fails
-///   with ``MCPError/redirectRejected(destination:reason:)`` naming the destination's origin.
-/// - **The response is read up to 1 MiB.** A larger one — a body with no end included — is
-///   cut off there and fails with ``MCPError/responseTooLarge(limit:reason:)``.
-/// - **Nothing ambient is sent.** No cookie is stored or replayed, and no stored credential
-///   is offered.
+/// It is `swift-oauth`'s `URLSessionTokenTransport`, on a session that follows no redirect.
+/// A token request carries the authorization code and its PKCE verifier, or the refresh
+/// token, and the client secret when there is one; a `307` or `308` from the token endpoint
+/// re-sends all of that to wherever its `Location` points. Here a redirected token request —
+/// an exchange, a refresh or a revocation — is not followed on any status, to any
+/// destination: nothing is sent, and the request fails with
+/// ``MCPError/redirectRejected(destination:reason:)`` naming the destination's origin.
 ///
 /// A network failure is reported as ``MCPError/connectionFailed(reason:)`` naming the
 /// endpoint's origin, rather than as `URLSession`'s own error, which carries the whole URL.
 ///
 /// Supplying a different `TokenTransport` to ``MCPOAuthSession`` replaces this, and with it
-/// all three guarantees: a transport of your own decides for itself what a redirect does,
-/// how much it reads and what it sends.
+/// this guarantee: a transport of your own decides for itself what a redirect does.
 public struct MCPOAuthTokenTransport: TokenTransport {
 
     /// Creates the transport.
@@ -456,116 +607,37 @@ public struct MCPOAuthTokenTransport: TokenTransport {
     ///   - method: How the credentials should be presented.
     /// - Returns: The provider's token response.
     /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the endpoint answered
-    ///   with a redirect; ``MCPError/responseTooLarge(limit:reason:)`` if its answer was
-    ///   larger than 1 MiB; ``MCPError/connectionFailed(reason:)`` if it could not be
-    ///   reached; `OAuthError` for anything the provider rejected.
+    ///   with a redirect; ``MCPError/connectionFailed(reason:)`` if it could not be reached;
+    ///   `OAuthError` for anything the provider rejected.
     public func exchange(
         endpoint: URL,
         parameters: [String: String],
         credentials: ClientCredentials,
         method: ClientAuthenticationMethod
     ) async throws -> TokenResponse {
-        let request = Self.request(
-            endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
-        let (data, response) = try await OAuthHTTP.data(for: request, policy: .never, purpose: "token")
-        guard let http = response as? HTTPURLResponse else {
-            throw OAuthError.serverError("the response was not HTTP")
+        try await OAuthHTTP.withSession(policy: .never, purpose: "token", reaching: endpoint) { session in
+            try await URLSessionTokenTransport(session: session).exchange(
+                endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
         }
-        guard (200..<300).contains(http.statusCode) else {
-            // A provider returns its reason in the body; the status alone does not
-            // distinguish "wrong secret" from "revoked grant".
-            do {
-                throw try JSONDecoder().decode(OAuthErrorResponse.self, from: data).oauthError
-            } catch is DecodingError {
-                throw OAuthError.serverError("HTTP \(http.statusCode)")
-            }
-        }
-        do {
-            return try JSONDecoder().decode(TokenResponse.self, from: data)
-        } catch {
-            throw OAuthError.serverError("the token response could not be decoded")
-        }
-    }
-
-    /// The form `POST` a token or revocation endpoint is sent, with the client authenticated
-    /// the way `method` says.
-    private static func request(
-        endpoint: URL,
-        parameters: [String: String],
-        credentials: ClientCredentials,
-        method: ClientAuthenticationMethod
-    ) -> URLRequest {
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        var body = parameters
-        switch method {
-        case .clientSecretBasic:
-            let pair = "\(credentials.clientID):\(credentials.clientSecret)"
-            request.setValue("Basic \(Data(pair.utf8).base64EncodedString())", forHTTPHeaderField: "Authorization")
-        case .clientSecretPost:
-            body["client_id"] = credentials.clientID
-            body["client_secret"] = credentials.clientSecret
-        case .none, .tlsClientAuth, .selfSignedTLSClientAuth:
-            // RFC 8705 §2: the client is identified by `client_id` and authenticated by the
-            // certificate it presents in the handshake, never by a secret in the request.
-            // This transport cannot present one, as swift-oauth's own cannot — a server that
-            // requires it will refuse the request, which is better than a secret sent beside
-            // a credential that was meant to replace it.
-            body["client_id"] = credentials.clientID
-        }
-        request.httpBody = Data(formEncode(body).utf8)
-        return request
     }
 
     /// Asks a revocation endpoint to revoke a token, following no redirect.
     ///
-    /// Only the status is read (RFC 7009 §2.2): a revocation answers with an empty body, so
-    /// the protocol's default — which decodes a token response — would fail every success.
-    /// Held to the same guarantees as ``exchange(endpoint:parameters:credentials:method:)``.
+    /// Forwarded to `URLSessionTokenTransport`, which reads only the status (RFC 7009 §2.2).
+    /// The protocol's default would decode a token response from a body that has none.
     ///
     /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` if the endpoint answered
-    ///   with a redirect; ``MCPError/responseTooLarge(limit:reason:)`` if its answer was
-    ///   larger than 1 MiB; ``MCPError/connectionFailed(reason:)`` if it could not be
-    ///   reached; `OAuthError` for anything the provider rejected.
+    ///   with a redirect; ``MCPError/connectionFailed(reason:)`` if it could not be reached;
+    ///   `OAuthError` for anything the provider rejected.
     public func revoke(
         endpoint: URL,
         parameters: [String: String],
         credentials: ClientCredentials,
         method: ClientAuthenticationMethod
     ) async throws {
-        let request = Self.request(
-            endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
-        let (data, response) = try await OAuthHTTP.data(for: request, policy: .never, purpose: "token")
-        guard let http = response as? HTTPURLResponse else {
-            throw OAuthError.serverError("the response was not HTTP")
+        try await OAuthHTTP.withSession(policy: .never, purpose: "token", reaching: endpoint) { session in
+            try await URLSessionTokenTransport(session: session).revoke(
+                endpoint: endpoint, parameters: parameters, credentials: credentials, method: method)
         }
-        guard (200..<300).contains(http.statusCode) else {
-            do {
-                throw try JSONDecoder().decode(OAuthErrorResponse.self, from: data).oauthError
-            } catch is DecodingError {
-                throw OAuthError.serverError("HTTP \(http.statusCode)")
-            }
-        }
-    }
-
-    /// Percent-encodes form parameters, sorted by key so the body is the same bytes for the
-    /// same input.
-    ///
-    /// - Parameter parameters: The form fields, unencoded.
-    /// - Returns: The `application/x-www-form-urlencoded` body.
-    static func formEncode(_ parameters: [String: String]) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return parameters
-            .sorted { $0.key < $1.key }
-            .map { key, value in
-                let name = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
-                let text = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-                return "\(name)=\(text)"
-            }
-            .joined(separator: "&")
     }
 }
