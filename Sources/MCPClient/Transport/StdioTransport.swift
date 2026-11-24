@@ -23,6 +23,15 @@ import Foundation
 /// - ``receive()`` reads the next line from the process's stdout
 /// - ``disconnect()`` closes stdin, waits briefly, then sends SIGTERM/SIGKILL if needed
 ///
+/// ## Message Size
+///
+/// A message is a line, and a line ends when the process writes a newline. One that never
+/// does would be buffered until memory ran out, so a line is limited to
+/// ``MCPResponseLimits/maximumMessageBytes`` — 10 MiB unless configured. A process that goes
+/// past it is stopped, the transport is closed, and ``receive()`` throws
+/// ``MCPError/responseTooLarge(limit:reason:)``: framing is lost part-way through a line, so
+/// nothing after it on that stream can be trusted.
+///
 /// ## Platform Availability
 ///
 /// StdioTransport requires `Foundation.Process` and is only available on macOS and Linux.
@@ -31,6 +40,8 @@ public actor StdioTransport: MCPTransport {
     private let command: String
     private let arguments: [String]
     private let environment: [String: String]
+
+    private let limits: MCPResponseLimits
 
     private var runner: ProcessRunner?
     private var bufferedLines: [String] = []
@@ -44,14 +55,19 @@ public actor StdioTransport: MCPTransport {
     ///   - arguments: Command-line arguments for the server. Defaults to empty.
     ///   - environment: Additional environment variables merged with the current
     ///     process environment. Defaults to empty.
+    ///   - limits: How much one line from the process may hold before it is stopped; only
+    ///     ``MCPResponseLimits/maximumMessageBytes`` applies. Defaults to
+    ///     ``MCPResponseLimits/standard``, 10 MiB.
     public init(
         command: String,
         arguments: [String] = [],
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        limits: MCPResponseLimits = .standard
     ) {
         self.command = command
         self.arguments = arguments
         self.environment = environment
+        self.limits = limits
     }
 
     /// Spawn the MCP server subprocess and configure stdin/stdout pipes.
@@ -116,6 +132,9 @@ public actor StdioTransport: MCPTransport {
     /// - Returns: The JSON-RPC message data (without the trailing newline).
     /// - Throws: ``MCPError/connectionFailed(reason:)`` if not connected.
     /// - Throws: ``MCPError/transportClosed`` if the process has exited and no data remains.
+    /// - Throws: ``MCPError/responseTooLarge(limit:reason:)`` if a line is longer than
+    ///   ``MCPResponseLimits/maximumMessageBytes``. The process is stopped and the transport
+    ///   is closed.
     public func receive() async throws -> Data {
         guard isConnected, let runner else {
             throw MCPError.connectionFailed(reason: "StdioTransport is not connected")
@@ -144,10 +163,24 @@ public actor StdioTransport: MCPTransport {
 
             readBuffer.append(text)
 
+            // No newline in what arrived: the line is still going. Nothing to frame, and no
+            // reason to scan what is already held again — only to ask whether it is too long.
+            guard text.contains(where: \.isNewline) else {
+                guard readBuffer.utf8.count <= limits.maximumMessageBytes else {
+                    throw await refuseOversizedMessage()
+                }
+                continue
+            }
+
             // Split on newlines. `whereSeparator` matches any newline Character, so a server
             // that terminates with "\r\n" frames correctly — "\r\n" is one Character, and
             // splitting on the "\n" literal would never match it.
             let lines = readBuffer.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            // Every piece is held to the limit before any is kept: what the process sent
+            // after an oversized line cannot be told apart from the rest of it.
+            for line in lines where line.utf8.count > limits.maximumMessageBytes {
+                throw await refuseOversizedMessage()
+            }
             if lines.count > 1 {
                 // We have at least one complete line
                 for i in 0..<(lines.count - 1) {
@@ -171,6 +204,22 @@ public actor StdioTransport: MCPTransport {
 
         // Task was cancelled while reading
         throw MCPError.transportClosed
+    }
+
+    /// Stops the process and closes the transport after a line went past its limit.
+    ///
+    /// Framing is lost part-way through that line, so the stream cannot be read on from it;
+    /// and a process that will not stop writing is not one to leave running.
+    ///
+    /// - Returns: The error to throw.
+    private func refuseOversizedMessage() async -> MCPError {
+        isConnected = false
+        let stopped = runner
+        runner = nil
+        bufferedLines = []
+        readBuffer = ""
+        await stopped?.shutdown()
+        return MCPResponseLimits.exceeded(limits.maximumMessageBytes, reading: "message", from: nil)
     }
 }
 

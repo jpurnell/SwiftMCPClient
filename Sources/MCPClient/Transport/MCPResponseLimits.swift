@@ -4,10 +4,11 @@ import NIOCore
 
 /// How much a server may send in one piece before a transport stops reading it.
 ///
-/// A response is read into memory before it is decoded, and so is each Server-Sent Event. With
+/// A response is read into memory before it is decoded, and so is each Server-Sent Event, each
+/// WebSocket message and each line a subprocess writes. With
 /// no limit, the amount of memory a connection costs is the server's to choose — a body with
-/// no end, or an event whose terminating blank line never comes, is read until the process
-/// has none left. Each limit bounds one message: what is read past it is not buffered, the
+/// no end, an event whose terminating blank line never comes, a message sent as an endless run of
+/// fragments, or a line that never ends, is read until the process has none left. Each limit bounds one message: what is read past it is not buffered, the
 /// read is abandoned, and the failure is ``MCPError/responseTooLarge(limit:reason:)``.
 ///
 /// The defaults are generous on purpose. A JSON-RPC message is usually a few kilobytes and
@@ -16,7 +17,7 @@ import NIOCore
 /// that a hostile one cannot do harm with it. Raise a limit for a server known to need it.
 public struct MCPResponseLimits: Sendable, Equatable {
 
-    /// The default for both limits: 10 MiB.
+    /// The default for every limit: 10 MiB.
     public static let defaultMaximumBytes = 10 * 1024 * 1024
 
     /// The most bytes one HTTP response body may hold when it is a single JSON document.
@@ -33,17 +34,30 @@ public struct MCPResponseLimits: Sendable, Equatable {
     /// carry any number of events; this bounds each. A value below `1` is treated as `1`.
     public var maximumEventBytes: Int
 
-    /// Creates a pair of limits.
+    /// The most bytes one message may hold where a transport frames its own messages: a
+    /// WebSocket message, once its fragments are joined, and a line from a subprocess's
+    /// standard output, without its newline.
+    ///
+    /// Applies to ``WebSocketTransport`` and ``StdioTransport``. For a WebSocket it is also
+    /// the most one frame may hold, which `WebSocketKit` otherwise limits to 16 KiB. A value
+    /// below `1` is treated as `1`.
+    public var maximumMessageBytes: Int
+
+    /// Creates a set of limits.
     ///
     /// - Parameters:
     ///   - maximumResponseBytes: The most bytes one JSON response body may hold. Default 10 MiB.
     ///   - maximumEventBytes: The most bytes one Server-Sent Event may hold. Default 10 MiB.
+    ///   - maximumMessageBytes: The most bytes one WebSocket message or one subprocess line may
+    ///     hold. Default 10 MiB.
     public init(
         maximumResponseBytes: Int = MCPResponseLimits.defaultMaximumBytes,
-        maximumEventBytes: Int = MCPResponseLimits.defaultMaximumBytes
+        maximumEventBytes: Int = MCPResponseLimits.defaultMaximumBytes,
+        maximumMessageBytes: Int = MCPResponseLimits.defaultMaximumBytes
     ) {
         self.maximumResponseBytes = max(1, maximumResponseBytes)
         self.maximumEventBytes = max(1, maximumEventBytes)
+        self.maximumMessageBytes = max(1, maximumMessageBytes)
     }
 
     /// The limits a transport uses unless it is given others: 10 MiB each.

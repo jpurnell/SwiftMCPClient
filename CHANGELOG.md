@@ -30,6 +30,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **A WebSocket peer or a subprocess could make the client buffer without bound (CWE-400,
+  CWE-770).** `WebSocketKit` limits one frame to 16 KiB and limits a message sent as
+  fragments not at all: a peer that sends fragments for long enough fills memory, and a
+  subprocess that never writes a newline was buffered until the process ran out of it —
+  `StdioTransport` held everything it had read in a string until a newline came. Measured
+  against a server that finished the upgrade: a 20 MB message sent as 8 KiB fragments was
+  accepted whole. Both are now limited by the new `MCPResponseLimits.maximumMessageBytes`, 10 MiB
+  unless configured. A WebSocket peer that goes past it is disconnected; a subprocess that goes
+  past it is stopped and the transport is closed, and `receive()` throws
+  `MCPError.responseTooLarge(limit:reason:)` — framing is lost part-way through a line, so
+  nothing after it on that stream can be trusted. See **Known limitations** for what a
+  WebSocket can and cannot say about why it closed.
+
 - **Protected-resource metadata could name any resource it liked (RFC 9728 §3.3, §7.3).** The
   `resource` in the document was never compared with the server it had been fetched for, and
   it is not only descriptive: it becomes the RFC 8707 resource indicator on the authorization
@@ -82,6 +95,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and then waited for the read it was meant to end.
 
 ### Changed
+
+- **`WebSocketTransport` accepts a message of up to 10 MiB in one frame, not 16 KiB.** A
+  message larger than `WebSocketKit`'s default frame — a tool listing is routinely larger — was
+  refused and the connection dropped. `maxFrameSize` is now `maximumMessageBytes`.
+- **`WebSocketTransport` and `StdioTransport` take `limits:`** (`MCPResponseLimits`, default
+  `.standard`), and `MCPResponseLimits` gains `maximumMessageBytes`. Source-compatible: both
+  have a default, and `MCPResponseLimits.init` keeps its existing labels.
 
 - **A server whose protected-resource metadata misnames itself no longer works.** Sign-in
   fails with `MCPOAuthError.resourceMismatch` where it used to proceed with whatever the
@@ -139,6 +159,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`WebSocketTransport` ended the process on its first successful connection.** `WebSocketKit`
+  2.16.2 — the version this was found on; this package's floor is 2.15.0, and no other version
+  was checked — keeps a socket's `onText` and `onBinary` callbacks in storage that only
+  the socket's own event loop may touch, and asserts it. The transport set them from its actor
+  once `connect()` returned, so against any server that completed the upgrade the process died
+  with `NIOLoopBound … Precondition failed`. Found while measuring the message limit above: no
+  test had ever got a message off a connected WebSocket, because every WebSocket test ended at
+  the upgrade. Found on macOS in a debug build; not checked on Linux. The callbacks are now
+  registered on the socket's event loop.
+
 - **`requestTimeout` never fired against a silent server, and `initialize` had none.** The
   timeout raced the read in a task group, and a task group returns only when every child
   has: the timeout was thrown, and the group then waited for a `receive()` that does not
@@ -150,6 +180,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read.
 
 ### Tests
+
+- `WebSocketMessageTests` — `WebSocketTransport` against a real RFC 6455 server on loopback
+  (`WebSocketStubServer`, built on `NIOWebSocket`) that completes the upgrade and answers the
+  client's first message: a round trip, a 20,000-byte frame, a message sent as fragments, a
+  message of exactly the limit, a frame over it, fragments that add up to more than it though
+  each is small, and 20 MB sent as 8 KiB fragments against the default. Plus the reasons a close
+  gives, including that a peer-sent `1009` is not reported as this client's limit.
+- `StdioLimitTests` — a line of exactly the limit, one byte more, a child that writes 100 KB and
+  no newline and then stays alive (only the limit ends it), and that after a refusal the child
+  is stopped and the transport closed.
 
 - `ProtectedResourceValidationTests` — a 28-row table of `resource` comparisons (what is the
   same resource and, mostly, what is not); which identifiers each location may name;
@@ -181,6 +221,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Known limitations
 
+- **A WebSocket closed by a limit cannot say so.** A message over the limit makes `WebSocketKit`
+  drop the connection without reporting why, and the two signals it leaves — no close code for
+  a frame past the frame limit, an unexpected-error code for fragments past the aggregate limit
+  — are shared with other protocol errors. `receive()` throws `connectionFailed` whose reason
+  names the limit as a possible cause, not `responseTooLarge`, which would sometimes be wrong.
+  A peer-sent close `1009`, which means *this client's* message was too large for the peer, is
+  not reported as the client's limit. The cap holds either way: nothing past it is buffered.
 - **`MCPOAuthSession.signOut()` cannot report a failed revocation.** `swift-oauth` 0.11.1's
   `OAuthConnection.disconnect()` discards it, and its `TokenTransport` returns a decoded token
   response, so a successful revocation (an empty `200`) and a failed one look the same from
@@ -199,11 +246,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   takes its roots from libcurl's compiled-in bundle and exposes no trust decision, so a test
   cannot put a TLS stub in front of it without editing the machine's certificate store. The
   decision itself (`HTTPOrigin.resolve`) is table-tested on every platform.
-- **`WebSocketTransport` and `StdioTransport` have no message size limit**, and
-  `WebSocketKit`'s default maximum frame is 16 KiB.
-- **`HTTPSSETransport.connect()` does not bound the wait for the `endpoint` event** once the
-  response head has arrived; `connectionTimeout` bounds the head.
-
 ## [0.15.0] — 2026-11-23
 
 ### Changed
