@@ -124,7 +124,7 @@ let package = Package(
         // path component of its URL, so the two repositories are two packages holding one
         // library — and a dependency graph reaching both fails to resolve. This is the public
         // export, and it is the one SwiftMCPServer resolves.
-        .package(url: "https://github.com/jpurnell/swift-oauth", from: "0.11.1"),
+        .package(url: "https://github.com/jpurnell/swift-oauth", exact: "1.0.0-beta.15"),
         // The protocol surface, shared with SwiftMCPServer rather than written twice. The
         // wire types are where duplication costs most: every specification revision would
         // otherwise be implemented once here and once there, and the two would drift in ways
@@ -140,11 +140,11 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
         // Already present transitively via websocket-kit; declared because the OAuth loopback
         // listener uses it directly.
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.105.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "5.1.2"),
         // Already present transitively via async-http-client and websocket-kit; declared
         // because `ServerTrust` builds a `TLSConfiguration` directly.
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.36.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
         // Test-only: mints the self-signed and private-CA certificates the trust tests
         // handshake against. Both were already in the graph through async-http-client's
         // dependencies; neither reaches the library target.

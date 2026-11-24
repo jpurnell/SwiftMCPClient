@@ -296,6 +296,26 @@ struct MCPOAuthRedirectWireTests {
         await other.stop()
     }
 
+    @Test("A revocation is never redirected",
+          .timeLimit(.minutes(1)), arguments: statuses)
+    func revocationIsNotRedirected(_ code: Int) async throws {
+        let server = try await RedirectStubServer.start(
+            kind: .streamable,
+            redirects: [.init(
+                method: .POST, path: "/revoke",
+                status: HTTPResponseStatus(statusCode: code), location: "/moved")])
+        let endpoint = try await server.url(path: "/revoke")
+        let error = await Self.failure {
+            try await Self.sessionTokenTransport().revoke(
+                endpoint: endpoint, parameters: ["token": "t"],
+                credentials: Self.credentials, method: .clientSecretPost)
+        }
+        #expect(Self.refused(error)?.reason.contains("HTTP \(code)") == true,
+                "revoke \(code) ended with \(String(describing: error))")
+        #expect(await server.requests.map(\.path) == ["/revoke"])
+        await server.stop()
+    }
+
     @Test("A token request is not redirected within its origin either",
           .timeLimit(.minutes(1)), arguments: statuses)
     func tokenExchangeIsNotRedirectedAtAll(_ code: Int) async throws {

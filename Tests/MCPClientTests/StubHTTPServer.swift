@@ -119,6 +119,9 @@ actor StubHTTPServer {
     /// - Parameters:
     ///   - replies: The scripted responses, in order.
     ///   - serverStream: How to answer a `GET`, if at all.
+    ///   - responder: When given, answers each POST from what it carried, instead of from the
+    ///     script. A real server's answer depends on the request (the protocol version it
+    ///     declares, the method it names), which an ordered script cannot express.
     ///   - tls: The identity to present. Supplying one makes this an HTTPS server, which is
     ///     what the trust tests need: whether a request arrived at all is the only honest
     ///     evidence of what a client was willing to handshake with.
@@ -126,9 +129,10 @@ actor StubHTTPServer {
     static func start(
         replies: [Reply],
         serverStream: ServerStream? = nil,
-        tls: NIOSSLContext? = nil
+        tls: NIOSSLContext? = nil,
+        responder: (@Sendable (Received) -> Reply)? = nil
     ) async throws -> StubHTTPServer {
-        let recorder = Recorder(replies: replies, serverStream: serverStream)
+        let recorder = Recorder(replies: replies, serverStream: serverStream, responder: responder)
         let server = StubHTTPServer(recorder: recorder, servesTLS: tls != nil)
 
         let bootstrap = ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -203,9 +207,17 @@ private final class Recorder: @unchecked Sendable {
     /// How to answer a GET, if this server offers a server stream at all.
     let serverStream: StubHTTPServer.ServerStream?
 
-    init(replies: [StubHTTPServer.Reply], serverStream: StubHTTPServer.ServerStream?) {
+    /// Answers a POST from what it carried, in place of the script.
+    let responder: (@Sendable (StubHTTPServer.Received) -> StubHTTPServer.Reply)?
+
+    init(
+        replies: [StubHTTPServer.Reply],
+        serverStream: StubHTTPServer.ServerStream?,
+        responder: (@Sendable (StubHTTPServer.Received) -> StubHTTPServer.Reply)? = nil
+    ) {
         self.replies = replies
         self.serverStream = serverStream
+        self.responder = responder
     }
 
     var received: [StubHTTPServer.Received] {
@@ -281,8 +293,9 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
                 self.head = nil
                 return
             }
-            recorder.record(received(from: head))
-            respond(context: context, reply: recorder.nextReply())
+            let request = received(from: head)
+            recorder.record(request)
+            respond(context: context, reply: recorder.responder?(request) ?? recorder.nextReply())
             self.head = nil
         }
     }

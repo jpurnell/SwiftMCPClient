@@ -320,6 +320,113 @@ struct MCPOAuthSessionForcedRefreshTests {
     }
 }
 
+/// RFC 9700 §4.14.2: a refresh token is single-use. swift-oauth's `OAuthConnection` owns the
+/// rotation; what this client owes is that it is wired to a storage that keeps what each
+/// response returned, and that the session's own paths (`resume`, forced refresh) do not
+/// present a token that was already spent.
+@Suite("MCP OAuth session — refresh-token rotation")
+struct MCPOAuthSessionRotationTests {
+
+    @Test("Each refresh presents the token the previous response returned, and stores the new one")
+    func sequentialRefreshesChain() async throws {
+        let provider = RotatingProvider()
+        let storage = InMemoryClientStorage()
+        let session = try await rotatingSession(provider: provider, storage: storage)
+
+        _ = try await session.authorizationHeader(forcingRefresh: true)
+        _ = try await session.authorizationHeader(forcingRefresh: true)
+
+        #expect(await provider.presented == ["stored-refresh-token", "rt-1"])
+        #expect(await provider.replays == 0)
+        let stored = try await storage.credential(for: storedConnection())
+        #expect(stored?.refreshToken == "rt-2", "the client kept \(String(describing: stored?.refreshToken))")
+    }
+
+    @Test("Two concurrent refreshes do not spend one token twice")
+    func concurrentRefreshesDoNotReplay() async throws {
+        let provider = RotatingProvider(latency: .milliseconds(150))
+        let storage = InMemoryClientStorage()
+        let session = try await rotatingSession(provider: provider, storage: storage)
+
+        async let first = session.authorizationHeader(forcingRefresh: true)
+        async let second = session.authorizationHeader(forcingRefresh: true)
+        let headers = try await [first, second]
+
+        #expect(headers.allSatisfy { $0?.hasPrefix("Bearer at-") == true })
+        #expect(await provider.replays == 0, "a spent refresh token was presented again")
+        let stored = try await storage.credential(for: storedConnection())
+        #expect(stored?.refreshToken == "rt-\(await provider.issued)")
+    }
+
+    @Test("A replayed token is a revoked grant, reported as such")
+    func replayedTokenIsRefused() async throws {
+        let provider = RotatingProvider()
+        let storage = InMemoryClientStorage()
+        let session = try await rotatingSession(provider: provider, storage: storage)
+        await provider.spend("stored-refresh-token")
+
+        await #expect(throws: (any Error).self) {
+            _ = try await session.authorizationHeader(forcingRefresh: true)
+        }
+    }
+}
+
+/// A token endpoint that enforces single-use refresh tokens: it issues `rt-N`, and a token it
+/// has already accepted is a replay.
+private actor RotatingProvider {
+    private(set) var presented: [String] = []
+    private(set) var replays = 0
+    private(set) var issued = 0
+    private var spent: Set<String> = []
+    private let latency: Duration
+
+    init(latency: Duration = .zero) { self.latency = latency }
+
+    func spend(_ token: String) { spent.insert(token) }
+
+    func respond(to token: String) async throws -> TokenResponse {
+        presented.append(token)
+        if spent.contains(token) {
+            replays += 1
+            throw OAuthError.invalidGrant("refresh token already used")
+        }
+        spent.insert(token)
+        try await Task.sleep(for: latency)
+        issued += 1
+        return TokenResponse(
+            accessToken: "at-\(issued)", tokenType: "Bearer", expiresIn: 3_600,
+            refreshToken: "rt-\(issued)", scope: "mcp:tools")
+    }
+}
+
+private struct RotatingTransport: TokenTransport {
+    let provider: RotatingProvider
+
+    func exchange(
+        endpoint: URL,
+        parameters: [String: String],
+        credentials: ClientCredentials,
+        method: ClientAuthenticationMethod
+    ) async throws -> TokenResponse {
+        try await provider.respond(to: parameters["refresh_token"] ?? "")
+    }
+}
+
+private func rotatingSession(
+    provider: RotatingProvider, storage: InMemoryClientStorage
+) async throws -> MCPOAuthSession {
+    try await storage.store(storedCredential(), for: storedConnection())
+    let registrations = InMemoryRegistrationStore()
+    try await registrations.store(storedRegistration(), for: storedConnection())
+    let session = MCPOAuthSession(
+        setup: MCPOAuthSetup(fetch: metadataFetch()),
+        storage: storage,
+        registrations: registrations,
+        tokenTransport: RotatingTransport(provider: provider))
+    _ = try await session.resume(server: resumeServerURL())
+    return session
+}
+
 // MARK: - Forced-refresh helpers
 
 /// A session resumed from storage, with the provider stubbed.

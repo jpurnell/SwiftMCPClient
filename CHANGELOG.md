@@ -6,13 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Breaking — the Keychain types are SwiftKeychain's (0.15.0)
+### Breaking — the Keychain types are SwiftKeychain's (0.16.0)
 - **`KeychainAccess`, `SystemKeychain` and `CredentialKeyError` are removed.**
   `CredentialStoreKey` now keeps its key through
   [SwiftKeychain](https://github.com/jpurnell/SwiftKeychain) 0.1.1, and takes SwiftKeychain's
   `KeychainAccess` (`SystemKeychain`, `InMemoryKeychain`, or your own). MCPClient does not
   re-export them: code that names them depends on SwiftKeychain and imports it. See
-  "Migrating to 0.15.0" in the migration guide for each old name's replacement.
+  "Migrating to 0.16.0" in the migration guide for each old name's replacement.
 - **`CredentialStoreKey.loadOrCreate()` and `delete()` throw `KeychainError`**, typed.
   `CredentialKeyError.keychain(OSStatus)` becomes `.locked` (`errSecInteractionNotAllowed`),
   `.missingEntitlement`, or `.status(Int32)`; `.malformedKey` becomes `.malformed(String)`.
@@ -27,6 +27,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   login keychain (`SystemKeychain(dataProtection: false)`), not the data-protection keychain.
   `CredentialStoreKey.item` and the default `keychain` are public, and tests pin every field
   of both.
+
+## [0.15.0] — 2026-11-23
+
+### Changed
+- **swift-crypto minimum is now 5.1.2** (`from: "5.1.2"`; was `from: "3.0.0"`, which allowed only 3.x), and **swift-oauth moves to exactly `1.0.0-beta.15`** (was `1.0.0-beta.13`), the first release that allows swift-crypto 5. A crypto release is usually a security fix, so the owner's rule is to stay current. **A package that depends on SwiftMCPClient 0.15.0 must itself allow swift-crypto 5.1.2 or later**, and must pin swift-oauth no lower than beta.15. No source change; 687 tests pass on 5.1.2. This release also carries everything that had accumulated under Unreleased since 0.14.0, listed below.
+
+### Security
+- **swift-nio family brought to the latest, with floors that stop a downgrade.** Resolved:
+  swift-nio 2.105.0 (was 2.103.0), swift-nio-ssl 2.37.6 (was 2.36.1), swift-nio-http2 1.46.0,
+  swift-nio-extras 1.35.2, swift-nio-transport-services 1.28.0, async-http-client 1.37.0.
+  The manifest floors are now `swift-nio from: 2.105.0` and `swift-nio-ssl from: 2.37.6`.
+  Advisories: swift-nio-ssl GHSA-xfxg-9975-pc2j (critical; vulnerable 2.18.0 to 2.37.1, this
+  repository was resolved at 2.36.1), swift-nio GHSA-qcc5-f287-vgmq, GHSA-r3rc-9hpw-54v9,
+  GHSA-rj37-6j9x-74q6. 678 tests pass on this state.
+
+### Changed
+- **`swift-oauth` is pinned `exact: "1.0.0-beta.13"`, up from `from: "0.11.1"`.** beta.13 is swift-oauth's
+  current tag, and a prerelease: SwiftPM version ranges (`from:`) never select a prerelease, so an
+  `exact:` pin is the only form that can name it (and the form SwiftMCPServer already uses). The
+  old range floated to the newest 0.x, which no longer compiles against this client (an
+  unhandled `.tlsClientAuth` case), and left a client and its server on different OAuth code. Nothing in
+  the client's own sources needed to change to compile against beta.13. Consumers that also depend on
+  swift-oauth must now resolve exactly `1.0.0-beta.13` (or raise their pin together with this one).
+
+### Fixed
+- **A non-2xx POST response's JSON-RPC error body is no longer discarded (`StreamableHTTPTransport`).**
+  A server such as SwiftMCPServer refuses an unsupported protocol revision with HTTP `400` and a
+  JSON-RPC body (`-32022`, with the versions it speaks in `data.supported`); the transport threw
+  `requestFailed(code: 400, ..., data: nil)` without reading the body. So
+  `MCPClientConnection.supportedVersions(from:)` returned `[]`, and `MCPConnectionFactory` read `400`
+  as "old server", sent `initialize` to a server that had removed it, and failed. Now, when the body
+  (read with a 64 KiB bound) is a JSON-RPC 2.0 error, the thrown error carries its code, message and
+  data; any other body keeps the HTTP-status error as before. The HTTP status is no longer in the
+  thrown error for those responses (it is logged at debug). The 401 refresh, the 404 session
+  clearing, 202 and redirect handling run before this and are unchanged. Tests use a real loopback
+  HTTP 400 (`HTTPErrorBodyTests`). Not changed: the `HTTPSSETransport` POST and the stream-open `GET`
+  have the same status-only throw.
+- **A redirected token, refresh or revocation request was reported as the wrong error.** swift-oauth
+  1.0.0-beta.2 and later decline a credential-bearing redirect themselves and throw
+  `OAuthRedirectRefused`; the client's own session guard was never asked, so
+  `MCPOAuthTokenTransport` let that error through instead of
+  `MCPError.redirectRejected(destination:reason:)`. It is mapped back, with the same
+  wording and origin-only destination; nothing is sent to the destination either way. Found by the
+  existing 25 `MCPOAuthRedirectWireTests` cases failing after the bump.
+- **`MCPOAuthTokenTransport` now implements `revoke`** (forwarding to swift-oauth's status-only
+  RFC 7009 request, with no redirect followed). It previously inherited the protocol default, which
+  decodes a token response from a revocation answer that has none.
+
+### Added
+- Tests: refresh-token rotation (each refresh presents the token the last response returned and the
+  client stores the new one; two concurrent forced refreshes do not spend a token twice; a
+  replayed token is refused) against a single-use token endpoint; a revocation is never redirected.
+  These are against a stub provider, not swift-oauth's in-memory provider store: pulling the provider
+  product (and its SQLite target) into the client's test target was not worth it, and swift-oauth
+  tests the same rotation against its own provider.
 
 ### Security
 - **A redirect could send a request — custom headers, session id and body — to any origin,

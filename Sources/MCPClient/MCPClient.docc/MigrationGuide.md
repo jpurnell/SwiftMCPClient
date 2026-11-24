@@ -397,7 +397,7 @@ needs one more arm.
   static `Authorization` in `headers` is now left off the Streamable HTTP server stream's
   `GET`, as it already was off every `POST`.
 
-## Migrating to 0.15.0: the Keychain types are SwiftKeychain's
+## Migrating to 0.16.0: the Keychain types are SwiftKeychain's
 
 ``CredentialStoreKey`` keeps its key through
 [SwiftKeychain](https://github.com/jpurnell/SwiftKeychain) instead of Keychain code
@@ -420,7 +420,7 @@ imports `SwiftKeychain` itself. In `Package.swift`, beside the dependency on thi
 Code that only calls ``CredentialStoreKey/loadOrCreate()`` or
 `MCPOAuthSession.persistent()` and catches errors generically needs no change.
 
-| Before (0.14.0) | After (0.15.0) |
+| Before (0.15.0) | After (0.16.0) |
 |---|---|
 | `MCPClient.KeychainAccess` | `SwiftKeychain.KeychainAccess` |
 | `MCPClient.SystemKeychain()` | `SwiftKeychain.SystemKeychain(dataProtection: false)` — the default ``CredentialStoreKey`` uses |
@@ -445,7 +445,7 @@ do {
 }
 ```
 
-### After (0.15.0)
+### After (0.16.0)
 
 <!-- docs:illustrative -->
 ```swift
