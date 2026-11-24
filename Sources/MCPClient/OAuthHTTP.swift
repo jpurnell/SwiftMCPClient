@@ -135,6 +135,12 @@ enum OAuthHTTP {
         // chunk at a time and can be stopped. `data(for:)` hands it over only when it is
         // complete — which, for a body with no end, is never.
         let task = session.dataTask(with: request)
+        func tooLarge() -> MCPError {
+            // logging: swift-log has no privacy annotations; the limit, the purpose and the endpoint's origin — nothing the server sent
+            Logger(label: "MCPClient.OAuthHTTP").error(
+                "Stopped reading a \(purpose) response from \(request.url.map(HTTPOrigin.description(of:)) ?? HTTPOrigin.noOrigin): larger than \(limit) bytes")
+            return MCPResponseLimits.exceeded(limit, reading: "\(purpose) response", from: request.url)
+        }
         do {
             let result = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
@@ -150,6 +156,14 @@ enum OAuthHTTP {
             if let refusal = exchange.refusal {
                 throw refuse(refusal, policy: policy, purpose: purpose)
             }
+            // Checked here as well as below: where `URLSession` reports a transfer cancelled
+            // from this side as an error, the catch has it; where it reports it as a
+            // transfer that completed (swift-corelibs-foundation does, and hands over what had
+            // arrived, which is nothing), only this does — and what the caller would get
+            // is an empty body presented as a success.
+            if exchange.exceededLimit {
+                throw tooLarge()
+            }
             return result
         } catch {
             if let refusal = exchange.refusal {
@@ -158,10 +172,7 @@ enum OAuthHTTP {
             // The transfer was cancelled from here, so the `URLError` it ended with is this
             // code's doing and not the network's.
             if exchange.exceededLimit {
-                let logger = Logger(label: "MCPClient.OAuthHTTP")
-                // logging: swift-log has no privacy annotations; the limit, the purpose and the endpoint's origin — nothing the server sent
-                logger.error("Stopped reading a \(purpose) response from \(request.url.map(HTTPOrigin.description(of:)) ?? HTTPOrigin.noOrigin): larger than \(limit) bytes")
-                throw MCPResponseLimits.exceeded(limit, reading: "\(purpose) response", from: request.url)
+                throw tooLarge()
             }
             // `URLError` describes itself with the failing URL, whole. Named by kind and
             // origin instead, as a transport's failure is.
