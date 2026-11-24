@@ -72,6 +72,7 @@ Swift project that needs MCP integration.
 - ``StdioTransport``
 - ``ServerTrust``
 - ``ServerTrustError``
+- ``MCPResponseLimits``
 
 ### JSON-RPC Protocol
 

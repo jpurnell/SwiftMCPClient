@@ -109,9 +109,33 @@ endpoints is followed, on any status, even within the origin.
 A redirect that is not followed sends nothing to its destination and throws
 ``MCPError/redirectRejected(destination:reason:)``.
 
-This is true of the defaults — ``MCPOAuthSetup/fetchMetadata(from:)`` and
-``MCPOAuthTokenTransport``. A `fetch` or a `tokenTransport` you supply yourself
-replaces them, and decides for itself what a redirect does:
+Three more things hold for every one of these requests. The response is read
+up to 1 MiB and no further — a larger one, a body with no end included, is cut
+off there with ``MCPError/responseTooLarge(limit:reason:)``. No cookie is
+stored or sent and no stored credential is offered: each request is made on a
+session with cookie storage, credential storage and the cache switched off.
+And a protected-resource document is used only if its `resource` is the server
+it was fetched for (RFC 9728 §3.3) — otherwise
+``MCPOAuthError/resourceMismatch(expected:found:)``.
+
+Discovery asks two locations for the protected-resource document: the one RFC
+9728 §3.1 derives from the server's URL, then the root of its host. A location
+that fails — a `404`, a refused redirect, a document naming another resource —
+does not stop the next being asked. If neither serves a usable document, the
+error is the first refused redirect or resource mismatch when there was one,
+rather than the last location's `404`.
+
+**All of the above is true of the defaults** —
+``MCPOAuthSetup/fetchMetadata(from:)`` and ``MCPOAuthTokenTransport``. A `fetch`
+or a `tokenTransport` you supply yourself replaces them, and with them the
+redirect rules, the size limit and the cookie-free session: the request is
+yours to make and the library never sees it. `URLSession.shared.data(from:)`
+as a `fetch` follows a redirect anywhere. What the library can still check is
+what comes back, and it does, whoever fetched it: the document's `resource`,
+the authorization server's `issuer`, and that every endpoint it names is
+`https` and on the issuer's origin. A token transport returns only a token, so
+nothing about it can be checked afterwards — pass one only if it refuses
+redirects itself.
 
 ```swift
 func setupWithLoggedFetch() -> MCPOAuthSetup {
@@ -340,6 +364,12 @@ where everything it will ever say about who you are is said.
   upgrade. A server that accepts the connection and never answers — or hangs
   up without answering, which `WebSocketKit` does not report — fails
   `connect()` when it runs out, where it used to leave it waiting for ever.
+  A hang-up is therefore reported at the deadline rather than when it
+  happens: `WebSocketKit` (2.16.1) creates the connection inside
+  `WebSocketClient.connect` and returns only a future for the finished
+  upgrade, and its upgrade handler fails that future on a response or an
+  error but has no `channelInactive`, so a peer that closes cleanly completes
+  nothing this transport can observe.
 - **Redirects** are never followed: any answer but `101` fails the upgrade.
 
 ```swift
@@ -368,6 +398,32 @@ What all three do is warn. When a transport is configured with headers or an
 `authorization:` provider and its URL is `http://` or `ws://` to any host but
 this machine (`localhost`, `127.0.0.0/8`, `::1`), `connect()` logs one warning
 naming the origin: those credentials are about to cross a network unencrypted.
+It is logged once in a transport's life, however many times it connects.
+
+## How Much a Server May Send
+
+A response is read into memory before it is decoded, and so is each
+Server-Sent Event. ``MCPResponseLimits`` bounds both — 10 MiB each unless you
+pass others — so that how much memory a connection costs is not the server's
+to choose:
+
+```swift
+func transportWithLimits() -> StreamableHTTPTransport? {
+    guard let url = URL(string: "https://mcp.example.com/mcp") else { return nil }
+    return StreamableHTTPTransport(
+        url: url,
+        limits: MCPResponseLimits(
+            maximumResponseBytes: 32 * 1024 * 1024,
+            maximumEventBytes: 4 * 1024 * 1024))
+}
+```
+
+A JSON body past its limit fails `send(_:)` with
+``MCPError/responseTooLarge(limit:reason:)``. An event past its limit is on a
+stream nobody is awaiting: it is logged at error level, reading stops, and
+that stream is not reopened or resumed, because the server would answer with
+the same event. ``HTTPSSETransport`` and ``StreamableHTTPTransport`` take
+`limits:`; ``WebSocketTransport`` and ``StdioTransport`` do not have one yet.
 
 ## Self-Signed and Private-CA Servers
 
@@ -502,5 +558,9 @@ protocol MyCustomTransport: Sendable {
 ```
 
 All four methods are required. The transport must be `Sendable` for use with
-the ``MCPClientConnection`` actor. Message framing (how individual JSON-RPC
+the ``MCPClientConnection`` actor. An error `receive()` throws that is not an
+``MCPError`` reaches the connection's callers as
+``MCPError/connectionFailed(reason:)`` naming the error's type — its own
+description is not repeated — so throw an ``MCPError`` to say something
+specific. Message framing (how individual JSON-RPC
 messages are delimited) is the transport's responsibility.

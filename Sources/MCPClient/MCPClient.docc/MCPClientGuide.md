@@ -120,6 +120,8 @@ func handleToolErrors() async throws {
             print("Refused the server's message endpoint on \(endpoint): \(reason)")
         case .redirectRejected(let destination, let reason):
             print("Refused a redirect to \(destination): \(reason)")
+        case .responseTooLarge(let limit, let reason):
+            print("Stopped reading at \(limit) bytes: \(reason)")
         }
     }
 }

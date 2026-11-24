@@ -178,6 +178,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   JWT, base64, `sk-live-abc123`, a long number — all redacted; `mcp`, `sse`, `messages`, `v1`,
   `.well-known`, `oauth-protected-resource`, `2025-06-18` — kept. **Not caught:** a key that is
   a couple of short words, and a key in the host name.
+- **Protected-resource metadata could name any resource it liked (RFC 9728 §3.3, §7.3).** The
+  `resource` in the document was never compared with the server it had been fetched for, and
+  it is not only descriptive: it becomes the RFC 8707 resource indicator on the authorization
+  request, so it decides which server the token is good for. A document served for
+  `https://mcp.example.com/mcp` that called itself `https://victim.example/api` was used. It is
+  now refused with the new `MCPOAuthError.resourceMismatch(expected:found:)`, naming both by
+  origin and redacted path. "Identical" is the same string after the normalisation RFC 3986
+  §6.2.2.1 and §6.2.3 allow — scheme and host case, a default port — with one trailing slash
+  overlooked, as for the issuer; path case, percent-encoding, dot segments, a query, a
+  fragment and userinfo are all significant. The location derived from the server's path must
+  name the server's URL; the root location may name the server's URL or its origin (§3.3's
+  two identities: the identifier the well-known string was inserted into, and the URL the
+  client makes its requests to). The check runs on whatever `fetch` returned, a caller's own
+  included.
+- **A refused redirect during discovery was hidden behind the next location's `404`.**
+  `protectedResourceMetadata(server:)` asks two locations and threw the *last* failure, so a
+  cross-origin redirect refused at the first surfaced as `metadataNotFound(…, 404)` from the
+  second — the security-relevant cause replaced by one that says nothing. Both locations are
+  still asked (a refusal is evidence about that location, the other is on the same host and
+  held to the same checks, and nothing was sent to the redirect's destination), but when
+  neither serves a usable document the error is now the first refused redirect or resource
+  mismatch, if there was one.
+- **OAuth responses were read without limit (CWE-400, CWE-770).** A metadata, registration or
+  token response was read to its end, whatever its size; a body with no end was read until
+  memory ran out. Each is now read up to 1 MiB — hundreds of times the largest such document
+  found — and cut off there: a declared `Content-Length` over the limit is refused before any
+  of it is read, an undeclared one at the chunk that crosses it, and the request fails with
+  the new `MCPError.responseTooLarge(limit:reason:)`. To do this on both Foundations the
+  requests are made as delegate-driven data tasks rather than with `data(for:)`, which hands
+  a body over only when it is complete; and `MCPOAuthTokenTransport` now posts the token
+  request itself instead of handing a session to `swift-oauth` 0.11.1's transport, which
+  reads the same way.
+- **A Server-Sent Event had no size limit, on any stream (CWE-400, CWE-770).** An event ends
+  at a blank line and a server need never send one: the pending event was accumulated
+  without bound. Each event is now limited — 10 MiB by default,
+  `MCPResponseLimits.maximumEventBytes` — on a `POST`'s streamed response, the server stream,
+  a resumption and the legacy HTTP+SSE stream. See **Changed** for what happens when one is
+  passed.
+- **A cookie set during an OAuth request could be sent back on the next hop.** The session
+  was ephemeral and made per request, which kept cookies from one request out of the next —
+  but within a metadata fetch that followed a same-origin redirect, a `Set-Cookie` on the
+  redirect was replayed on the request that followed it (measured on the wire). The session
+  is now made with cookie storage, credential storage and the URL cache all switched off, so
+  nothing ambient — a cookie, a keychain password for the host, a cached document — is part
+  of any OAuth request.
+- **`requestTimeout` did not fire against a server that said nothing (CWE-400).** See
+  **Fixed**: `initialize` had no limit at all, and the limit on every later request was thrown
+  and then waited for the read it was meant to end.
 
 ### Changed
 - **Cross-origin redirects are no longer followed.** A deployment that answered the configured
@@ -237,6 +285,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - With an `authorization:` provider that returns `nil`, a static `Authorization` in `headers`
   is now left off the Streamable HTTP server stream's `GET` too. It was already left off every
   `POST`; the `GET` sent it.
+- **A server whose protected-resource metadata misnames itself no longer works.** Sign-in
+  fails with `MCPOAuthError.resourceMismatch` where it used to proceed with whatever the
+  document said. The remedy is the server's `resource` value, or the URL the client is
+  configured with: they must be the same URL (see Security for exactly how the same).
+- **Requests time out.** `MCPClientConnection`'s `requestTimeout` — 30 seconds by default —
+  now ends a request whose answer never comes, `initialize` included, with `MCPError.timeout`.
+  A call that used to wait indefinitely on a silent server now fails after that long; pass a
+  longer `requestTimeout` for a server that needs it. After a timed-out `initialize` the
+  transport is disconnected, as after any failed handshake.
+- **A response body that fails part-way is `MCPError.connectionFailed`**, composed like every
+  other network failure (`Could not reach <origin>: <kind>`), from `send(_:)` on both HTTP
+  transports. The networking library's own error — `HTTPClientError.remoteConnectionClosed`,
+  for one — used to escape.
+- **A JSON response body past its limit is `MCPError.responseTooLarge`** where it was
+  `NIOTooManyBytesError`. The limit is still 10 MiB by default and is now configurable.
+- **An oversized event stops its stream.** On the Streamable HTTP server stream it is logged
+  at error level and the stream is not reopened; on a `POST`'s streamed response it is logged
+  and the response is not resumed (the request it answered then fails with `timeout`); on
+  legacy HTTP+SSE it ends the stream, and before the `endpoint` event it fails `connect()`
+  with `responseTooLarge`, without retrying. In each case a reconnect would be answered with
+  the same event.
+- **An error from a custom transport's `receive()` reaches callers as `MCPError`.** The
+  dispatcher handed whatever `receive()` threw to every waiting request. An `MCPError` is
+  still passed on as it is; anything else is `connectionFailed("The transport stopped
+  receiving: <kind>")`, where kind is one of `TransportFailure`'s phrases or the error's type
+  name. Code that caught its own transport's error type from an `MCPClientConnection` call
+  catches `MCPError` instead.
+- **`MCPMessageDispatcher` and `SSEEventStream` log the kind of a failure**, as the transports
+  do, where they logged `error.localizedDescription` — the networking library's wording, and
+  for `URLError` the whole failing URL.
+- **The plaintext-credentials warning is logged once per transport instance**, not once per
+  `connect()`. `HTTPSSETransport` and `WebSocketTransport` repeated it on every connect, and
+  `StreamableHTTPTransport` on every connect after a disconnect.
+- **`MCPOAuthTokenTransport` makes its own request.** Same form, same headers, same errors as
+  before — it no longer wraps `URLSessionTokenTransport` — so that the response can be bounded
+  and the session carries no cookie store.
+- **`MCPOAuthSession.signOut()`'s documentation no longer claims a failed revocation throws.**
+  It never did: `swift-oauth` 0.11.1 removes the local credential and discards the
+  revocation's outcome. The behaviour is unchanged and now described; see Known limitations.
 
 ### Added
 - **`MCPError.redirectRejected(destination:reason:)`.** A new case on a public enum, so an
@@ -254,6 +341,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   defaults to: redirects within the document's origin only.
 - **`MCPOAuthError.issuerMismatch(expected:found:)`.** A new case on a public enum; an
   exhaustive `switch` over `MCPOAuthError` needs one more arm.
+- **`MCPError.responseTooLarge(limit:reason:)`.** A second new case on `MCPError` in this
+  release, so the one extra arm an exhaustive `switch` already needs for `redirectRejected`
+  becomes two. `limit` is the limit that was passed; `reason` says what was being read and
+  from which origin, and quotes nothing the server sent.
+- **`MCPResponseLimits`**, and a `limits:` parameter on `StreamableHTTPTransport.init` and
+  `HTTPSSETransport.init` (defaulted, so existing calls are unchanged):
+  `maximumResponseBytes` for a JSON response body and `maximumEventBytes` for one
+  Server-Sent Event, 10 MiB each by default.
+- **`MCPOAuthError.resourceMismatch(expected:found:)`.** A second new case on `MCPOAuthError`
+  in this release.
+- `StreamableHTTPTransport.ServerStreamEnding.eventTooLarge` (internal).
 
 ### Fixed
 - **`MCPConnectionFactory` read one transport from two places, and lost the handshake's answer
@@ -288,6 +386,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   userinfo.** A relative endpoint inherits it, and inherited userinfo was mistaken for
   userinfo the server had supplied. What the caller wrote is now told apart from what the
   server adds.
+- **`requestTimeout` never fired against a silent server, and `initialize` had none.** The
+  timeout raced the read in a task group, and a task group returns only when every child
+  has: the timeout was thrown, and the group then waited for a `receive()` that does not
+  notice cancellation — so a server that accepted a request and never answered held the call
+  for ever, with the limit configured. `initialize`, read directly from the transport before
+  the dispatcher starts, was not raced at all. Both are now bounded by `requestTimeout` with
+  a race that does not wait for the loser; on a timeout the dispatcher's pending wait is
+  withdrawn, and a failed `initialize` disconnects the transport, which ends the abandoned
+  read.
 
 ### Tests
 - `TransportRedirectWireTests` — two loopback servers, every request each HTTP transport makes
@@ -322,6 +429,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 0.14.0's `redirectDoesNotForwardAuthorization` pinned `AsyncHTTPClient` following a
   cross-origin `307` without `Authorization`. It now asserts that the redirect is refused and
   the second server hears nothing.
+- `ProtectedResourceValidationTests` — a 28-row table of `resource` comparisons (what is the
+  same resource and, mostly, what is not); which identifiers each location may name;
+  discovery through a caller's own `fetch` returning a mismatched resource, a mismatched
+  issuer, a plaintext token endpoint and an off-origin one; and which error survives when
+  locations fail differently.
+- `MCPOAuthHardeningWireTests` — metadata, registration and token requests against a server
+  whose body never ends (asserting how much the *server* managed to write before it was
+  stopped), one that declares 2 MB, and the exact boundary; a `Set-Cookie` on a redirect hop
+  and on a token response, asserting no later request carries it; and — through an internal,
+  task-local trust seam that exists only for these tests — an **HTTPS** loopback server
+  redirecting metadata and token requests to a plaintext one, on all five statuses, asserting
+  the request reached the first and nothing reached the second. The TLS tests are
+  Apple-only: see Known limitations.
+- `ResponseLimitWireTests` — both HTTP transports against a body cut short, one declared over
+  the limit, one over it with no declared length, and one within it; an event stream that
+  never ends an event, counting how many chunks were read before stopping; an oversized event
+  before the `endpoint` event, on the server stream, and in a `POST`'s response, asserting
+  how many connections the server saw.
+- `RequestDeadlineTests` — `initialize` and a later request against a transport that takes
+  messages and never answers, and `initialize` over a real stream to a stub that accepts the
+  `POST` and stays silent. Before the fix these did not fail; they did not return.
+- `ReceiveFailureTests` — a transport whose `receive()` throws an error describing itself
+  with a URL and a token: what the dispatcher and the event stream log, and what a waiting
+  request is failed with.
+- `PlaintextWarningTests` — what each transport actually wrote, through an injected logger:
+  once in three connects for `http://`/`ws://` to a non-loopback host with a header or a
+  provider; never for `127.0.0.1`, `localhost`, `::1`, `https`/`wss`, or with no credentials.
+
+### Known limitations
+- **`MCPOAuthSession.signOut()` cannot report a failed revocation.** `swift-oauth` 0.11.1's
+  `OAuthConnection.disconnect()` discards it, and its `TokenTransport` returns a decoded token
+  response, so a successful revocation (an empty `200`) and a failed one look the same from
+  outside. `swift-oauth` fixes this on its `main`; it reaches this package when the
+  `swift-oauth` requirement is raised, which is a release decision not made here.
+- **A caller-supplied `fetch` or `tokenTransport` is not held to the redirect rules, the size
+  limit or the cookie-free session.** The request is the caller's to make. What comes back
+  from a `fetch` is still checked (resource, issuer, `https` endpoints on the issuer's
+  origin); nothing about a token transport can be.
+- **`WebSocketTransport` reports a peer that hangs up during the upgrade only at the
+  deadline.** `WebSocketKit` 2.16.1 does not expose the channel or its close: the connection
+  is made inside `WebSocketClient.connect` (`WebSocketClient.swift` 109–234), which returns
+  only the upgrade promise's future, and `HTTPUpgradeRequestHandler` fails that promise in
+  `channelRead` and `errorCaught` but implements no `channelInactive`.
+- **The `https` → `http` OAuth wire tests run on Apple platforms only.** `URLSession` on Linux
+  takes its roots from libcurl's compiled-in bundle and exposes no trust decision, so a test
+  cannot put a TLS stub in front of it without editing the machine's certificate store. The
+  decision itself (`HTTPOrigin.resolve`) is table-tested on every platform.
+- **`WebSocketTransport` and `StdioTransport` have no message size limit**, and
+  `WebSocketKit`'s default maximum frame is 16 KiB.
+- **`HTTPSSETransport.connect()` does not bound the wait for the `endpoint` event** once the
+  response head has arrived; `connectionTimeout` bounds the head.
 
 ## [0.14.0] — 2026-10-08
 
