@@ -102,9 +102,8 @@ public enum MCPError: Error, Sendable, Equatable {
     /// draws the same response.
     ///
     /// For a transport the limits are ``MCPResponseLimits``, 10 MiB each unless configured;
-    /// raise them for a server known to send more. For an OAuth metadata or registration
-    /// response the limit is 1 MiB and is not configurable. A token response is read by
-    /// `swift-oauth`, which has no limit.
+    /// raise them for a server known to send more. For an OAuth metadata, registration or
+    /// token response the limit is 1 MiB and is not configurable.
     ///
     /// - Parameters:
     ///   - limit: The limit that was passed, in bytes.

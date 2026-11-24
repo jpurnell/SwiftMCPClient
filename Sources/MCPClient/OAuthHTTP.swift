@@ -229,6 +229,15 @@ enum OAuthHTTP {
                         destination: refused.destination, cause: .policy),
                     policy: policy, purpose: purpose)
             }
+            // swift-oauth caps every response it reads at 1 MiB (since 1.0.0-beta.10) and says
+            // so with its own error. It is the same event as a metadata or registration
+            // response over the limit, and is reported the same way.
+            if let tooLarge = error as? OAuthResponseTooLarge {
+                // logging: swift-log has no privacy annotations; the purpose, the limit and the endpoint's origin — nothing the server sent
+                Logger(label: "MCPClient.OAuthHTTP").error(
+                    "Stopped reading a \(purpose) response from \(tooLarge.endpoint): larger than \(tooLarge.limit) bytes")
+                throw MCPResponseLimits.exceeded(tooLarge.limit, reading: "\(purpose) response", from: url)
+            }
             // `URLError` describes itself with the failing URL, whole. Named by kind and
             // origin instead, as a transport's failure is.
             guard error is URLError else { throw error }

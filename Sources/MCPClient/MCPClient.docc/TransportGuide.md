@@ -109,10 +109,10 @@ endpoints is followed, on any status, even within the origin.
 A redirect that is not followed sends nothing to its destination and throws
 ``MCPError/redirectRejected(destination:reason:)``.
 
-Three more things hold for these requests. A metadata or registration response
-is read up to 1 MiB and no further — a larger one, a body with no end included,
-is cut off there with ``MCPError/responseTooLarge(limit:reason:)``; a token
-response is read by `swift-oauth`, which sets no limit. No cookie is
+Three more things hold for every one of these requests. The response is read
+up to 1 MiB and no further — a larger one, a body with no end included, is cut
+off there with ``MCPError/responseTooLarge(limit:reason:)`` (for a token
+response the limit is `swift-oauth`'s, reported the same way). No cookie is
 stored or sent and no stored credential is offered: each request is made on a
 session with cookie storage, credential storage and the cache switched off.
 And a protected-resource document is used only if its `resource` is the server
