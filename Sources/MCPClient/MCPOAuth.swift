@@ -55,6 +55,30 @@ public enum MCPOAuthError: Error, Equatable, Sendable {
     ///   - expected: The issuer the MCP server advertised, and the metadata was fetched for.
     ///   - found: The issuer the document claims, as an origin only.
     case issuerMismatch(expected: String, found: String)
+
+    /// The protected-resource metadata describes a different resource from the one it was
+    /// fetched for.
+    ///
+    /// RFC 9728 §3.3: the `resource` in the document MUST be identical to the resource
+    /// identifier whose well-known URL it was retrieved from, and a document where it is
+    /// not MUST NOT be used. §7.3 says what the check is for: a document that may name any
+    /// resource it likes can claim to be another server's, and the token the client then
+    /// obtains — its audience is this value, by RFC 8707 — is one that other server accepts.
+    ///
+    /// Identical means the same string, after the normalisation RFC 3986 §6.2.2.1 and
+    /// §6.2.3 allow — scheme and host in lower case, a default port left out — and with one
+    /// trailing slash on the path overlooked. Nothing looser: a different path, a different
+    /// case in the path, a query, a fragment or userinfo is a different resource.
+    ///
+    /// Thrown once every candidate location has been tried. A mismatch at one location does
+    /// not stop the next being asked — that document is simply not used — but if none
+    /// serves a usable one, this is reported in preference to a later location's `404`.
+    ///
+    /// - Parameters:
+    ///   - expected: The resource the document had to name: the MCP server's URL, without
+    ///     query, fragment or userinfo, as an origin and a redacted path.
+    ///   - found: The `resource` the document claims, as an origin and a redacted path.
+    case resourceMismatch(expected: String, found: String)
 }
 
 /// RFC 9728 protected resource metadata — how an MCP server names its authorization server.
@@ -125,8 +149,23 @@ public struct MCPOAuthSetup: Sendable {
     /// Creates a setup helper.
     ///
     /// - Parameter fetch: How to retrieve a document. Defaults to
-    ///   ``fetchMetadata(from:)``, which follows a redirect only within the origin of the
-    ///   URL it was asked for. A `fetch` of your own decides that for itself.
+    ///   ``fetchMetadata(from:)``.
+    ///
+    ///   **A `fetch` of your own replaces every protection the default has on the request.**
+    ///   The default follows a redirect only within the origin of the URL it was asked for,
+    ///   reads at most 1 MiB, and sends no cookie or stored credential. None of that is
+    ///   applied to a closure passed here: if it is `URLSession.shared.data(from:)`, it
+    ///   follows a redirect to any origin — `https` to `http` included — and reads a body
+    ///   of any size. Hold your own to the same rules, or call ``fetchMetadata(from:)``
+    ///   from inside it.
+    ///
+    ///   What does not depend on who fetched is checked on whatever comes back, yours
+    ///   included: the protected-resource document's `resource` must be the server it was
+    ///   asked about (``MCPOAuthError/resourceMismatch(expected:found:)``), the
+    ///   authorization server's `issuer` must be the one asked for
+    ///   (``MCPOAuthError/issuerMismatch(expected:found:)``), and every endpoint the
+    ///   document names must be `https` and on its issuer's origin
+    ///   (``MCPOAuthError/discovery(_:)``).
     public init(fetch: @escaping Fetch = { url in try await MCPOAuthSetup.fetchMetadata(from: url) }) {
         self.fetch = fetch
     }
@@ -306,30 +345,144 @@ public struct MCPOAuthSetup: Sendable {
 
     /// Fetches an MCP server's protected resource metadata.
     ///
+    /// The locations ``protectedResourceURLs(server:)`` lists are asked in order, and the
+    /// first that serves a document describing this server is used. The order is the MCP
+    /// authorization specification's: the location RFC 9728 §3.1 derives from the server's
+    /// own URL, then the root of its host.
+    ///
+    /// A location that fails does not stop the next being asked. That includes one whose
+    /// redirect was refused and one whose document names another resource: each is evidence
+    /// about *that* location, the other location is on the same host and is held to the
+    /// same checks, and nothing was sent to the redirect's destination. What the refusal
+    /// must not be is hidden. So when no location serves a usable document, the error is
+    /// the first refused redirect or resource mismatch, if there was one — not whatever the
+    /// last location happened to answer, which is typically a `404` that says nothing about
+    /// why discovery failed.
+    ///
     /// - Parameter server: The MCP server's base URL.
     /// - Returns: The metadata.
-    /// - Throws: ``MCPOAuthError`` or a transport error.
+    /// - Throws: ``MCPError/redirectRejected(destination:reason:)`` or
+    ///   ``MCPOAuthError/resourceMismatch(expected:found:)`` if any location was refused
+    ///   for that reason and none served a usable document; otherwise the last location's
+    ///   failure — ``MCPOAuthError/metadataNotFound(url:status:)``, a transport error, or a
+    ///   decoding error.
     public func protectedResourceMetadata(server: URL) async throws -> ProtectedResourceMetadata {
         let candidates = Self.protectedResourceURLs(server: server)
         guard !candidates.isEmpty else {
             throw Self.notFound(at: server, status: 0)
         }
 
+        var refusal: (any Error)?
         var lastError: (any Error)?
         for candidate in candidates {
             do {
-                return try JSONDecoder().decode(
+                let document = try JSONDecoder().decode(
                     ProtectedResourceMetadata.self, from: try await fetch(candidate))
+                // RFC 9728 §3.3, before anything in the document is used — and on whatever
+                // `fetch` returned, the caller's own included.
+                let accepted = Self.resourceIdentifiers(server: server, fetchedFrom: candidate)
+                guard accepted.contains(where: { Self.isSameResource(document.resource, $0) }) else {
+                    throw MCPOAuthError.resourceMismatch(
+                        expected: accepted.first.flatMap(URL.init(string:)).map(HTTPOrigin.redacted)
+                            ?? HTTPOrigin.noOrigin,
+                        found: URL(string: document.resource).map(HTTPOrigin.redacted) ?? HTTPOrigin.noOrigin)
+                }
+                return document
             } catch {
                 // Keep going: a 404 at the RFC location is expected against servers that
-                // publish only at the origin root. The last failure is rethrown below if
-                // every candidate is exhausted.
+                // publish only at the origin root.
                 let logger = Logger(label: "MCPClient.MCPOAuth")
                 // logging: swift-log has no privacy annotations; the candidate by origin and redacted path, the failure by kind — no userinfo, query or error text
-                logger.debug("protected-resource metadata not at \(HTTPOrigin.redacted(candidate)): \(TransportFailure.kind(of: error))")
+                logger.debug("protected-resource metadata not usable at \(HTTPOrigin.redacted(candidate)): \(TransportFailure.kind(of: error))")
+                if refusal == nil, Self.isRefusal(error) { refusal = error }
                 lastError = error
             }
         }
-        throw lastError ?? Self.notFound(at: server, status: 0)
+        throw refusal ?? lastError ?? Self.notFound(at: server, status: 0)
+    }
+
+    /// Whether a failure is this client declining something a server asked of it, rather
+    /// than a document simply not being there.
+    private static func isRefusal(_ error: any Error) -> Bool {
+        if case .redirectRejected = error as? MCPError { return true }
+        if case .resourceMismatch = error as? MCPOAuthError { return true }
+        return false
+    }
+
+    /// The resource identifiers a document fetched from a candidate location may name.
+    ///
+    /// RFC 9728 §3.3 gives two identities, and each location is held to the ones that apply
+    /// to it:
+    ///
+    /// - **The identifier the well-known string was inserted into.** For the location
+    ///   derived from the server's path that is the server's URL; for the root location it
+    ///   is the origin alone.
+    /// - **The URL the client uses to make requests to the resource server** — the second
+    ///   paragraph's rule for a metadata URL the client was handed rather than derived.
+    ///   The root location is that case for a server with a path: the MCP authorization
+    ///   specification sends a client there as a fallback, and a server publishing there
+    ///   names itself by the URL it is reached at.
+    ///
+    /// So the path location accepts the server's URL, and the root location accepts the
+    /// server's URL or its origin. Query, fragment and userinfo are not part of either: the
+    /// well-known URL is built without the query (see ``protectedResourceURLs(server:)``),
+    /// a resource identifier has no fragment (RFC 9728 §1.2), and userinfo is a credential.
+    ///
+    /// - Parameters:
+    ///   - server: The MCP server's base URL.
+    ///   - candidate: One of ``protectedResourceURLs(server:)``.
+    /// - Returns: The acceptable identifiers, the server's own URL first. Empty if the
+    ///   server URL cannot be taken apart, which accepts nothing.
+    static func resourceIdentifiers(server: URL, fetchedFrom candidate: URL) -> [String] {
+        guard var components = URLComponents(url: server, resolvingAgainstBaseURL: false) else {
+            return []
+        }
+        components.query = nil
+        components.fragment = nil
+        components.user = nil
+        components.password = nil
+        guard let own = components.string else { return [] }
+
+        components.path = ""
+        let isRoot = candidate.path == "/.well-known/oauth-protected-resource"
+        guard isRoot, let origin = components.string, origin != own else { return [own] }
+        return [own, origin]
+    }
+
+    /// Whether the resource a document claims is the one it had to name.
+    ///
+    /// RFC 9728 §3.3 says identical. The two are compared as strings after the
+    /// normalisation RFC 3986 allows without changing what a URL identifies — §6.2.2.1,
+    /// scheme and host in lower case; §6.2.3, a port that is the scheme's default left out
+    /// — and with a single trailing slash on the path overlooked, as it is for the issuer.
+    /// The path is otherwise compared exactly, case and percent-encoding included; a
+    /// claimed resource carrying a fragment or userinfo is never the same.
+    ///
+    /// - Parameters:
+    ///   - claimed: The `resource` in the document.
+    ///   - expected: The identifier it had to name.
+    /// - Returns: `true` if they are the same resource.
+    static func isSameResource(_ claimed: String, _ expected: String) -> Bool {
+        guard let left = canonicalResource(claimed), let right = canonicalResource(expected) else {
+            return false
+        }
+        return left == right
+    }
+
+    /// A resource identifier in the form two of them are compared in, or `nil` if it is not
+    /// one: no scheme or host, or a fragment or userinfo.
+    private static func canonicalResource(_ identifier: String) -> String? {
+        guard let components = URLComponents(string: identifier),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(), !host.isEmpty,
+              components.fragment == nil, components.user == nil, components.password == nil else {
+            return nil
+        }
+        let isDefault = (scheme == "https" && components.port == 443) || (scheme == "http" && components.port == 80)
+        let port = components.port.flatMap { isDefault ? nil : ":\($0)" } ?? ""
+        var path = components.percentEncodedPath
+        if path.hasSuffix("/") { path.removeLast() }
+        let query = components.percentEncodedQuery.map { "?\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)\(path)\(query)"
     }
 }

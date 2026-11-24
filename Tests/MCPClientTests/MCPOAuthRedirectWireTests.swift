@@ -149,7 +149,8 @@ struct MCPOAuthRedirectWireTests {
 
     // MARK: - Metadata
 
-    static let resourceDocument = #"{"resource":"https://mcp.example","authorization_servers":["https://auth.example"]}"#
+    /// Names the server that serves it, as RFC 9728 §3.3 requires of a document that is used.
+    static let resourceDocument = #"{"resource":"{self}/mcp","authorization_servers":["https://auth.example"]}"#
 
     @Test("A metadata fetch does not follow a redirect to another origin",
           .timeLimit(.minutes(1)), arguments: statuses)

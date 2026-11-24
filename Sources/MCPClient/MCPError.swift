@@ -92,4 +92,22 @@ public enum MCPError: Error, Sendable, Equatable {
     ///     are deliberately left out, so this is safe to log.
     ///   - reason: Why it was refused, naming the status and the origin that was configured.
     case redirectRejected(destination: String, reason: String)
+
+    /// A server sent one piece of a response larger than this client will read.
+    ///
+    /// A response body, a Server-Sent Event and an OAuth document are each read into memory
+    /// before they are decoded, so each has a limit: without one, how much memory a
+    /// connection costs is the server's to choose. When a limit is passed the read stops —
+    /// the rest is not buffered — and this is thrown. It is not transient: the same request
+    /// draws the same response.
+    ///
+    /// For a transport the limits are ``MCPResponseLimits``, 10 MiB each unless configured;
+    /// raise them for a server known to send more. For an OAuth metadata, registration or
+    /// token response the limit is 1 MiB and is not configurable.
+    ///
+    /// - Parameters:
+    ///   - limit: The limit that was passed, in bytes.
+    ///   - reason: What was being read and from which origin. Nothing the server sent is
+    ///     quoted.
+    case responseTooLarge(limit: Int, reason: String)
 }

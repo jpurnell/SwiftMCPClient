@@ -81,8 +81,12 @@ actor MCPMessageDispatcher {
     /// The notification stream. Created once and shared.
     let notificationStream: AsyncStream<MCPNotification>
 
-    init(transport: MCPTransport) {
+    /// Where the read loop's diagnostics go. Injected so a test can read what was written.
+    private let logger: Logger
+
+    init(transport: MCPTransport, logger: Logger = Logger(label: "MCPClient.MCPMessageDispatcher")) {
         self.transport = transport
+        self.logger = logger
         var continuation: AsyncStream<MCPNotification>.Continuation!
         self.notificationStream = AsyncStream { continuation = $0 }
         self.notificationContinuation = continuation
@@ -136,6 +140,19 @@ actor MCPMessageDispatcher {
         }
     }
 
+    /// Stops waiting for a response nobody is waiting for any more.
+    ///
+    /// Called when a request's time limit passes. The wait registered by
+    /// ``waitForResponse(id:)`` does not notice that its task was cancelled, so it is ended
+    /// here; and an answer that arrives afterwards, or had already been buffered, is dropped
+    /// rather than kept for ever.
+    ///
+    /// - Parameter id: The request's id.
+    func abandon(id: Int) {
+        bufferedResponses.removeValue(forKey: id)
+        pendingRequests.removeValue(forKey: id)?.resume(throwing: MCPError.timeout)
+    }
+
     // MARK: - Private
 
     private func readLoop() async {
@@ -144,14 +161,17 @@ actor MCPMessageDispatcher {
             do {
                 data = try await transport.receive()
             } catch {
-                let logger = Logger(label: "MCPClient.MCPMessageDispatcher")
-                // logging: error details needed for transport diagnostics
-                logger.warning("transport receive failed: \(error.localizedDescription)")
-                transportError = error
+                // What every waiting request is told, and every later one: this package's own
+                // error passed on, anything else named by kind. The library's description of
+                // its own error goes neither to the log nor to the caller.
+                let failure = TransportFailure.receiveFailure(error)
+                // logging: swift-log has no privacy annotations; the failure's kind only — never the error's own text
+                logger.warning("transport receive failed: \(TransportFailure.kind(of: error))")
+                transportError = failure
                 let pending = pendingRequests
                 pendingRequests.removeAll()
                 for (_, continuation) in pending {
-                    continuation.resume(throwing: error)
+                    continuation.resume(throwing: failure)
                 }
                 notificationContinuation?.finish()
                 notificationContinuation = nil

@@ -25,10 +25,19 @@ struct SSEEventStream: Sendable {
     /// stream rather than ending it quietly, because a dropped connection presented as a clean
     /// finish reads as a server with nothing more to say.
     ///
-    /// - Parameter bytes: The response body, as chunks arrive.
+    /// - Parameters:
+    ///   - bytes: The response body, as chunks arrive.
+    ///   - logger: Where a failed body is noted. Injected so a test can read what was written.
+    ///   - maximumEventBytes: The most bytes one event may hold. An event that passes it
+    ///     ends the stream with ``MCPError/responseTooLarge(limit:reason:)``, and nothing
+    ///     more is read: an event ends at a blank line, and a server need never send one.
+    ///   - url: Where the stream is being read from, for that error. Only its origin is named.
     /// - Returns: The events, in order.
     static func events<Bytes: AsyncSequence & Sendable>(
-        from bytes: Bytes
+        from bytes: Bytes,
+        logger: Logger = Logger(label: "MCPClient.SSEEventStream"),
+        maximumEventBytes: Int = MCPResponseLimits.defaultMaximumBytes,
+        reaching url: URL? = nil
     ) -> AsyncThrowingStream<SSEEvent, any Error> where Bytes.Element == ByteBuffer {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -47,6 +56,11 @@ struct SSEEventStream: Sendable {
                         for event in parser.append(text) {
                             continuation.yield(event)
                         }
+                        // After every chunk, so what is held for an unfinished event is
+                        // never more than the limit and one chunk.
+                        guard parser.pendingBytes <= maximumEventBytes else {
+                            throw MCPResponseLimits.exceeded(maximumEventBytes, reading: "event", from: url)
+                        }
                     }
                     // Whatever is still buffered was never terminated by a blank line, so it
                     // is not an event. Dropped deliberately.
@@ -56,9 +70,8 @@ struct SSEEventStream: Sendable {
                     // same as throwing it up a call stack: a consumer that has stopped
                     // iterating never sees this one, and a body that died mid-response is
                     // worth a line either way.
-                    let logger = Logger(label: "MCPClient.SSEEventStream")
-                    // logging: why a response body stopped, which the consumer may never see
-                    logger.warning("event stream ended in failure: \(error.localizedDescription)")
+                    // logging: swift-log has no privacy annotations; why a response body stopped, by kind only — never the error's own text
+                    logger.warning("event stream ended in failure: \(TransportFailure.kind(of: error))")
                     continuation.finish(throwing: error)
                 }
             }

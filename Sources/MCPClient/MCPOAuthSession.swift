@@ -44,8 +44,16 @@ public actor MCPOAuthSession {
     ///   - setup: How discovery is performed. Injected for tests.
     ///   - storage: Where the credential lives.
     ///   - tokenTransport: How token requests reach the provider. Defaults to
-    ///     ``MCPOAuthTokenTransport``, which follows no redirect. Injected for tests; a
-    ///     transport supplied here decides for itself what a redirect does.
+    ///     ``MCPOAuthTokenTransport``.
+    ///
+    ///     **A transport of your own replaces every protection the default has.** The
+    ///     default follows no redirect, reads at most 1 MiB, and sends no cookie or stored
+    ///     credential. None of that is applied to a transport passed here — the request is
+    ///     its to make, and this session never sees it. `swift-oauth`'s own
+    ///     `URLSessionTokenTransport`, at the version this package resolves, follows a
+    ///     `307` to any origin and re-posts the authorization code, the PKCE verifier, the
+    ///     refresh token and the client secret to it. Pass one only if it refuses redirects
+    ///     itself.
     ///   - registrations: Where this client's registration with the server lives. Defaults to
     ///     memory, which is the behaviour of a session that cannot be resumed: a caller that
     ///     wants ``resume(server:tenant:)`` to work across launches has to say where the
@@ -342,8 +350,16 @@ public actor MCPOAuthSession {
     /// The registration goes too. It carries a `client_secret`, and a secret that outlives the
     /// session it belonged to is one nothing will ever come back to remove.
     ///
-    /// - Throws: `ConnectionError` if revocation failed, or a storage error if the registration
-    ///   could not be removed — an erasure that did not happen is reported, not assumed.
+    /// **A failed revocation is not reported.** `swift-oauth` 0.11.1, the version this
+    /// package resolves, removes the local credential and then discards whatever the
+    /// revocation request came to — a refusal, a redirect, an unreachable server. So this
+    /// returning normally means the credential and the registration are gone from *this*
+    /// machine; it does not mean the refresh token is dead at the authorization server,
+    /// where it stays valid until it expires. `swift-oauth` reports the failure from its
+    /// next release on, and this method will when that release is the one resolved.
+    ///
+    /// - Throws: A storage error if the credential or the registration could not be removed
+    ///   — an erasure that did not happen is reported, not assumed.
     public func signOut() async throws {
         try await connection?.disconnect()
         if let connectionID {

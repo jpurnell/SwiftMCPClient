@@ -70,6 +70,9 @@ actor RedirectStubServer {
         case droppedStream(eventID: String)
         /// A bare status with an empty JSON body.
         case status(HTTPResponseStatus)
+        /// `200` with this JSON — a token response, when the server is standing in for a
+        /// token endpoint.
+        case body(String)
     }
 
     /// One request, as it arrived.
@@ -114,6 +117,9 @@ actor RedirectStubServer {
     ///   - session: The `Mcp-Session-Id` a Streamable HTTP response assigns.
     ///   - document: The JSON a `GET` that did not ask for a stream is answered with — a
     ///     metadata document, when the server is standing in for an authorization server.
+    ///     `{self}` in it is replaced with this server's own origin.
+    ///   - setCookie: A `Set-Cookie` value to put on every redirect and every answer that
+    ///     is not a stream.
     ///   - tls: The identity to present. Supplying one makes this an HTTPS server.
     /// - Returns: The running server.
     static func start(
@@ -123,11 +129,13 @@ actor RedirectStubServer {
         endpoint: String = "/messages",
         session: String = "stub-session",
         document: String = "{}",
+        setCookie: String? = nil,
         tls: NIOSSLContext? = nil
     ) async throws -> RedirectStubServer {
         let script = RedirectScript(
             kind: kind, redirects: redirects, postReply: postReply,
             endpoint: endpoint, session: session, document: document,
+            setCookie: setCookie,
             scheme: tls == nil ? "http" : "https")
         let server = RedirectStubServer(script: script, servesTLS: tls != nil, kind: kind)
 
@@ -222,6 +230,7 @@ private final class RedirectScript: @unchecked Sendable {
     let endpoint: String
     let session: String
     let document: String
+    let setCookie: String?
     let scheme: String
 
     init(
@@ -231,8 +240,10 @@ private final class RedirectScript: @unchecked Sendable {
         endpoint: String,
         session: String,
         document: String,
+        setCookie: String?,
         scheme: String
     ) {
+        self.setCookie = setCookie
         self.kind = kind
         self.redirects = redirects
         self.postReply = postReply
@@ -325,7 +336,7 @@ private final class RedirectStubHandler: ChannelInboundHandler, @unchecked Senda
                 openStream(context: context)
             case .GET:
                 // A `GET` that did not ask for a stream: a document fetch. Answered and closed.
-                finish(context: context, status: .ok, contentType: "application/json", body: script.document)
+                finish(context: context, status: .ok, contentType: "application/json", body: script.document.replacingOccurrences(of: "{self}", with: ownOrigin(context)))
             case .POST:
                 answerPost(context: context)
             default:
@@ -348,6 +359,7 @@ private final class RedirectStubHandler: ChannelInboundHandler, @unchecked Senda
                 .replacingOccurrences(of: "{configured}", with: script.pointsBackTo))
         headers.add(name: "Content-Length", value: "0")
         headers.add(name: "Connection", value: "close")
+        if let cookie = script.setCookie { headers.add(name: "Set-Cookie", value: cookie) }
         let head = HTTPResponseHead(version: .http1_1, status: rule.status, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
         endAndClose(context)
@@ -381,6 +393,8 @@ private final class RedirectStubHandler: ChannelInboundHandler, @unchecked Senda
                 body: #"{"jsonrpc":"2.0","id":1,"result":{}}"#)
         case .status(let status):
             finish(context: context, status: status, contentType: "application/json", body: "{}")
+        case .body(let body):
+            finish(context: context, status: .ok, contentType: "application/json", body: body)
         case .droppedStream(let eventID):
             var headers = HTTPHeaders()
             headers.add(name: "Content-Type", value: "text/event-stream")
@@ -410,6 +424,7 @@ private final class RedirectStubHandler: ChannelInboundHandler, @unchecked Senda
         headers.add(name: "Content-Type", value: contentType)
         headers.add(name: "Content-Length", value: String(body.utf8.count))
         headers.add(name: "Connection", value: "close")
+        if let cookie = script.setCookie { headers.add(name: "Set-Cookie", value: cookie) }
         if script.kind == .streamable {
             headers.add(name: "Mcp-Session-Id", value: script.session)
         }

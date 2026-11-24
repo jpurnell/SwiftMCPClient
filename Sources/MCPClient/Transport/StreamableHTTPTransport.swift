@@ -118,6 +118,8 @@ public actor StreamableHTTPTransport: MCPTransport {
         case redirectRefused
         /// The transport was disconnected.
         case cancelled
+        /// The stream carried an event larger than ``MCPResponseLimits/maximumEventBytes``.
+        case eventTooLarge
     }
 
     /// Why the server stream's loop ended; `nil` while it is running or was never started.
@@ -144,6 +146,9 @@ public actor StreamableHTTPTransport: MCPTransport {
     private let connectionTimeout: TimeAmount
     private let serverTrust: ServerTrust
 
+    /// How much one response body, and one event, may hold.
+    private let limits: MCPResponseLimits
+
     /// The HTTP client used for all requests.
     private var httpClient: HTTPClient?
 
@@ -166,6 +171,31 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Whether the transport has been connected.
     private var isConnected: Bool = false
 
+    /// Where this transport's diagnostics go.
+    ///
+    /// A `Logger` of its own rather than one made at each call site, so that what the
+    /// transport says can be observed: a test hands it a logger that records, through
+    /// ``useDiagnostics(_:)``. Nothing outside the module can replace it.
+    private var logger = Logger(label: "MCPClient.StreamableHTTPTransport")
+
+    /// Whether the plaintext-credentials warning has been written by this transport.
+    private var hasWarnedOfPlaintext = false
+
+    /// Sends this transport's diagnostics to another logger. Test visibility only.
+    ///
+    /// - Parameter logger: The logger to write to from now on.
+    func useDiagnostics(_ logger: Logger) {
+        self.logger = logger
+    }
+
+    /// Warns — once in this transport's life — that configured credentials are about to
+    /// cross a network unencrypted.
+    private func warnOfPlaintextOnce() {
+        guard !hasWarnedOfPlaintext else { return }
+        hasWarnedOfPlaintext = HTTPOrigin.warnIfPlaintextToRemote(
+            url, carriesCredentials: authorization != nil || !headers.isEmpty, logger: logger)
+    }
+
     /// Creates a new Streamable HTTP transport.
     ///
     /// - Parameters:
@@ -185,13 +215,17 @@ public actor StreamableHTTPTransport: MCPTransport {
     ///     to ``ServerTrust/system``. For a self-signed or privately issued certificate,
     ///     supply it with ``ServerTrust/onlyRoots(_:)`` or ``ServerTrust/additionalRoots(_:)``;
     ///     the chain and the hostname are verified either way.
+    ///   - limits: How much one response body, and one Server-Sent Event, may hold before
+    ///     the read is abandoned with ``MCPError/responseTooLarge(limit:reason:)``. Defaults
+    ///     to ``MCPResponseLimits/standard``, 10 MiB each.
     public init(
         url: URL,
         headers: [String: String] = [:],
         authorization: AuthorizationProvider? = nil,
         openServerStream: Bool = true,
         connectionTimeout: TimeInterval = 30.0,
-        serverTrust: ServerTrust = .system
+        serverTrust: ServerTrust = .system,
+        limits: MCPResponseLimits = .standard
     ) {
         self.url = url
         self.headers = headers
@@ -199,6 +233,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         self.opensServerStream = openServerStream
         self.connectionTimeout = .seconds(clamping: connectionTimeout)
         self.serverTrust = serverTrust
+        self.limits = limits
     }
 
     /// Removed: this did not trust a self-signed certificate, it disabled verification.
@@ -228,6 +263,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         self.opensServerStream = openServerStream
         self.connectionTimeout = .seconds(clamping: connectionTimeout)
         self.serverTrust = .system
+        self.limits = .standard
     }
 
     /// The TLS configuration every request is made with.
@@ -311,7 +347,7 @@ public actor StreamableHTTPTransport: MCPTransport {
                 }
                 isReconnect = true
                 var delivered = false
-                for try await event in SSEEventStream.events(from: body) {
+                for try await event in events(in: body) {
                     guard !Task.isCancelled else {
                         serverStreamEnding = .cancelled
                         return
@@ -346,19 +382,30 @@ public actor StreamableHTTPTransport: MCPTransport {
                 // ends here rather than backing off into it forever. Request and response
                 // carry on without this channel. The refusal itself is logged, at error, where
                 // it was made; this says what it cost.
-                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
                 // logging: the consequence of a refused redirect — no value from the request or the response
                 logger.warning("the server stream will not be reopened: its GET was answered with a redirect this client does not follow")
                 serverStreamEnding = .redirectRefused
                 return
+            } catch let MCPError.responseTooLarge(_, reason) {
+                // Not reconnected. A reconnect carries the last event id seen, and the server
+                // answers it with the event that follows — this one, at the same size. Request
+                // and response carry on without the channel.
+                // logging: swift-log has no privacy annotations; the limit and the configured origin — nothing the server sent
+                logger.error("the server stream will not be reopened: \(reason)")
+                serverStreamEnding = .eventTooLarge
+                return
             } catch {
                 attempt += 1
-                let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
                 // logging: why the server stream dropped, which no caller is awaiting — the failure's kind and the configured origin
                 logger.debug("server stream dropped: \(TransportFailure.reason(for: error, reaching: url))")
             }
         }
         serverStreamEnding = .cancelled
+    }
+
+    /// The events in a response body, each held to ``MCPResponseLimits/maximumEventBytes``.
+    private func events(in body: HTTPClientResponse.Body) -> AsyncThrowingStream<SSEEvent, any Error> {
+        SSEEventStream.events(from: body, maximumEventBytes: limits.maximumEventBytes, reaching: url)
     }
 
     /// Asks the server to open its stream.
@@ -412,9 +459,7 @@ public actor StreamableHTTPTransport: MCPTransport {
             isConnected = true
             return
         }
-        HTTPOrigin.warnIfPlaintextToRemote(
-            url, carriesCredentials: authorization != nil || !headers.isEmpty,
-            label: "MCPClient.StreamableHTTPTransport")
+        warnOfPlaintextOnce()
         httpClient = makeHTTPClient()
         isConnected = true
     }
@@ -464,7 +509,6 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Tells the server the session is over. Best effort, bounded, and never unauthenticated
     /// when there is a provider to authenticate it.
     private func terminateSession(_ sid: String, on client: HTTPClient) async {
-        let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
         // One deadline for asking the provider and for the request it authorises.
         let deadline = NIODeadline.now() + connectionTimeout
 
@@ -521,8 +565,11 @@ public actor StreamableHTTPTransport: MCPTransport {
     ///   ``MCPError/redirectRejected(destination:reason:)`` if the server redirects the POST
     ///   off the configured origin, answers it with a `301`, `302` or `303` — which cannot
     ///   carry a `POST` — or redirects it in a loop or more than five times;
-    ///   ``MCPError/connectionFailed(reason:)`` if the request could not be made, with a
-    ///   reason that names the kind of failure and the server's origin.
+    ///   ``MCPError/responseTooLarge(limit:reason:)`` if a JSON response body is larger than
+    ///   ``MCPResponseLimits/maximumResponseBytes``;
+    ///   ``MCPError/connectionFailed(reason:)`` if the request could not be made or its
+    ///   response body could not be read, with a reason that names the kind of failure and
+    ///   the server's origin.
     public func send(_ data: Data) async throws {
         guard let client = httpClient, isConnected else {
             throw MCPError.connectionFailed(reason: "Not connected — call connect() first")
@@ -601,7 +648,8 @@ public actor StreamableHTTPTransport: MCPTransport {
 
         // A single JSON document has nothing to stream, and routing it through the incremental
         // path would be machinery for no gain.
-        let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB limit
+        let body = try await MCPResponseLimits.collect(
+            response, upTo: limits.maximumResponseBytes, from: url)
         let payloads = try StreamableHTTPBodyDecoder.decode(
             body: Data(buffer: body),
             contentType: contentType)
@@ -637,7 +685,7 @@ public actor StreamableHTTPTransport: MCPTransport {
         // being read, not merely that the first body ended.
         defer { finishedResponsePumps += 1 }
         do {
-            for try await event in SSEEventStream.events(from: body) {
+            for try await event in events(in: body) {
                 // Recorded before the payload is delivered: a consumer that acts on the
                 // message and then drops the connection should resume after this event, not
                 // before it.
@@ -646,8 +694,13 @@ public actor StreamableHTTPTransport: MCPTransport {
                 }
                 enqueue(event)
             }
+        } catch let MCPError.responseTooLarge(_, reason) {
+            // Not resumed: a resumption asks for the events after the last one seen, and the
+            // first of those is the one that was too large. The request it answered is lost,
+            // and its caller finds that out as it finds out about any missing response.
+            // logging: swift-log has no privacy annotations; the limit and the configured origin — nothing the server sent
+            logger.error("abandoned a response stream: \(reason)")
         } catch {
-            let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
             // logging: a response stream that died, which the waiting caller sees only as silence — the failure's kind and the configured origin
             logger.warning("response stream ended in failure: \(TransportFailure.reason(for: error, reaching: url))")
 
@@ -674,7 +727,7 @@ public actor StreamableHTTPTransport: MCPTransport {
 
         do {
             guard let body = try await openServerStream(resuming: stream) else { return }
-            for try await event in SSEEventStream.events(from: body) {
+            for try await event in events(in: body) {
                 if Task.isCancelled { return }
                 if let id = event.id {
                     await session.record(eventID: id, for: stream)
@@ -685,7 +738,6 @@ public actor StreamableHTTPTransport: MCPTransport {
             // One attempt. A resume that fails leaves the caller where it already was — a
             // request with no answer — and retrying a stream the server has stopped feeding is
             // how a lost response becomes a loop.
-            let logger = Logger(label: "MCPClient.StreamableHTTPTransport")
             // logging: the second failure, after which the request is genuinely lost — the failure's kind and the configured origin
             logger.warning("resuming a dropped response stream failed: \(TransportFailure.reason(for: error, reaching: url))")
         }
