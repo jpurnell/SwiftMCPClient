@@ -1,4 +1,4 @@
-#if canImport(Security)
+#if canImport(SwiftKeychain)
 import Foundation
 import Testing
 import SwiftOAuthClient
