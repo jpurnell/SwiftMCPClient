@@ -633,12 +633,13 @@ public actor StreamableHTTPTransport: MCPTransport {
         // delivered after the response closes is not a progress notification.
         if StreamableHTTPBodyDecoder.isEventStream(contentType) {
             let requestID = Self.requestID(of: data)
+            let requestIDValue = Self.requestIDValue(of: data)
             startedResponsePumps += 1
             let pump = Task {
                 // Captured strongly: these tasks are owned by this transport and cancelled in
                 // `disconnect()`, so there is no cycle to break — and a `weak self` here would
                 // let a body be abandoned mid-response rather than drained or cancelled.
-                await self.consume(response.body, forRequest: requestID)
+                await self.consume(response.body, forRequest: requestID, idValue: requestIDValue)
             }
             // lifecycle: cancelled in `disconnect()`, along with every other response pump.
             responsePumps.append(pump)
@@ -676,14 +677,18 @@ public actor StreamableHTTPTransport: MCPTransport {
 
     /// Feeds an SSE response body into the receive queue, event by event.
     ///
-    /// Errors are logged rather than thrown: nothing is awaiting this task, and a body that
-    /// died mid-response has already delivered whatever it delivered. The caller learns about
-    /// it the way it learns about any missing response — the request it is waiting on does not
-    /// arrive — which is the same outcome the collected path produced.
-    private func consume(_ body: HTTPClientResponse.Body, forRequest requestID: String?) async {
+    /// Errors are logged rather than thrown: nothing is awaiting this task. But the caller **is** waiting,
+    /// and a request whose response can no longer arrive must not leave it so. When the stream ends in
+    /// failure and the response did not arrive by it or by a resumption, the request is answered here with
+    /// a JSON-RPC error carrying its id (see ``failLostRequest(_:)``). Before this, the caller waited on a
+    /// request that had no answer coming, past its own timeout (SwiftMCPServer's R1 finding F1).
+    private func consume(
+        _ body: HTTPClientResponse.Body, forRequest requestID: String?, idValue: JSONRPCRequestID?
+    ) async {
         // Counted on every way out, a resumption included: "idle" means nothing is still
         // being read, not merely that the first body ended.
         defer { finishedResponsePumps += 1 }
+        var answered = false
         do {
             for try await event in events(in: body) {
                 // Recorded before the payload is delivered: a consumer that acts on the
@@ -692,14 +697,16 @@ public actor StreamableHTTPTransport: MCPTransport {
                 if let id = event.id, let requestID {
                     await session.record(eventID: id, for: .post(requestID: requestID))
                 }
+                if let requestID, Self.answers(event.data, requestID: requestID) { answered = true }
                 enqueue(event)
             }
         } catch let MCPError.responseTooLarge(_, reason) {
             // Not resumed: a resumption asks for the events after the last one seen, and the
             // first of those is the one that was too large. The request it answered is lost,
-            // and its caller finds that out as it finds out about any missing response.
+            // and so is failed, below.
             // logging: swift-log has no privacy annotations; the limit and the configured origin — nothing the server sent
             logger.error("abandoned a response stream: \(reason)")
+            if !answered { failLostRequest(idValue) }
         } catch {
             // logging: a response stream that died, which the waiting caller sees only as silence — the failure's kind and the configured origin
             logger.warning("response stream ended in failure: \(TransportFailure.reason(for: error, reaching: url))")
@@ -711,8 +718,74 @@ public actor StreamableHTTPTransport: MCPTransport {
             //
             // A clean end is not a drop and never reaches this path: the response completed,
             // and asking to resume it would ask for a replay of something already delivered.
-            await resumeResponseStream(forRequest: requestID)
+            if !answered {
+                answered = await resumeResponseStream(forRequest: requestID)
+            }
+            // Nothing can bring the response back: nothing to resume from, a resumption that failed, or one
+            // that ended without it. The caller is told, rather than left to wait.
+            if !answered { failLostRequest(idValue) }
         }
+    }
+
+    /// Answers a request whose response is lost with a JSON-RPC error carrying its id.
+    ///
+    /// Silent when the pump was cancelled (the transport is going away and its receive loop with it) or when
+    /// the request had no id to carry. The message is fixed text: nothing the server sent is echoed.
+    private func failLostRequest(_ id: JSONRPCRequestID?) {
+        guard !Task.isCancelled, let id else { return }
+        let object: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.jsonObject,
+            "error": [
+                "code": -32000,
+                "message": "The response stream ended before the response arrived."
+            ] as [String: Any],
+        ]
+        // silent: a dictionary of strings and numbers always serialises; there is nothing to report if it somehow did not
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        enqueueMessage(data)
+    }
+
+    /// Whether an event's data is the response (a result or an error) to the request with this id.
+    static func answers(_ data: String, requestID: String) -> Bool {
+        // silent: data that is not JSON is not a response, and is delivered or rejected by the caller as before
+        guard let object = try? JSONSerialization.jsonObject(with: Data(data.utf8)),
+              let fields = object as? [String: Any],
+              fields["result"] != nil || fields["error"] != nil,
+              let id = fields["id"] else { return false }
+        if let text = id as? String { return text == requestID }
+        if let number = id as? NSNumber { return number.stringValue == requestID }
+        return false
+    }
+
+    /// A request's JSON-RPC id with its type kept, so an error built for it matches what the caller sent.
+    struct JSONRPCRequestID: Sendable, Equatable {
+        private enum Value: Sendable, Equatable { case string(String), integer(Int64) }
+        private let value: Value
+
+        init?(_ any: Any) {
+            if let text = any as? String { value = .string(text) }
+            else if let number = any as? NSNumber, !(any is Bool), let integer = Int64(exactly: number) {
+                value = .integer(integer)
+            } else { return nil }
+        }
+
+        /// The id as `JSONSerialization` takes it.
+        var jsonObject: Any {
+            switch value {
+            case .string(let text): return text
+            case .integer(let integer): return integer
+            }
+        }
+    }
+
+    /// The id of a request body with its type kept, or `nil` for a notification or a body that will not parse.
+    static func requestIDValue(of data: Data) -> JSONRPCRequestID? {
+        // silent: a body that will not parse has no id to answer
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any],
+              let id = fields["id"] else { return nil }
+        return JSONRPCRequestID(id)
     }
 
     /// Reconnects a response stream that was cut off, continuing from its last event.
@@ -720,26 +793,41 @@ public actor StreamableHTTPTransport: MCPTransport {
     /// Silent when there is nothing to resume from. A stream that dropped before delivering
     /// anything has no id to continue from, and a `GET` without one asks the server to start
     /// something it has no way to relate to the request that died.
-    private func resumeResponseStream(forRequest requestID: String?) async {
-        guard let requestID else { return }
+    ///
+    /// - Returns: Whether the request's response arrived over the resumed stream. `false` for every
+    ///   other outcome, which is the caller's cue to fail the request.
+    private func resumeResponseStream(forRequest requestID: String?) async -> Bool {
+        guard let requestID else { return false }
         let stream = StreamableHTTPSession.StreamKind.post(requestID: requestID)
-        guard await session.lastEventID(for: stream) != nil else { return }
+        guard await session.lastEventID(for: stream) != nil else { return false }
 
+        var answered = false
         do {
-            guard let body = try await openServerStream(resuming: stream) else { return }
+            guard let body = try await openServerStream(resuming: stream) else { return false }
             for try await event in events(in: body) {
-                if Task.isCancelled { return }
+                if Task.isCancelled { return answered }
                 if let id = event.id {
                     await session.record(eventID: id, for: stream)
                 }
+                if Self.answers(event.data, requestID: requestID) { answered = true }
                 enqueue(event)
             }
+            // A cancelled iteration ends quietly rather than throwing, and "ended without the response" is a
+            // conclusion drawn from how the loop ended: cancellation is checked first, so a transport being
+            // disconnected is not mistaken for a stream that lost its response.
+            try Task.checkCancellation()
+            return answered
+        } catch is CancellationError {
+            // logging: the transport was disconnected while a dropped stream was being resumed; no failure, no origin
+            logger.debug("resuming a dropped response stream was cancelled")
+            return answered
         } catch {
             // One attempt. A resume that fails leaves the caller where it already was — a
             // request with no answer — and retrying a stream the server has stopped feeding is
             // how a lost response becomes a loop.
             // logging: the second failure, after which the request is genuinely lost — the failure's kind and the configured origin
             logger.warning("resuming a dropped response stream failed: \(TransportFailure.reason(for: error, reaching: url))")
+            return answered
         }
     }
 

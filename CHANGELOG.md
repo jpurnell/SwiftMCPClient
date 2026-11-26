@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A call whose response stream is lost no longer waits forever.** When a streamed response ended in failure (a stream reset, a cut connection) and the response did not arrive by it or by
+  resumption, the transport logged "response stream ended in failure" and left the caller's `callTool` pending, past the request timeout, because the timeout is not armed for a response read in the
+  background. The transport now answers such a request itself with a JSON-RPC error (`-32000`, "The response stream ended before the response arrived.") carrying the request's id, with its type kept
+  (a string id stays a string), so the call throws. This covers a stream cut before any event (nothing to resume from), a resumption the server refuses, a resumed stream that ends without the
+  response, and a response stream abandoned as too large. A response that did arrive is not followed by an error, a clean end of stream is not treated as a failure, and a transport being disconnected sends nothing.
+  Found by SwiftMCPServer's R1 matrix (finding F1, `scripts/r1/drivers`, scenario `cut`).
+
 ## [0.16.0] — 2026-11-24
 
 ### Breaking — the Keychain types are SwiftKeychain's (0.16.0)

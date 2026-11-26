@@ -320,6 +320,91 @@ struct StreamableHTTPResponseResumptionTests {
     }
 }
 
+/// A request whose response stream is lost must fail, not wait forever (SwiftMCPServer's R1 finding F1).
+///
+/// The transport logged "response stream ended in failure" and left the caller's `callTool` parked: the
+/// request timeout was not armed for a response that is read in the background. When nothing can bring the
+/// response back, the transport now answers the request itself with a JSON-RPC error carrying its id.
+@Suite("Streamable HTTP — a lost response fails its request")
+struct StreamableHTTPLostResponseTests {
+
+    /// The first message after the transport has gone quiet, or nil if nothing arrives.
+    ///
+    /// `receive()` does not observe cancellation, so a missing fix would hang the suite rather than fail a test.
+    /// The wait is therefore bounded by `disconnect()`, which fails a parked `receive()`; the result then says
+    /// whether a message had been queued for it.
+    private func nextMessage(from transport: StreamableHTTPTransport) async throws -> String? {
+        for _ in 0..<60 {
+            if await transport.responseStreamsAreIdle { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let waiting = Task { try? await transport.receive() }
+        try await Task.sleep(for: .milliseconds(300))
+        try await transport.disconnect()
+        return await waiting.value.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    @Test("A stream cut off before any event fails the request with its id", .timeLimit(.minutes(1)))
+    func cutBeforeAnyEvent() async throws {
+        let server = try await StubHTTPServer.start(replies: [.droppedBeforeAnyEvent()])
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":7,"method":"tools/call"}"#.utf8))
+
+        let message = try await nextMessage(from: transport)
+        await server.stop()
+        let text = try #require(message, "the request was left waiting: no response and no error arrived")
+        #expect(text.contains(#""id":7"#), "the error must carry the id of the request it fails: \(text)")
+        #expect(text.contains(#""error""#), "it must be a JSON-RPC error: \(text)")
+    }
+
+    @Test("A string id comes back as a string", .timeLimit(.minutes(1)))
+    func stringIdKeepsItsType() async throws {
+        let server = try await StubHTTPServer.start(replies: [.droppedBeforeAnyEvent()])
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":"abc","method":"tools/call"}"#.utf8))
+
+        let message = try await nextMessage(from: transport)
+        await server.stop()
+        let text = try #require(message, "the request was left waiting")
+        #expect(text.contains(#""id":"abc""#), "a string id must stay a string, or the client cannot match it: \(text)")
+    }
+
+    @Test("A stream cut off after an event, whose resumption is refused, fails the request", .timeLimit(.minutes(1)))
+    func resumptionRefused() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.droppedAfter(#"{"jsonrpc":"2.0","method":"notifications/progress"}"#, id: "evt-1")],
+            serverStream: .unsupported)
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#.utf8))
+
+        let progress = try await transport.receive()
+        #expect(String(decoding: progress, as: UTF8.self).contains("progress"))
+        let message = try await nextMessage(from: transport)
+        await server.stop()
+        let text = try #require(message, "the request was left waiting after its resumption was refused")
+        #expect(text.contains(#""id":3"#) && text.contains(#""error""#), "\(text)")
+    }
+
+    @Test("A response that did arrive is not followed by an error", .timeLimit(.minutes(1)))
+    func answeredRequestGetsNoError() async throws {
+        let server = try await StubHTTPServer.start(
+            replies: [.droppedAfter(#"{"jsonrpc":"2.0","id":5,"result":{}}"#, id: "evt-1")],
+            serverStream: .unsupported)
+        let transport = StreamableHTTPTransport(url: try await server.url)
+        try await transport.connect()
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":5,"method":"tools/call"}"#.utf8))
+
+        let result = try await transport.receive()
+        #expect(String(decoding: result, as: UTF8.self).contains(#""result""#))
+        let extra = try await nextMessage(from: transport)
+        await server.stop()
+        #expect(extra == nil, "the request was already answered; nothing more may arrive: \(extra ?? "")")
+    }
+}
+
 // MARK: - Bounded waiting
 
 /// Waits, briefly and with a bound, for the client to open a server stream.
