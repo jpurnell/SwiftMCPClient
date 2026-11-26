@@ -29,15 +29,20 @@ actor StubHTTPServer {
         /// terminator, so the client sees a failure rather than a clean end. That distinction
         /// is what a resumable transport has to act on.
         let abortsAfter: (event: String, id: String)?
+        /// Whether to cut the stream off after its head, before any event: the response a
+        /// server ends abnormally with nothing delivered, so there is no event id to resume from.
+        let abortsBeforeAnyEvent: Bool
         /// Whether to send an id-bearing event with no data before the real one.
         let leadsWithEmptyEvent: Bool
 
         init(status: HTTPResponseStatus, body: String,
              abortsAfter: (event: String, id: String)? = nil,
+             abortsBeforeAnyEvent: Bool = false,
              leadsWithEmptyEvent: Bool = false) {
             self.status = status
             self.body = body
             self.abortsAfter = abortsAfter
+            self.abortsBeforeAnyEvent = abortsBeforeAnyEvent
             self.leadsWithEmptyEvent = leadsWithEmptyEvent
         }
 
@@ -49,6 +54,11 @@ actor StubHTTPServer {
         /// Streams one event with an id, then drops the connection.
         static func droppedAfter(_ event: String, id: String) -> Reply {
             Reply(status: .ok, body: "", abortsAfter: (event, id))
+        }
+
+        /// An SSE response whose stream is cut off after the head, with no event delivered.
+        static func droppedBeforeAnyEvent() -> Reply {
+            Reply(status: .ok, body: "", abortsBeforeAnyEvent: true)
         }
 
         /// An SSE response that leads with an empty-data event, as the reference server does
@@ -390,6 +400,20 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // A stream the server cuts off: SSE head, one event, then the connection goes away
         // without a terminator. The client must see this as a failure, not a clean end.
+        if reply.abortsBeforeAnyEvent {
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Mcp-Session-Id", value: "stub-session")
+            let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+            let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.writeAndFlush(wrapOutboundOut(.head(head))).whenComplete { _ in
+                // No event and no `.end`: the stream dies with nothing delivered.
+                bound.value.close(mode: .all, promise: nil)
+            }
+            return
+        }
+
         if let abort = reply.abortsAfter {
             var headers = HTTPHeaders()
             headers.add(name: "Content-Type", value: "text/event-stream")

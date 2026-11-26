@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-11-26
+
+### Fixed
+- **A call whose response stream is lost no longer waits forever.** When a streamed response ended in failure (a stream reset, a cut connection) and the response did not arrive by it or by
+  resumption, the transport logged "response stream ended in failure" and left the caller's `callTool` pending, past the request timeout, because the timeout is not armed for a response read in the
+  background. The transport now answers such a request itself with a JSON-RPC error (`-32000`, "The response stream ended before the response arrived.") carrying the request's id, with its type kept
+  (a string id stays a string), so the call throws. This covers a stream cut before any event (nothing to resume from), a resumption the server refuses, a resumed stream that ends without the
+  response, and a response stream abandoned as too large. A response that did arrive is not followed by an error, a clean end of stream is not treated as a failure, and a transport being disconnected sends nothing.
+  Found by SwiftMCPServer's R1 matrix (finding F1, `scripts/r1/drivers`, scenario `cut`). Verified against that scenario on 2026-11-26: with this fix the caller sees the error 9 s into a call whose stream the server cut at 8 s (`cut.error-seen` PASS, `cut.next-call` PASS); the same scenario on 0.15.0 hangs for the full 90 s.
+
 ## [0.16.0] — 2026-11-24
 
 ### Breaking — the Keychain types are SwiftKeychain's (0.16.0)
@@ -1166,7 +1176,8 @@ and Linux.
 - TransportGuide DocC article
 - Initial MCPClient package with HTTP/SSE transport
 
-[Unreleased]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/jpurnell/SwiftMCPClient/compare/v0.13.0...v0.14.0
